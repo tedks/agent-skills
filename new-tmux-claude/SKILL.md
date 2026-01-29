@@ -81,28 +81,28 @@ Tell the user:
 
 ## Helper Scripts
 
-Scripts in `~/Projects/dotfiles/scripts/` for managing Claude instances:
+Scripts bundled with this skill in `~/.claude/skills/new-tmux-claude/scripts/`:
 
 ### claude-spawn.sh
 
 Create a new tmux window with Claude:
 ```bash
-claude-spawn.sh <session:window-name> [directory] [claude-args...]
+~/.claude/skills/new-tmux-claude/scripts/claude-spawn.sh <session:window-name> [directory] [claude-args...]
 
 # Examples:
-claude-spawn.sh chaos:review           # New window in cwd
-claude-spawn.sh chaos:review ./project # New window in ./project
-claude-spawn.sh chaos:review . --resume abc123  # Resume session
+~/.claude/skills/new-tmux-claude/scripts/claude-spawn.sh chaos:review           # New window in cwd
+~/.claude/skills/new-tmux-claude/scripts/claude-spawn.sh chaos:review ./project # New window in ./project
+~/.claude/skills/new-tmux-claude/scripts/claude-spawn.sh chaos:review . --resume abc123  # Resume session
 ```
 
 ### claude-send.sh
 
 Send a message to a running Claude instance:
 ```bash
-claude-send.sh <window> <message>
+~/.claude/skills/new-tmux-claude/scripts/claude-send.sh <window> <message>
 
 # Example:
-claude-send.sh chaos:review "run the tests"
+~/.claude/skills/new-tmux-claude/scripts/claude-send.sh chaos:review "run the tests"
 ```
 
 This handles the timing issue where Enter gets swallowed if sent too quickly.
