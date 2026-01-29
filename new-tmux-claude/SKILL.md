@@ -83,26 +83,63 @@ Tell the user:
 
 Scripts bundled with this skill in `~/.claude/skills/new-tmux-claude/scripts/`:
 
-### claude-spawn.sh
+### Multi-Agent Scripts
 
-Create a new tmux window with Claude:
+#### agent-query.sh (Piped Mode)
+
+Query an agent non-interactively and get the response back:
+```bash
+~/.claude/skills/new-tmux-claude/scripts/agent-query.sh <agent> [options] <prompt>
+
+# Agents: claude, codex
+# Options:
+#   -d, --dir <dir>      Set working directory
+#   -m, --model <model>  Specify model
+
+# Examples:
+agent-query.sh claude "Explain this error"
+agent-query.sh codex -d ./project "Review the auth module"
+agent-query.sh codex --model o3 "Optimize this function"
+```
+
+Use this when you want to get another agent's opinion as a subagent - the response
+comes back to the calling process.
+
+#### agent-spawn.sh (Interactive Mode)
+
+Spawn an agent in a tmux window for interactive work:
+```bash
+~/.claude/skills/new-tmux-claude/scripts/agent-spawn.sh <session:window> <agent> [directory] [prompt]
+
+# Agents: claude, codex
+
+# Examples:
+agent-spawn.sh chaos:review claude ./project "Review auth module"
+agent-spawn.sh chaos:codex-help codex . "Help me refactor this"
+```
+
+### Claude-Specific Scripts
+
+#### claude-spawn.sh
+
+Create a new tmux window with Claude (simpler interface for Claude-only):
 ```bash
 ~/.claude/skills/new-tmux-claude/scripts/claude-spawn.sh <session:window-name> [directory] [claude-args...]
 
 # Examples:
-~/.claude/skills/new-tmux-claude/scripts/claude-spawn.sh chaos:review           # New window in cwd
-~/.claude/skills/new-tmux-claude/scripts/claude-spawn.sh chaos:review ./project # New window in ./project
-~/.claude/skills/new-tmux-claude/scripts/claude-spawn.sh chaos:review . --resume abc123  # Resume session
+claude-spawn.sh chaos:review           # New window in cwd
+claude-spawn.sh chaos:review ./project # New window in ./project
+claude-spawn.sh chaos:review . --resume abc123  # Resume session
 ```
 
-### claude-send.sh
+#### claude-send.sh
 
 Send a message to a running Claude instance:
 ```bash
 ~/.claude/skills/new-tmux-claude/scripts/claude-send.sh <window> <message>
 
 # Example:
-~/.claude/skills/new-tmux-claude/scripts/claude-send.sh chaos:review "run the tests"
+claude-send.sh chaos:review "run the tests"
 ```
 
 This handles the timing issue where Enter gets swallowed if sent too quickly.
