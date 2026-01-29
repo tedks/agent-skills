@@ -79,6 +79,68 @@ Tell the user:
 - If a worktree was created, the path and branch name
 - How to switch to it: `Ctrl-b <window-number>` or `tmux select-window -t <name>`
 
+## Helper Scripts
+
+Scripts in `~/Projects/dotfiles/scripts/` for managing Claude instances:
+
+### claude-spawn.sh
+
+Create a new tmux window with Claude:
+```bash
+claude-spawn.sh <session:window-name> [directory] [claude-args...]
+
+# Examples:
+claude-spawn.sh chaos:review           # New window in cwd
+claude-spawn.sh chaos:review ./project # New window in ./project
+claude-spawn.sh chaos:review . --resume abc123  # Resume session
+```
+
+### claude-send.sh
+
+Send a message to a running Claude instance:
+```bash
+claude-send.sh <window> <message>
+
+# Example:
+claude-send.sh chaos:review "run the tests"
+```
+
+This handles the timing issue where Enter gets swallowed if sent too quickly.
+Uses a 1.5 second delay between text and Enter.
+
+## Detecting Idle State
+
+Claude Code has an `idle_prompt` notification hook that fires after 60+ seconds
+of waiting for user input. To detect when claudes are ready for input:
+
+1. Configure an `idle_prompt` hook in `.claude/settings.json`:
+   ```json
+   {
+     "hooks": {
+       "idle_prompt": [{
+         "matcher": "",
+         "hooks": [{
+           "type": "command",
+           "command": "touch /tmp/claude-ready-$CLAUDE_SESSION_ID"
+         }]
+       }]
+     }
+   }
+   ```
+
+2. Check for ready files:
+   ```bash
+   ls /tmp/claude-ready-* 2>/dev/null
+   ```
+
+3. Clear ready state after sending:
+   ```bash
+   rm -f /tmp/claude-ready-$session_id
+   ```
+
+Alternatively, session JSONL files in `~/.claude/projects/` contain all events
+and can be parsed to determine state.
+
 ## Notes
 
 - The new Claude instance runs interactively in the new window
