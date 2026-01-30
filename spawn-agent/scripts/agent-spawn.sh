@@ -33,14 +33,9 @@ prompt="${4:-}"
 session="${target%%:*}"
 window="${target#*:}"
 
-# Build agent command
+# Validate agent
 case "$agent" in
-    claude)
-        agent_bin="claude"
-        ;;
-    codex)
-        agent_bin="codex"
-        ;;
+    claude|codex) ;;
     *)
         echo "Unknown agent: $agent" >&2
         echo "Supported agents: claude, codex" >&2
@@ -54,14 +49,15 @@ if ! tmux has-session -t "$session" 2>/dev/null; then
     tmux new-session -d -s "$session"
 fi
 
-# Create the window
-# Use bash -c with proper escaping to handle prompts with spaces/special chars
+# Create the window and run the agent
+# Use temp file to avoid quoting issues with special characters (#, newlines, quotes)
 if [[ -n "$prompt" ]]; then
-    # Escape single quotes in prompt for bash -c
-    escaped_prompt="${prompt//\'/\'\\\'\'}"
+    prompt_file=$(mktemp)
+    printf '%s' "$prompt" > "$prompt_file"
     tmux new-window -t "$session" -n "$window" -c "$directory" \
-        bash -c "$agent_bin '${escaped_prompt}'"
+        "prompt=\$(cat '$prompt_file'); rm -f '$prompt_file'; $agent \"\$prompt\""
 else
-    tmux new-window -t "$session" -n "$window" -c "$directory" "$agent_bin"
+    tmux new-window -t "$session" -n "$window" -c "$directory" "$agent"
 fi
+
 echo "Spawned $agent in $target (dir: $directory)"
