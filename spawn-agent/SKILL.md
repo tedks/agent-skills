@@ -77,7 +77,7 @@ Claude-specific spawner with additional options:
 ~/.claude/skills/spawn-agent/scripts/claude-spawn.sh <session:window-name> [directory] [claude-args...]
 
 # Examples:
-claude-spawn.sh chaos:review . --resume abc123  # Resume session
+~/.claude/skills/spawn-agent/scripts/claude-spawn.sh chaos:review . --resume abc123  # Resume session
 ```
 
 ### claude-send.sh
@@ -87,7 +87,7 @@ Send a message to a running Claude instance:
 ~/.claude/skills/spawn-agent/scripts/claude-send.sh <window> <message>
 
 # Example:
-claude-send.sh chaos:review "run the tests"
+~/.claude/skills/spawn-agent/scripts/claude-send.sh chaos:review "run the tests"
 ```
 
 Handles the timing issue where Enter gets swallowed if sent too quickly
