@@ -1,26 +1,38 @@
 ---
 name: initialize-repo
-description: Initialize a new Sui dapp project with bare git repo, Nix flake, beads, branch protection, and agent instructions. Use when starting a new project from scratch.
-argument-hint: <project-name> [description]
+description: Initialize a new project with bare git repo, beads, branch protection, agent instructions, and optional language-specific scaffolding. Supports multiple project types.
+argument-hint: <project-name> [--type bare|sui-dapp|python|rust] [description]
 allowed-tools: Bash(~/.claude/skills/initialize-repo/scripts/*), Read, Write, Edit, Glob, Grep, WebFetch
 ---
 
 # initialize-repo
 
-Set up a new Sui dapp project from scratch with the full development environment: bare git repo with worktrees, Nix flake with pinned Sui binary, Move contract scaffold, frontend skeleton, beads issue tracking, GitHub repo with branch protection, and agent instruction files.
+Set up a new project from scratch with the full development environment: bare git repo with worktrees, beads issue tracking, GitHub repo with branch protection, agent instruction files, and optional language-specific scaffolding.
 
 ## Usage
 
 ```
-/initialize-repo <project-name> [description]
+/initialize-repo <project-name> [--type <type>] [description]
 ```
 
 ## Arguments
 
 - `<project-name>`: The project name (used for directory, GitHub repo, and package names)
+- `--type <type>`: Project type (default: `bare`). See [Project Types](#project-types).
 - `[description]`: Optional one-line description for GitHub repo and README
 
+## Project Types
+
+| Type | What it adds |
+|------|-------------|
+| `bare` | Just the infrastructure — git, beads, agents, planning. No language opinion. |
+| `sui-dapp` | Sui Move contracts, frontend skeleton, Nix flake with pinned Sui binary |
+| `python` | pyproject.toml (uv), pytest, src layout, Nix flake with Python |
+| `rust` | Cargo project, clippy/rustfmt config, Nix flake with Rust toolchain |
+
 ## What It Creates
+
+### Base (all types)
 
 ```
 ~/Projects/<project-name>/
@@ -29,20 +41,25 @@ Set up a new Sui dapp project from scratch with the full development environment
 └── master/                        # Primary worktree
     ├── .beads/redirect            # Points to bare root's .beads/
     ├── .claude/skills/            # Agent skills (copied from dotfiles)
-    ├── .envrc                     # Nix flake integration for direnv
     ├── .gitignore                 # Standard ignores
     ├── .planning/
     │   └── PLANS.md               # ExecPlan format guide
     ├── AGENTS.md                  # Agent instructions (source of truth)
     ├── CLAUDE.md -> AGENTS.md     # Symlink for Claude Code
-    ├── README.md                  # Project README
+    └── README.md                  # Project README
+```
+
+### sui-dapp additions
+
+```
+    ├── .envrc                     # Nix flake integration for direnv
     ├── contracts/<project-name>/  # Sui Move package
     │   ├── Move.toml
     │   ├── sources/
     │   └── tests/
     ├── contracts/docs/
     ├── flake.nix                  # Nix dev environment with Sui
-    ├── flake.lock                 # Pinned dependencies
+    ├── flake.lock
     ├── frontend/
     │   ├── src/
     │   ├── static/
@@ -50,11 +67,41 @@ Set up a new Sui dapp project from scratch with the full development environment
     └── zklogin-backend/           # Optional zkLogin service
 ```
 
+### python additions
+
+```
+    ├── .envrc
+    ├── .python-version
+    ├── flake.nix                  # Nix dev environment with Python + uv
+    ├── flake.lock
+    ├── pyproject.toml             # uv-managed project
+    ├── src/<project-name>/
+    │   └── __init__.py
+    └── tests/
+        └── test_placeholder.py
+```
+
+### rust additions
+
+```
+    ├── .envrc
+    ├── flake.nix                  # Nix dev environment with Rust
+    ├── flake.lock
+    ├── Cargo.toml
+    ├── rust-toolchain.toml
+    └── src/
+        └── lib.rs
+```
+
 ## Instructions
 
-When this skill is invoked, follow these steps in order. Each step depends on the previous one succeeding.
+When this skill is invoked, follow the steps in order: Part 1 (base), then Part 2 (type-specific, skip for `bare`), then Part 3 (finalization).
 
-### Step 1: Create bare repo and master worktree
+---
+
+## Part 1: Base Setup (all types)
+
+### Step B1: Create bare repo and master worktree
 
 ```bash
 cd ~/Projects
@@ -67,51 +114,16 @@ cd master
 
 The `git worktree add -b master master` command creates an orphan branch since there are no existing refs.
 
-### Step 2: Create directory structure
+### Step B2: Create base directory structure
 
 ```bash
 cd ~/Projects/<project-name>/master
-mkdir -p contracts/docs frontend/src frontend/static frontend/docs .planning .claude/skills
+mkdir -p .planning .claude/skills
 ```
 
-### Step 3: Scaffold the Move contract
+### Step B3: Write .gitignore
 
-```bash
-cd ~/Projects/<project-name>/master/contracts
-nix develop --command sui move new <project-name>
-```
-
-This generates `Move.toml`, `sources/<project-name>.move`, and `tests/<project-name>_tests.move` automatically. Do not write these by hand.
-
-### Step 4: Create placeholder files
-
-Write empty `.gitkeep` files in:
-- `contracts/docs/.gitkeep`
-- `frontend/src/.gitkeep`
-- `frontend/static/.gitkeep`
-- `frontend/docs/.gitkeep`
-
-### Step 5: Write flake.nix
-
-Write a Nix flake that provides a dev shell with the Sui CLI (pinned binary release), Node.js, pnpm, TypeScript, Rust toolchain, and general utilities. The flake should:
-
-- Use `nixpkgs` (nixos-unstable) and `flake-utils` as inputs
-- Fetch the Sui binary from GitHub releases using `pkgs.fetchurl`
-- Support `x86_64-linux` and `aarch64-linux` with platform-specific hashes
-- Use `autoPatchelfHook` for binary compatibility on NixOS/non-FHS systems
-- Include a shell hook that prints tool versions on entry
-
-To get the correct Sui version and hashes:
-1. Check the latest Sui release: `gh api repos/MystenLabs/sui/releases/latest --jq '.tag_name'`
-2. Download the tarball for each platform and compute the SRI hash: `nix hash to-sri --type sha256 $(nix-prefetch-url --unpack <url>)`
-
-### Step 6: Write .envrc
-
-Content: `use flake`
-
-### Step 7: Write .gitignore
-
-Standard ignores for Nix, Node, IDE, OS, and environment files:
+Standard ignores for Nix, Node, Python, Rust, IDE, OS, and environment files:
 
 ```
 # Nix
@@ -124,6 +136,18 @@ node_modules/
 dist/
 .next/
 .nuxt/
+
+# Python
+__pycache__/
+*.pyc
+*.egg-info/
+.venv/
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+
+# Rust
+target/
 
 # IDE
 .idea/
@@ -142,7 +166,7 @@ Thumbs.db
 .env.*.local
 ```
 
-### Step 8: Fetch PLANS.md
+### Step B4: Fetch PLANS.md
 
 Fetch the ExecPlan format guide from the OpenAI cookbook:
 
@@ -152,35 +176,7 @@ gh api repos/openai/openai-cookbook/contents/articles/codex_exec_plans.md --jq '
 
 Extract the content inside the `~~~md` code fence (starting with `# Codex Execution Plans (ExecPlans):`) and write it to `.planning/PLANS.md`. Do not include the article wrapper.
 
-### Step 9: Write AGENTS.md
-
-Write agent instructions covering:
-- Project overview and description
-- Project structure (directory layout)
-- Environment setup (Nix, direnv)
-- ExecPlans reference to `.planning/PLANS.md`
-- Beads issue tracking quick reference (`bd ready`, `bd show`, `bd create`, etc.)
-- Beads worktree setup (the portable redirect recipe using `git worktree list --porcelain`)
-- Build and test commands for contracts (`sui move build`, `sui move test`) and frontend (`pnpm install/dev/build/test`)
-- Git workflow: PR-only, draft PRs early, normal merges, stacked PRs, granular commits, worktrees
-
-### Step 10: Create CLAUDE.md symlink
-
-```bash
-cd ~/Projects/<project-name>/master
-ln -s AGENTS.md CLAUDE.md
-```
-
-### Step 11: Write README.md
-
-A user-facing README with:
-- Project title and description
-- Prerequisites (Nix)
-- Getting started (nix develop, contract build/test, frontend dev)
-- Project structure overview
-- Link to AGENTS.md for contributing
-
-### Step 12: Copy skills from dotfiles
+### Step B5: Copy skills from dotfiles
 
 Copy the skill directories from `~/Projects/dotfiles/.claude/skills/` into the repo's `.claude/skills/`:
 - `stacked-prs/`
@@ -190,28 +186,227 @@ Copy the skill directories from `~/Projects/dotfiles/.claude/skills/` into the r
 
 Preserve executable permissions on scripts.
 
-### Step 13: Generate flake.lock
+---
+
+## Part 2: Type-Specific Setup
+
+Run the section matching the selected `--type`. **Skip this part entirely for `bare`.**
+
+---
+
+### Type: sui-dapp
+
+#### Step S1: Create directory structure
+
+```bash
+cd ~/Projects/<project-name>/master
+mkdir -p contracts/docs frontend/src frontend/static frontend/docs
+```
+
+#### Step S2: Scaffold the Move contract
+
+```bash
+cd ~/Projects/<project-name>/master/contracts
+nix develop --command sui move new <project-name>
+```
+
+This generates `Move.toml`, `sources/<project-name>.move`, and `tests/<project-name>_tests.move` automatically. Do not write these by hand.
+
+#### Step S3: Create placeholder files
+
+Write empty `.gitkeep` files in:
+- `contracts/docs/.gitkeep`
+- `frontend/src/.gitkeep`
+- `frontend/static/.gitkeep`
+- `frontend/docs/.gitkeep`
+
+#### Step S4: Write flake.nix
+
+Write a Nix flake that provides a dev shell with the Sui CLI (pinned binary release), Node.js, pnpm, TypeScript, Rust toolchain, and general utilities. The flake should:
+
+- Use `nixpkgs` (nixos-unstable) and `flake-utils` as inputs
+- Fetch the Sui binary from GitHub releases using `pkgs.fetchurl`
+- Support `x86_64-linux` and `aarch64-linux` with platform-specific hashes
+- Use `autoPatchelfHook` for binary compatibility on NixOS/non-FHS systems
+- Include a shell hook that prints tool versions on entry
+
+To get the correct Sui version and hashes:
+1. Check the latest Sui release: `gh api repos/MystenLabs/sui/releases/latest --jq '.tag_name'`
+2. Download the tarball for each platform and compute the SRI hash: `nix hash to-sri --type sha256 $(nix-prefetch-url --unpack <url>)`
+
+#### Step S5: Write .envrc
+
+Content: `use flake`
+
+#### sui-dapp AGENTS.md sections
+
+Include these in the AGENTS.md written during Part 3:
+- Contract build/test: `nix develop --command sui move build`, `nix develop --command sui move test` (from contracts dir)
+- Frontend: `pnpm install`, `pnpm dev`, `pnpm build`, `pnpm test`
+- Directory layout showing contracts/, frontend/, zklogin-backend/
+
+---
+
+### Type: python
+
+#### Step P1: Create directory structure
+
+```bash
+cd ~/Projects/<project-name>/master
+mkdir -p src/<project-name> tests
+```
+
+#### Step P2: Write pyproject.toml
+
+```toml
+[project]
+name = "<project-name>"
+version = "0.1.0"
+description = "<description>"
+requires-python = ">=3.12"
+dependencies = []
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "ruff>=0.4",
+]
+
+[tool.ruff]
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+```
+
+#### Step P3: Write initial source files
+
+- `src/<project-name>/__init__.py`: empty file
+- `tests/test_placeholder.py`:
+  ```python
+  def test_placeholder():
+      pass
+  ```
+
+#### Step P4: Write .python-version
+
+Content: `3.12`
+
+#### Step P5: Write flake.nix
+
+Write a Nix flake providing a dev shell with Python 3.12, uv, and ruff:
+
+- Use `nixpkgs` (nixos-unstable) and `flake-utils` as inputs
+- Support `x86_64-linux` and `aarch64-linux`
+- Include a shell hook that prints Python and uv versions
+
+#### Step P6: Write .envrc
+
+Content: `use flake`
+
+#### python AGENTS.md sections
+
+Include these in the AGENTS.md written during Part 3:
+- Package management: `uv sync`, `uv add <pkg>`
+- Testing: `uv run pytest`
+- Linting: `uv run ruff check .`, `uv run ruff format .`
+- Src layout: `src/<project-name>/`
+
+---
+
+### Type: rust
+
+#### Step R1: Initialize Cargo project
+
+```bash
+cd ~/Projects/<project-name>/master
+nix develop --command cargo init --lib --name <project-name>
+```
+
+#### Step R2: Write rust-toolchain.toml
+
+```toml
+[toolchain]
+channel = "stable"
+components = ["rustfmt", "clippy"]
+```
+
+#### Step R3: Write flake.nix
+
+Write a Nix flake providing a dev shell with Rust (stable), cargo, clippy, rustfmt, and rust-analyzer:
+
+- Use `nixpkgs` (nixos-unstable) and `flake-utils` as inputs
+- Use the nixpkgs Rust toolchain
+- Support `x86_64-linux` and `aarch64-linux`
+- Include a shell hook that prints rustc and cargo versions
+
+#### Step R4: Write .envrc
+
+Content: `use flake`
+
+#### rust AGENTS.md sections
+
+Include these in the AGENTS.md written during Part 3:
+- Build: `cargo build`
+- Test: `cargo test`
+- Lint: `cargo clippy -- -D warnings`
+- Format: `cargo fmt`
+
+---
+
+## Part 3: Finalization (all types)
+
+### Step F1: Write AGENTS.md
+
+Write agent instructions covering:
+- Project overview and description
+- Project structure (directory layout — adapt to the selected type)
+- Environment setup (Nix + direnv if the type includes a flake, or just note "no special environment" for `bare`)
+- ExecPlans reference to `.planning/PLANS.md`
+- Beads issue tracking quick reference (`bd ready`, `bd show`, `bd create`, etc.)
+- Beads worktree setup (the portable redirect recipe using `git worktree list --porcelain`)
+- **Type-specific build and test commands** (see the "AGENTS.md sections" in the type above)
+- Git workflow: PR-only, draft PRs early, normal merges, stacked PRs, granular commits, worktrees
+
+### Step F2: Create CLAUDE.md symlink
+
+```bash
+cd ~/Projects/<project-name>/master
+ln -s AGENTS.md CLAUDE.md
+```
+
+### Step F3: Write README.md
+
+A user-facing README with:
+- Project title and description
+- Prerequisites (Nix if applicable, or just git for `bare`)
+- Getting started (type-specific: build/test/run commands)
+- Project structure overview
+- Link to AGENTS.md for contributing
+
+### Step F4: Generate flake.lock (types with a flake only)
 
 ```bash
 cd ~/Projects/<project-name>/master
 nix develop --command echo "flake loaded"
 ```
 
-This generates `flake.lock` and validates the flake works.
+This generates `flake.lock` and validates the flake works. **Skip this step for `bare`.**
 
-### Step 14: Initial commit
+### Step F5: Initial commit
 
 ```bash
 cd ~/Projects/<project-name>/master
 git add -A
 git commit -m "Initial project scaffold: <project-name>
 
-Directory structure, Nix dev environment with pinned Sui binary,
-Move contract scaffold, agent instructions, ExecPlan format guide,
-beads issue tracking, and development skills."
+<type-specific summary of what was set up>"
 ```
 
-### Step 15: Create GitHub repo and push
+### Step F6: Create GitHub repo and push
 
 ```bash
 gh repo create tedks/<project-name> --private --description "<description>"
@@ -222,7 +417,7 @@ git push -u origin master
 
 Note: `gh repo create --source` does not work from a worktree. Create the repo without `--source`, then add the remote manually.
 
-### Step 16: Initialize beads
+### Step F7: Initialize beads
 
 Beads must be initialized from the bare repo root, not from a worktree:
 
@@ -247,7 +442,7 @@ Then configure it:
    git push
    ```
 
-### Step 17: Set up branch protection
+### Step F8: Set up branch protection
 
 Create a GitHub ruleset requiring PRs for the master branch:
 
@@ -280,14 +475,18 @@ gh api repos/tedks/<project-name>/rulesets -X POST --input - <<'RULES'
 RULES
 ```
 
-### Step 18: Verify
+### Step F9: Verify
 
 Run the following checks:
-- `cd ~/Projects/<project-name>/master && git status` — clean
-- `nix develop --command sui --version` — Sui CLI works
-- `nix develop --command sui move build` (from contracts dir) — Move compiles
+- `cd ~/Projects/<project-name>/master && git status` — clean working tree
 - `git worktree list` — shows bare root and master worktree
 - `bd ready` — beads works (returns empty list)
+
+**Type-specific checks (skip for `bare`):**
+- `nix develop --command echo "ok"` — Nix shell loads
+- `sui-dapp`: `nix develop --command sui --version`, `nix develop --command sui move build` (from contracts dir)
+- `python`: `nix develop --command python --version`, `nix develop --command uv run pytest`
+- `rust`: `nix develop --command cargo --version`, `nix develop --command cargo test`
 
 Report the results to the user.
 
@@ -296,3 +495,4 @@ Report the results to the user.
 - The Sui binary version and hashes will need updating as new releases come out. Check `gh api repos/MystenLabs/sui/releases/latest` for the current version.
 - The skill assumes the user's GitHub username is `tedks`. Adjust the `gh repo create` and remote URL if needed.
 - Skills are copied into the repo (not symlinked) so the repo is self-contained. Check `~/Projects/dotfiles/.claude/skills/` for upstream updates periodically.
+- To add a new project type: add a new section under Part 2, define its AGENTS.md sections, and add verification checks to Step F9.
