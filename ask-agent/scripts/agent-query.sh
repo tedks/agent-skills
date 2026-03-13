@@ -3,7 +3,7 @@
 #
 # Usage: agent-query.sh <agent> [options] <prompt>
 #
-# Agents: claude, codex
+# Agents: claude, codex, gemini
 #
 # Options:
 #   -d, --dir <dir>    Set working directory
@@ -13,12 +13,13 @@
 #   agent-query.sh claude "Explain this error"
 #   agent-query.sh codex -d ./project "Review the auth module"
 #   agent-query.sh codex --model o3 "Optimize this function"
+#   agent-query.sh gemini "Summarize this codebase"
 
 set -e
 
 usage() {
     echo "Usage: agent-query.sh <agent> [options] <prompt>" >&2
-    echo "Agents: claude, codex" >&2
+    echo "Agents: claude, codex, gemini" >&2
     echo "Options:" >&2
     echo "  -d, --dir <dir>      Set working directory" >&2
     echo "  -m, --model <model>  Specify model" >&2
@@ -78,9 +79,13 @@ case "$agent" in
         [[ -n "$model" ]] && cmd+=(-m "$model")
         cmd+=("$prompt")
         ;;
+    gemini)
+        cmd=(gemini -p "$prompt" -o text)
+        [[ -n "$model" ]] && cmd+=(-m "$model")
+        ;;
     *)
         echo "Unknown agent: $agent" >&2
-        echo "Supported agents: claude, codex" >&2
+        echo "Supported agents: claude, codex, gemini" >&2
         exit 1
         ;;
 esac
