@@ -8,7 +8,7 @@ allowed-tools: Bash(~/.claude/skills/ask-agent/scripts/*)
 # ask-agent
 
 Query another AI agent non-interactively and get the response back. Use this
-when you want a second opinion from a different agent (Claude, Codex, etc.).
+when you want a second opinion from a different agent (Claude, Codex, Gemini, etc.).
 
 ## Usage
 
@@ -18,7 +18,7 @@ when you want a second opinion from a different agent (Claude, Codex, etc.).
 
 ## Arguments
 
-- `<agent>`: The agent to query (`claude`, `codex`)
+- `<agent>`: The agent to query (`claude`, `codex`, `gemini`)
 - `<prompt>`: The question or request for the agent
 
 ## Options
@@ -51,6 +51,12 @@ Report the response back to the user.
 
 # Query from a specific directory
 /ask-agent codex -d ./src "Explain what the auth module does"
+
+# Ask Gemini for a summary
+/ask-agent gemini "Summarize this codebase"
+
+# Ask Gemini with a specific model
+/ask-agent gemini -m gemini-2.5-pro "Review this architecture"
 ```
 
 ## Agent CLI Mappings
@@ -59,6 +65,7 @@ Report the response back to the user.
 |--------|------------------------|
 | claude | `claude -p "<prompt>"` |
 | codex  | `codex exec "<prompt>"` |
+| gemini | `gemini -p "<prompt>" -o text` |
 
 ## Notes
 
