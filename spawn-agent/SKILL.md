@@ -19,7 +19,7 @@ fan-out workflows where you want multiple agents working simultaneously.
 ## Arguments
 
 - `<session:window>`: tmux target (e.g., `chaos:review`)
-- `<agent>`: The agent to spawn (`claude`, `codex`)
+- `<agent>`: The agent to spawn (`claude`, `codex`, `gemini`)
 - `[directory]`: Working directory (default: current)
 - `[prompt]`: Initial prompt for the agent
 
@@ -34,7 +34,12 @@ Run: `test -n "$TMUX" && echo "in-tmux" || echo "not-in-tmux"`
 If not in tmux, report error and stop:
 > Error: Not running inside tmux. This skill requires a tmux session.
 
-### 2. Spawn the agent
+### 2. Check tmux context
+
+Run `~/.claude/skills/spawn-agent/scripts/tmux-info.sh` to see the current
+socket, sessions, and windows. This ensures you're targeting the right server.
+
+### 3. Spawn the agent
 
 Run the agent-spawn.sh script:
 
@@ -42,11 +47,40 @@ Run the agent-spawn.sh script:
 ~/.claude/skills/spawn-agent/scripts/agent-spawn.sh <session:window> <agent> [directory] [prompt]
 ```
 
-### 3. Report success
+The script automatically detects the tmux socket from `$TMUX` — no manual
+`-L` or `-S` flags needed.
+
+### 4. Report success
 
 Tell the user:
 - The tmux window name and session
+- Which tmux socket/server is being used
 - How to switch to it: `Ctrl-b <window-number>` or `tmux select-window -t <name>`
+
+## tmux Socket Awareness
+
+All scripts automatically detect the current tmux server socket from `$TMUX`.
+If you're in `tmux -L personal`, spawned agents will be in the same server.
+
+**How it works:**
+- `$TMUX` contains `/path/to/socket,pid,pane` when inside tmux
+- Scripts extract the socket path and use `tmux -S <path>` for all commands
+- Falls back to the default socket when not inside tmux
+
+**Override manually** (rarely needed):
+```bash
+# By socket path
+SPAWN_TMUX_SOCKET=/tmp/tmux-1000/personal ~/.claude/skills/spawn-agent/scripts/agent-spawn.sh ...
+
+# By -L label
+SPAWN_TMUX_LABEL=personal ~/.claude/skills/spawn-agent/scripts/agent-spawn.sh ...
+```
+
+**Quick diagnostic:**
+```bash
+~/.claude/skills/spawn-agent/scripts/tmux-info.sh
+```
+This prints the current socket, server PID, all sessions, and all windows.
 
 ## Examples
 
@@ -57,11 +91,23 @@ Tell the user:
 # Spawn Codex for a different perspective
 /spawn-agent chaos:codex-review codex ./project "Help refactor this"
 
+# Spawn Gemini
+/spawn-agent chaos:gemini-review gemini ./project "Check this design"
+
 # Spawn without initial prompt (interactive from start)
 /spawn-agent chaos:helper claude .
 ```
 
 ## Helper Scripts
+
+All scripts source `tmux-ctx.sh` for automatic socket detection.
+
+### tmux-info.sh
+
+Show current tmux context — socket, sessions, windows:
+```bash
+~/.claude/skills/spawn-agent/scripts/tmux-info.sh
+```
 
 ### agent-spawn.sh
 
@@ -120,5 +166,6 @@ of waiting for user input. To detect when agents are ready:
 ## Notes
 
 - Agents run interactively in tmux windows
-- Use `tmux list-windows` to see all windows
+- Use `tmux-info.sh` to see all sessions and windows on the current server
 - Use claude-send.sh to send messages to running agents
+- Socket detection is automatic — you don't need to think about `-L` or `-S`

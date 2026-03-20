@@ -3,12 +3,18 @@
 #
 # Usage: claude-spawn.sh <session:window-name> [directory] [claude-args...]
 #
+# Automatically targets the correct tmux server socket when run inside tmux.
+# Override with SPAWN_TMUX_SOCKET or SPAWN_TMUX_LABEL env vars.
+#
 # Examples:
 #   claude-spawn.sh chaos:review           # New window in cwd
 #   claude-spawn.sh chaos:review ./project # New window in ./project
 #   claude-spawn.sh chaos:review . --resume abc123  # Resume session
 
 set -e
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$SCRIPT_DIR/tmux-ctx.sh"
 
 if [[ $# -lt 1 ]]; then
     echo "Usage: claude-spawn.sh <session:window-name> [directory] [claude-args...]" >&2
@@ -35,11 +41,11 @@ fi
 claude_args="$*"
 
 # Ensure session exists
-if ! tmux has-session -t "$session" 2>/dev/null; then
+if ! "${TMUX_CMD[@]}" has-session -t "$session" 2>/dev/null; then
     echo "Creating tmux session: $session" >&2
-    tmux new-session -d -s "$session"
+    "${TMUX_CMD[@]}" new-session -d -s "$session"
 fi
 
 # Create the window
-tmux new-window -t "$session" -n "$window" -c "$directory" "claude $claude_args"
+"${TMUX_CMD[@]}" new-window -t "$session" -n "$window" -c "$directory" "claude $claude_args"
 echo "Created window $target in $directory"

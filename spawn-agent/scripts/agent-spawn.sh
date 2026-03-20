@@ -3,7 +3,10 @@
 #
 # Usage: agent-spawn.sh <session:window> <agent> [directory] [prompt]
 #
-# Agents: claude, codex
+# Agents: claude, codex, gemini
+#
+# Automatically targets the correct tmux server socket when run inside tmux.
+# Override with SPAWN_TMUX_SOCKET or SPAWN_TMUX_LABEL env vars.
 #
 # Examples:
 #   agent-spawn.sh chaos:review claude ./project "Review auth module"
@@ -11,10 +14,13 @@
 
 set -e
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$SCRIPT_DIR/tmux-ctx.sh"
+
 usage() {
     echo "Usage: agent-spawn.sh <session:window> <agent> [directory] [prompt]" >&2
     echo "  session:window: tmux target (e.g., 'chaos:review')" >&2
-    echo "  agent: claude, codex" >&2
+    echo "  agent: claude, codex, gemini" >&2
     echo "  directory: working directory (default: current)" >&2
     echo "  prompt: initial prompt for the agent" >&2
     exit 1
@@ -35,18 +41,18 @@ window="${target#*:}"
 
 # Validate agent
 case "$agent" in
-    claude|codex) ;;
+    claude|codex|gemini) ;;
     *)
         echo "Unknown agent: $agent" >&2
-        echo "Supported agents: claude, codex" >&2
+        echo "Supported agents: claude, codex, gemini" >&2
         exit 1
         ;;
 esac
 
 # Ensure session exists
-if ! tmux has-session -t "$session" 2>/dev/null; then
+if ! "${TMUX_CMD[@]}" has-session -t "$session" 2>/dev/null; then
     echo "Creating tmux session: $session" >&2
-    tmux new-session -d -s "$session"
+    "${TMUX_CMD[@]}" new-session -d -s "$session"
 fi
 
 # Create the window and run the agent
@@ -54,10 +60,10 @@ fi
 if [[ -n "$prompt" ]]; then
     prompt_file=$(mktemp)
     printf '%s' "$prompt" > "$prompt_file"
-    tmux new-window -t "$session" -n "$window" -c "$directory" \
+    "${TMUX_CMD[@]}" new-window -t "$session" -n "$window" -c "$directory" \
         "prompt=\$(cat '$prompt_file'); rm -f '$prompt_file'; $agent \"\$prompt\""
 else
-    tmux new-window -t "$session" -n "$window" -c "$directory" "$agent"
+    "${TMUX_CMD[@]}" new-window -t "$session" -n "$window" -c "$directory" "$agent"
 fi
 
 echo "Spawned $agent in $target (dir: $directory)"
