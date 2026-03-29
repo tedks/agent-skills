@@ -2,7 +2,7 @@
 name: council-review
 description: Multi-agent code review council - gets reviews from Claude, Codex, and Gemini simultaneously
 argument-hint: [target] -- e.g. "PR #42", "staged", "branch", or a file path
-allowed-tools: Bash(~/.claude/skills/ask-agent/scripts/*), Bash(~/.claude/skills/council-review/scripts/*)
+allowed-tools: Bash(~/.claude/skills/ask-agent/scripts/*)
 ---
 
 # council-review
@@ -42,24 +42,19 @@ Based on the `[target]` argument (or lack thereof), gather the review material:
 
 If the diff is empty, tell the user there's nothing to review and stop.
 
-### Step 2: Detect which agent you are
+### Step 2: Identify the other two agents
 
-You know which agent you are:
-- If you are **Claude** → `self=claude`
-- If you are **Codex** → `self=codex`
-- If you are **Gemini** → `self=gemini`
+You know which agent you are. The other two get queried via `agent-query.sh`:
+
+| If you are | Query these two |
+|------------|-----------------|
+| Claude     | codex, gemini   |
+| Codex      | claude, gemini  |
+| Gemini     | claude, codex   |
 
 ### Step 3: Build the review prompt
 
-Construct a review prompt that includes the diff/context gathered in Step 1. The prompt should ask for:
-
-1. **Correctness** — bugs, logic errors, off-by-one, race conditions
-2. **Security** — injection, auth issues, secret exposure, OWASP top 10
-3. **Design** — naming, structure, separation of concerns, unnecessary complexity
-4. **Edge cases** — what inputs or conditions would break this?
-5. **Suggestions** — concrete improvements (not vague advice)
-
-Format the prompt as:
+Construct a review prompt that includes the diff/context gathered in Step 1:
 
 ```
 Review the following code changes. For each issue found, cite the specific file and line.
@@ -74,24 +69,28 @@ If the code looks good, say so briefly and note any minor suggestions.
 <diff/context here>
 ```
 
+The prompt should cover: correctness, security (OWASP top 10), design, edge cases, and concrete suggestions.
+
 ### Step 4: Launch all three reviews in parallel
 
-**Your own review (native subagent):**
-- Use your native subagent/tool mechanism to run the review
-- For Claude: use the `Agent` tool to spawn a subagent with the review prompt
-- For Codex: use your built-in parallel execution
-- For Gemini: use your built-in parallel execution
-
-**The other two reviews (via ask-agent):**
-- Run the council-review.sh script, which calls agent-query.sh for the two non-self agents in parallel:
+Write the review prompt to a temp file first (to avoid shell quoting issues with large diffs):
 
 ```bash
-~/.claude/skills/council-review/scripts/council-review.sh --self <self-agent> --dir "$(pwd)" "<review-prompt>"
+PROMPT_FILE=$(mktemp)
+cat > "$PROMPT_FILE" << 'REVIEW_EOF'
+<the review prompt from step 3>
+REVIEW_EOF
 ```
 
-This script returns both external reviews as labeled output.
+Then launch all three simultaneously — your native subagent review and both `agent-query.sh` calls — in a single parallel tool invocation:
 
-**IMPORTANT:** Launch your native review and the council-review.sh script at the same time (in parallel), not sequentially.
+1. **Your own review:** Use your native subagent mechanism (e.g., Claude's `Agent` tool)
+2. **External agent A:** `~/.claude/skills/ask-agent/scripts/agent-query.sh <agent> "$(cat $PROMPT_FILE)"`
+3. **External agent B:** `~/.claude/skills/ask-agent/scripts/agent-query.sh <agent> "$(cat $PROMPT_FILE)"`
+
+All three MUST be launched in the same parallel tool call, not sequentially.
+
+If an external agent fails (not installed, timeout, etc.), note it and continue with whatever reviews succeed.
 
 ### Step 5: Present the council's findings
 
@@ -116,11 +115,10 @@ Once all three reviews are collected, present a unified summary:
 <synthesized action items, prioritized>
 ```
 
-Highlight **consensus issues** (flagged by multiple reviewers) as highest priority. Note any disagreements between reviewers — these are interesting discussion points.
+Highlight **consensus issues** (flagged by multiple reviewers) as highest priority — these are almost certainly real. Note any disagreements between reviewers as discussion points.
 
 ## Notes
 
-- All three reviews run in parallel for speed
 - The native agent's review has full project context; external agents only see the diff
-- If an external agent fails (not installed, timeout), note it and continue with available reviews
-- Review prompt is written to a temp file to avoid shell quoting issues
+- If only one or two agents are available, run the council with whoever responds
+- Clean up the temp file after all reviews complete
