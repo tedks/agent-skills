@@ -25,6 +25,7 @@ when you want a second opinion from a different agent (Claude, Codex, Gemini, et
 
 - `-d, --dir <dir>`: Set working directory for the agent
 - `-m, --model <model>`: Specify model (agent-specific)
+- `-f, --prompt-file <file>`: Read prompt from a file instead of inline (use for large prompts to avoid ARG_MAX limits)
 
 ## Instructions
 
@@ -32,6 +33,7 @@ When this skill is invoked, run the agent-query.sh script:
 
 ```bash
 ~/.claude/skills/ask-agent/scripts/agent-query.sh <agent> [options] <prompt>
+~/.claude/skills/ask-agent/scripts/agent-query.sh <agent> [options] --prompt-file <file>
 ```
 
 The script will:
@@ -57,6 +59,9 @@ Report the response back to the user.
 
 # Ask Gemini with a specific model
 /ask-agent gemini -m gemini-2.5-pro "Review this architecture"
+
+# Use a prompt file for large prompts (avoids ARG_MAX)
+/ask-agent codex --prompt-file /tmp/review-prompt.txt
 ```
 
 ## Agent CLI Mappings

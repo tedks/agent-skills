@@ -2,27 +2,32 @@
 # agent-query.sh - Query an AI agent non-interactively (piped mode)
 #
 # Usage: agent-query.sh <agent> [options] <prompt>
+#        agent-query.sh <agent> [options] --prompt-file <file>
 #
 # Agents: claude, codex, gemini
 #
 # Options:
-#   -d, --dir <dir>    Set working directory
-#   -m, --model <model> Specify model (agent-specific)
+#   -d, --dir <dir>              Set working directory
+#   -m, --model <model>          Specify model (agent-specific)
+#   -f, --prompt-file <file>     Read prompt from file (avoids ARG_MAX)
 #
 # Examples:
 #   agent-query.sh claude "Explain this error"
 #   agent-query.sh codex -d ./project "Review the auth module"
 #   agent-query.sh codex --model o3 "Optimize this function"
 #   agent-query.sh gemini "Summarize this codebase"
+#   agent-query.sh claude --prompt-file /tmp/review-prompt.txt
 
 set -e
 
 usage() {
     echo "Usage: agent-query.sh <agent> [options] <prompt>" >&2
+    echo "       agent-query.sh <agent> [options] --prompt-file <file>" >&2
     echo "Agents: claude, codex, gemini" >&2
     echo "Options:" >&2
-    echo "  -d, --dir <dir>      Set working directory" >&2
-    echo "  -m, --model <model>  Specify model" >&2
+    echo "  -d, --dir <dir>              Set working directory" >&2
+    echo "  -m, --model <model>          Specify model" >&2
+    echo "  -f, --prompt-file <file>     Read prompt from file" >&2
     exit 1
 }
 
@@ -36,6 +41,7 @@ shift
 # Parse options
 dir=""
 model=""
+prompt_file=""
 while [[ $# -gt 0 ]]; do
     case "$1" in
         -d|--dir)
@@ -44,6 +50,10 @@ while [[ $# -gt 0 ]]; do
             ;;
         -m|--model)
             model="$2"
+            shift 2
+            ;;
+        -f|--prompt-file)
+            prompt_file="$2"
             shift 2
             ;;
         -*)
@@ -56,10 +66,19 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-prompt="$*"
+# Get prompt from file or positional args
+if [[ -n "$prompt_file" ]]; then
+    if [[ ! -f "$prompt_file" ]]; then
+        echo "Error: prompt file not found: $prompt_file" >&2
+        exit 1
+    fi
+    prompt="$(cat "$prompt_file")"
+else
+    prompt="$*"
+fi
 
 if [[ -z "$prompt" ]]; then
-    echo "Error: prompt required" >&2
+    echo "Error: prompt required (positional arg or --prompt-file)" >&2
     usage
 fi
 
