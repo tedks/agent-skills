@@ -2,7 +2,6 @@
 name: council-review
 description: Multi-agent code review council - gets reviews from Claude, Codex, and Gemini simultaneously
 argument-hint: [target] -- e.g. "PR #42", "staged", "branch", or a file path
-allowed-tools: Bash(~/.claude/skills/ask-agent/scripts/*)
 ---
 
 # council-review
@@ -37,7 +36,7 @@ Based on the `[target]` argument (or lack thereof), gather the review material:
 | *(none)* | `git diff HEAD` (all uncommitted changes — staged and unstaged) |
 | `staged` | `git diff --cached` |
 | `branch` | Detect default branch (see below), then `git log --oneline <default>..HEAD` + `git diff <default>...HEAD` |
-| `PR #N` / `#N` | This is handled differently — see Step 4 |
+| `PR #N` / `#N` | This is handled differently — see Step 3 |
 | `<file>` | Read the file contents |
 
 **Detecting the default branch:** Run `git symbolic-ref refs/remotes/origin/HEAD 2>/dev/null | sed 's|.*/||'`. If that fails, check whether `main` or `master` exists as a local branch.
@@ -82,6 +81,7 @@ Write the review prompt (with the diff included) to a temp file:
 
 ```bash
 PROMPT_FILE=$(mktemp)
+trap 'rm -f "$PROMPT_FILE"' EXIT
 cat > "$PROMPT_FILE" << 'REVIEW_EOF'
 <the review prompt from step 2, including the diff>
 REVIEW_EOF
@@ -89,10 +89,8 @@ REVIEW_EOF
 
 Then launch all three in a single parallel tool invocation:
 1. **Your own review (subagent):** Use the `Agent` tool with the review prompt
-2. **Codex:** `/ask-agent codex --prompt-file $PROMPT_FILE`
-3. **Gemini:** `/ask-agent gemini --prompt-file $PROMPT_FILE`
-
-Clean up the temp file after all reviews complete: `rm "$PROMPT_FILE"`
+2. **Codex:** `/ask-agent codex --prompt-file "$PROMPT_FILE"`
+3. **Gemini:** `/ask-agent gemini --prompt-file "$PROMPT_FILE"`
 
 ### Step 4: Present the council's findings
 
