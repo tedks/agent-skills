@@ -93,12 +93,11 @@ else
     fi
 fi
 
-cleanup() {
-    [[ -n "$_cleanup_prompt_file" ]] && rm -f "$_cleanup_prompt_file"
-}
-trap cleanup EXIT
+# Canonicalize prompt_file to an absolute path so that a subsequent
+# cd (via --dir) doesn't break a relative path.
+prompt_file="$(cd "$(dirname "$prompt_file")" && pwd)/$(basename "$prompt_file")"
 
-# Change directory if specified
+# Change directory if specified (must happen after canonicalization)
 if [[ -n "$dir" ]]; then
     cd "$dir"
 fi
@@ -117,7 +116,9 @@ case "$agent" in
         [[ -n "$model" ]] && cmd+=(-m "$model")
         ;;
     gemini)
-        cmd=(gemini -o text)
+        # gemini requires -p for headless mode; with -p "" it reads
+        # the actual prompt from stdin ("Appended to input on stdin").
+        cmd=(gemini -p "" -o text)
         [[ -n "$model" ]] && cmd+=(-m "$model")
         ;;
     *)
@@ -128,6 +129,9 @@ case "$agent" in
 esac
 
 # Pipe prompt via stdin — this is the key ARG_MAX fix.
-# The prompt file is redirected to stdin of the agent process,
-# so the prompt never appears in the execve(2) argument list.
-exec "${cmd[@]}" < "$prompt_file"
+# We open the file descriptor, delete the temp file (if we created it),
+# then exec. The fd survives exec; the unlinked file stays readable
+# through the open fd until the process exits.
+exec 3< "$prompt_file"
+[[ -n "$_cleanup_prompt_file" ]] && rm -f "$_cleanup_prompt_file"
+exec "${cmd[@]}" <&3

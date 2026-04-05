@@ -52,7 +52,7 @@ PROMPT_DELIM
 
 # 2. Spawn with --prompt-file
 ~/.claude/skills/spawn-agent/scripts/agent-spawn.sh <session:window> <agent> [directory] --prompt-file "$prompt_file"
-# Note: the temp file is cleaned up by the spawned tmux command
+# Note: the script cleans up its own temp files; caller-provided files are preserved
 ```
 
 For short prompts, inline is also fine:

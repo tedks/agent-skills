@@ -87,7 +87,7 @@ Report the response back to the user.
 |--------|------------------------|-------|
 | claude | `claude -p` | Yes - reads from stdin when no positional prompt given |
 | codex  | `codex exec -` | Yes - `-` reads from stdin |
-| gemini | `gemini -o text` | Yes - reads from stdin when no `-p` flag given |
+| gemini | `gemini -p "" -o text` | Yes - `-p ""` enables headless mode, reads prompt from stdin |
 
 ## Notes
 

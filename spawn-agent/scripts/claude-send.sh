@@ -7,9 +7,10 @@
 # Automatically targets the correct tmux server socket when run inside tmux.
 # Override with SPAWN_TMUX_SOCKET or SPAWN_TMUX_LABEL env vars.
 #
-# Uses tmux load-buffer/paste-buffer for the message body to avoid ARG_MAX
-# limits on send-keys. Handles the timing issue where Enter gets swallowed
-# if sent too quickly after the text (1.5 second delay).
+# Uses tmux load-buffer/paste-buffer with a named buffer to avoid ARG_MAX
+# limits and race conditions with concurrent sends. The buffer is deleted
+# after pasting (-d flag). Handles the timing issue where Enter gets
+# swallowed if sent too quickly after the text (1.5 second delay).
 
 set -e
 
@@ -41,11 +42,20 @@ if [[ "$1" == "--prompt-file" || "$1" == "-f" ]]; then
         echo "Error: prompt file not found: $prompt_file" >&2
         exit 1
     fi
+    if [[ ! -s "$prompt_file" ]]; then
+        echo "Error: prompt file is empty: $prompt_file" >&2
+        exit 1
+    fi
 else
+    message="$*"
+    if [[ -z "$message" ]]; then
+        echo "Error: message is empty" >&2
+        exit 1
+    fi
     # Write positional args to temp file to avoid ARG_MAX on send-keys
     prompt_file=$(mktemp)
     _cleanup_prompt_file="$prompt_file"
-    printf '%s' "$*" > "$prompt_file"
+    printf '%s' "$message" > "$prompt_file"
 fi
 
 cleanup() {
@@ -53,10 +63,11 @@ cleanup() {
 }
 trap cleanup EXIT
 
-# Use tmux load-buffer + paste-buffer instead of send-keys for the
-# message body. This avoids ARG_MAX limits since the message goes
-# through a file, not through execve arguments.
-"${TMUX_CMD[@]}" load-buffer "$prompt_file"
-"${TMUX_CMD[@]}" paste-buffer -t "$window"
+# Use tmux load-buffer + paste-buffer with a named buffer. The named
+# buffer (keyed by PID) avoids race conditions when multiple claude-send
+# instances run concurrently. The -d flag deletes the buffer after paste.
+buf_name="claude-send-$$"
+"${TMUX_CMD[@]}" load-buffer -b "$buf_name" "$prompt_file"
+"${TMUX_CMD[@]}" paste-buffer -dp -t "$window" -b "$buf_name"
 sleep 1.5
 "${TMUX_CMD[@]}" send-keys -t "$window" Enter

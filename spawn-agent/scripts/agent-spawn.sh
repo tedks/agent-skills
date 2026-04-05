@@ -7,15 +7,19 @@
 # Agents: claude, codex, gemini
 #
 # Options:
-#   --prompt-file <file>   Read prompt from file (avoids ARG_MAX)
+#   -f, --prompt-file <file>   Read prompt from file (avoids ARG_MAX)
 #
 # Automatically targets the correct tmux server socket when run inside tmux.
 # Override with SPAWN_TMUX_SOCKET or SPAWN_TMUX_LABEL env vars.
+#
+# The prompt is delivered via tmux load-buffer/paste-buffer after the agent
+# starts, so it never appears in any execve(2) argument list.
 #
 # Examples:
 #   agent-spawn.sh chaos:review claude ./project "Review auth module"
 #   agent-spawn.sh chaos:codex-help codex . "Help me refactor this"
 #   agent-spawn.sh chaos:review claude ./project --prompt-file /tmp/prompt.txt
+#   agent-spawn.sh chaos:review claude --prompt-file /tmp/prompt.txt
 
 set -e
 
@@ -39,24 +43,42 @@ fi
 
 target="$1"
 agent="$2"
-directory="${3:-.}"
-shift 3 2>/dev/null || shift $#
+shift 2
 
-# Check for --prompt-file flag or positional prompt
+# Parse remaining args: [directory] [prompt] or --prompt-file <file>
+# --prompt-file can appear anywhere in the remaining args.
 prompt_file=""
 prompt=""
-if [[ "$1" == "--prompt-file" || "$1" == "-f" ]]; then
-    prompt_file="$2"
-    if [[ -z "$prompt_file" ]]; then
-        echo "Error: --prompt-file requires a file path" >&2
-        exit 1
-    fi
-    if [[ ! -f "$prompt_file" ]]; then
-        echo "Error: prompt file not found: $prompt_file" >&2
-        exit 1
-    fi
-elif [[ -n "$1" ]]; then
-    prompt="$1"
+directory="."
+_cleanup_prompt_file=""
+positional=()
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --prompt-file|-f)
+            prompt_file="$2"
+            if [[ -z "$prompt_file" ]]; then
+                echo "Error: --prompt-file requires a file path" >&2
+                exit 1
+            fi
+            if [[ ! -f "$prompt_file" ]]; then
+                echo "Error: prompt file not found: $prompt_file" >&2
+                exit 1
+            fi
+            shift 2
+            ;;
+        *)
+            positional+=("$1")
+            shift
+            ;;
+    esac
+done
+
+# Positional args: [directory] [prompt]
+if [[ ${#positional[@]} -ge 1 ]]; then
+    directory="${positional[0]}"
+fi
+if [[ ${#positional[@]} -ge 2 ]]; then
+    prompt="${positional[1]}"
 fi
 
 # Parse session and window from target
@@ -79,19 +101,28 @@ if ! "${TMUX_CMD[@]}" has-session -t "$session" 2>/dev/null; then
     "${TMUX_CMD[@]}" new-session -d -s "$session"
 fi
 
-# Create the window and run the agent.
-# Prompt is always passed via a temp file to avoid ARG_MAX on the
-# tmux new-window command string.
-if [[ -n "$prompt_file" || -n "$prompt" ]]; then
-    # Normalize to a temp file the tmux command will read from
-    if [[ -z "$prompt_file" ]]; then
-        prompt_file=$(mktemp)
-        printf '%s' "$prompt" > "$prompt_file"
-    fi
-    "${TMUX_CMD[@]}" new-window -t "$session" -n "$window" -c "$directory" \
-        "prompt=\$(cat '$prompt_file'); rm -f '$prompt_file'; $agent \"\$prompt\""
-else
-    "${TMUX_CMD[@]}" new-window -t "$session" -n "$window" -c "$directory" "$agent"
+# Normalize prompt to a file if provided as positional arg
+if [[ -n "$prompt" && -z "$prompt_file" ]]; then
+    prompt_file=$(mktemp)
+    _cleanup_prompt_file="$prompt_file"
+    printf '%s' "$prompt" > "$prompt_file"
+fi
+
+# Start the agent in a new tmux window, then deliver the prompt via
+# load-buffer/paste-buffer. This avoids ARG_MAX at every boundary:
+# the tmux command, the shell inside tmux, and the agent's execve.
+"${TMUX_CMD[@]}" new-window -t "$session" -n "$window" -c "$directory" "$agent"
+
+if [[ -n "$prompt_file" ]]; then
+    # Wait for the agent to initialize before sending the prompt
+    sleep 2
+    buf_name="spawn-agent-$$"
+    "${TMUX_CMD[@]}" load-buffer -b "$buf_name" "$prompt_file"
+    "${TMUX_CMD[@]}" paste-buffer -dp -t "$session:$window" -b "$buf_name"
+    sleep 1.5
+    "${TMUX_CMD[@]}" send-keys -t "$session:$window" Enter
+    # Only clean up temp files we created, not caller-provided files
+    [[ -n "$_cleanup_prompt_file" ]] && rm -f "$_cleanup_prompt_file"
 fi
 
 echo "Spawned $agent in $target (dir: $directory)"
