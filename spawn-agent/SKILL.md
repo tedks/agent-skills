@@ -41,13 +41,27 @@ socket, sessions, and windows. This ensures you're targeting the right server.
 
 ### 3. Spawn the agent
 
-Run the agent-spawn.sh script:
+**Always pass the prompt via a temp file** to avoid ARG_MAX errors:
+
+```bash
+# 1. Write prompt to a temp file
+prompt_file=$(mktemp /tmp/spawn-agent-prompt.XXXXXX)
+cat << 'PROMPT_DELIM' > "$prompt_file"
+<your prompt here>
+PROMPT_DELIM
+
+# 2. Spawn with --prompt-file
+~/.claude/skills/spawn-agent/scripts/agent-spawn.sh <session:window> <agent> [directory] --prompt-file "$prompt_file"
+# Note: the temp file is cleaned up by the spawned tmux command
+```
+
+For short prompts, inline is also fine:
 
 ```bash
 ~/.claude/skills/spawn-agent/scripts/agent-spawn.sh <session:window> <agent> [directory] [prompt]
 ```
 
-The script automatically detects the tmux socket from `$TMUX` — no manual
+The script automatically detects the tmux socket from `$TMUX` -- no manual
 `-L` or `-S` flags needed.
 
 ### 4. Report success
@@ -104,7 +118,7 @@ All scripts source `tmux-ctx.sh` for automatic socket detection.
 
 ### tmux-info.sh
 
-Show current tmux context — socket, sessions, windows:
+Show current tmux context -- socket, sessions, windows:
 ```bash
 ~/.claude/skills/spawn-agent/scripts/tmux-info.sh
 ```
@@ -114,6 +128,7 @@ Show current tmux context — socket, sessions, windows:
 Spawn any supported agent:
 ```bash
 ~/.claude/skills/spawn-agent/scripts/agent-spawn.sh <session:window> <agent> [directory] [prompt]
+~/.claude/skills/spawn-agent/scripts/agent-spawn.sh <session:window> <agent> [directory] --prompt-file <file>
 ```
 
 ### claude-spawn.sh
@@ -131,13 +146,14 @@ Claude-specific spawner with additional options:
 Send a message to a running Claude instance:
 ```bash
 ~/.claude/skills/spawn-agent/scripts/claude-send.sh <window> <message>
+~/.claude/skills/spawn-agent/scripts/claude-send.sh <window> --prompt-file <file>
 
 # Example:
 ~/.claude/skills/spawn-agent/scripts/claude-send.sh chaos:review "run the tests"
 ```
 
-Handles the timing issue where Enter gets swallowed if sent too quickly
-(uses 1.5 second delay between text and Enter).
+Uses tmux load-buffer/paste-buffer for the message body (avoids ARG_MAX),
+then sends Enter with a 1.5 second delay to avoid the swallowed-Enter issue.
 
 ## Detecting Idle State
 
@@ -168,4 +184,5 @@ of waiting for user input. To detect when agents are ready:
 - Agents run interactively in tmux windows
 - Use `tmux-info.sh` to see all sessions and windows on the current server
 - Use claude-send.sh to send messages to running agents
-- Socket detection is automatic — you don't need to think about `-L` or `-S`
+- Socket detection is automatic -- you don't need to think about `-L` or `-S`
+- Prompts are passed via temp files to avoid ARG_MAX limits

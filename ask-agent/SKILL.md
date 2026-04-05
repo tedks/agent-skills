@@ -29,23 +29,40 @@ when you want a second opinion from a different agent (Claude, Codex, Gemini, et
 
 ## Instructions
 
-When this skill is invoked, run the agent-query.sh script:
+When this skill is invoked, **always pass the prompt via a temp file** to avoid
+ARG_MAX errors with large prompts:
+
+```bash
+# 1. Write prompt to a temp file
+prompt_file=$(mktemp /tmp/ask-agent-prompt.XXXXXX)
+cat << 'PROMPT_DELIM' > "$prompt_file"
+<your prompt here>
+PROMPT_DELIM
+
+# 2. Run the script with --prompt-file
+~/.claude/skills/ask-agent/scripts/agent-query.sh <agent> [options] --prompt-file "$prompt_file"
+
+# 3. Clean up (the script does NOT delete caller-provided files)
+rm -f "$prompt_file"
+```
+
+For short prompts that are clearly under the ARG_MAX limit (~128KB), inline
+is also fine:
 
 ```bash
 ~/.claude/skills/ask-agent/scripts/agent-query.sh <agent> [options] <prompt>
-~/.claude/skills/ask-agent/scripts/agent-query.sh <agent> [options] --prompt-file <file>
 ```
 
-The script will:
-1. Run the specified agent in non-interactive/print mode
-2. Return the agent's response
+The script pipes the prompt via stdin to the downstream agent, so even inline
+prompts are safe at the script-to-agent boundary. The --prompt-file approach
+protects the caller-to-script boundary as well.
 
 Report the response back to the user.
 
 ## Examples
 
 ```bash
-# Get Codex's opinion on an approach
+# Get Codex opinion on an approach (short prompt, inline ok)
 /ask-agent codex "What do you think of using JWT for this auth flow?"
 
 # Ask Claude with a specific model
@@ -66,14 +83,15 @@ Report the response back to the user.
 
 ## Agent CLI Mappings
 
-| Agent  | Non-interactive command |
-|--------|------------------------|
-| claude | `claude -p "<prompt>"` |
-| codex  | `codex exec "<prompt>"` |
-| gemini | `gemini -p "<prompt>" -o text` |
+| Agent  | Non-interactive command | Stdin |
+|--------|------------------------|-------|
+| claude | `claude -p` | Yes - reads from stdin when no positional prompt given |
+| codex  | `codex exec -` | Yes - `-` reads from stdin |
+| gemini | `gemini -o text` | Yes - reads from stdin when no `-p` flag given |
 
 ## Notes
 
 - Response is synchronous - the calling agent waits for the response
 - Useful for getting a second opinion or different perspective
 - Each agent has different training data and reasoning patterns
+- Prompts are piped via stdin to downstream agents (never as CLI args)
