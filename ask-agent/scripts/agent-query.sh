@@ -73,6 +73,14 @@ done
 # This avoids passing the prompt as a CLI argument to the downstream
 # agent, which would hit ARG_MAX for large prompts.
 _cleanup_prompt_file=""
+
+# Trap to clean up temp files on any exit (failure paths).
+# On the success path, we manually delete before exec.
+cleanup() {
+    [[ -n "$_cleanup_prompt_file" ]] && rm -f "$_cleanup_prompt_file"
+}
+trap cleanup EXIT
+
 if [[ -z "$prompt_file" ]]; then
     prompt="$*"
     if [[ -z "$prompt" ]]; then

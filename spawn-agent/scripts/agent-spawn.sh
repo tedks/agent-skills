@@ -51,6 +51,14 @@ prompt_file=""
 prompt=""
 directory="."
 _cleanup_prompt_file=""
+
+# Trap to clean up temp files on exit/interrupt (only files we created).
+# Set early so failure paths during parsing don't leak temp files.
+cleanup() {
+    [[ -n "$_cleanup_prompt_file" ]] && rm -f "$_cleanup_prompt_file"
+}
+trap cleanup EXIT
+
 positional=()
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -113,12 +121,6 @@ if [[ -n "$prompt_file" ]]; then
     prompt_file="$(cd -- "$(dirname -- "$prompt_file")" && pwd)/$(basename -- "$prompt_file")"
 fi
 
-# Clean up temp files on exit/interrupt (only files we created)
-cleanup() {
-    [[ -n "$_cleanup_prompt_file" ]] && rm -f "$_cleanup_prompt_file"
-}
-trap cleanup EXIT
-
 # Start the agent in a new tmux window, then deliver the prompt via
 # load-buffer/paste-buffer. This avoids ARG_MAX at every boundary:
 # the tmux command, the shell inside tmux, and the agent's execve.
@@ -129,7 +131,11 @@ if [[ -n "$prompt_file" ]]; then
     sleep 2
     buf_name="spawn-agent-$$"
     "${TMUX_CMD[@]}" load-buffer -b "$buf_name" "$prompt_file"
-    "${TMUX_CMD[@]}" paste-buffer -d -t "$session:$window" -b "$buf_name"
+    if ! "${TMUX_CMD[@]}" paste-buffer -d -t "$session:$window" -b "$buf_name"; then
+        "${TMUX_CMD[@]}" delete-buffer -b "$buf_name" 2>/dev/null || true
+        echo "Error: failed to paste prompt to $session:$window" >&2
+        exit 1
+    fi
     sleep 1.5
     "${TMUX_CMD[@]}" send-keys -t "$session:$window" Enter
 fi
