@@ -103,10 +103,21 @@ fi
 
 # Normalize prompt to a file if provided as positional arg
 if [[ -n "$prompt" && -z "$prompt_file" ]]; then
-    prompt_file=$(mktemp)
+    prompt_file=$(mktemp /tmp/spawn-agent-prompt.XXXXXX)
     _cleanup_prompt_file="$prompt_file"
     printf '%s' "$prompt" > "$prompt_file"
 fi
+
+# Canonicalize prompt_file to absolute path
+if [[ -n "$prompt_file" ]]; then
+    prompt_file="$(cd -- "$(dirname -- "$prompt_file")" && pwd)/$(basename -- "$prompt_file")"
+fi
+
+# Clean up temp files on exit/interrupt (only files we created)
+cleanup() {
+    [[ -n "$_cleanup_prompt_file" ]] && rm -f "$_cleanup_prompt_file"
+}
+trap cleanup EXIT
 
 # Start the agent in a new tmux window, then deliver the prompt via
 # load-buffer/paste-buffer. This avoids ARG_MAX at every boundary:
@@ -118,11 +129,9 @@ if [[ -n "$prompt_file" ]]; then
     sleep 2
     buf_name="spawn-agent-$$"
     "${TMUX_CMD[@]}" load-buffer -b "$buf_name" "$prompt_file"
-    "${TMUX_CMD[@]}" paste-buffer -dp -t "$session:$window" -b "$buf_name"
+    "${TMUX_CMD[@]}" paste-buffer -d -t "$session:$window" -b "$buf_name"
     sleep 1.5
     "${TMUX_CMD[@]}" send-keys -t "$session:$window" Enter
-    # Only clean up temp files we created, not caller-provided files
-    [[ -n "$_cleanup_prompt_file" ]] && rm -f "$_cleanup_prompt_file"
 fi
 
 echo "Spawned $agent in $target (dir: $directory)"

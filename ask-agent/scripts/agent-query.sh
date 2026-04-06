@@ -79,7 +79,7 @@ if [[ -z "$prompt_file" ]]; then
         echo "Error: prompt required (positional arg or --prompt-file)" >&2
         usage
     fi
-    prompt_file=$(mktemp)
+    prompt_file=$(mktemp /tmp/agent-query-prompt.XXXXXX)
     _cleanup_prompt_file="$prompt_file"
     printf '%s' "$prompt" > "$prompt_file"
 else
@@ -95,7 +95,7 @@ fi
 
 # Canonicalize prompt_file to an absolute path so that a subsequent
 # cd (via --dir) doesn't break a relative path.
-prompt_file="$(cd "$(dirname "$prompt_file")" && pwd)/$(basename "$prompt_file")"
+prompt_file="$(cd -- "$(dirname -- "$prompt_file")" && pwd)/$(basename -- "$prompt_file")"
 
 # Change directory if specified (must happen after canonicalization)
 if [[ -n "$dir" ]]; then
