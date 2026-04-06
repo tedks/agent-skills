@@ -33,6 +33,14 @@ shift
 # Get message from --prompt-file or positional args
 prompt_file=""
 _cleanup_prompt_file=""
+
+# Trap to clean up temp files on exit/interrupt.
+# Set before any temp file creation so failure paths don't leak.
+cleanup() {
+    [[ -n "$_cleanup_prompt_file" ]] && rm -f "$_cleanup_prompt_file"
+}
+trap cleanup EXIT
+
 if [[ "$1" == "--prompt-file" || "$1" == "-f" ]]; then
     prompt_file="$2"
     if [[ -z "$prompt_file" ]]; then
@@ -58,11 +66,6 @@ else
     _cleanup_prompt_file="$prompt_file"
     printf '%s' "$message" > "$prompt_file"
 fi
-
-cleanup() {
-    [[ -n "$_cleanup_prompt_file" ]] && rm -f "$_cleanup_prompt_file"
-}
-trap cleanup EXIT
 
 # Use tmux load-buffer + paste-buffer with a named buffer. The named
 # buffer (keyed by PID) avoids race conditions when multiple claude-send
