@@ -1,7 +1,7 @@
 ---
 name: council-review
 description: Multi-agent code review council - gets reviews from Claude, Codex, and Gemini simultaneously
-argument-hint: [target] -- e.g. "PR #42", "staged", "branch", or a file path
+argument-hint: '[target] — e.g. PR #42, staged, branch, or a file path'
 ---
 
 # council-review
