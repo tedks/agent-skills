@@ -1,7 +1,7 @@
 ---
 name: initialize-repo
-description: Initialize a new project with bare git repo, beads, branch protection, agent instructions, and optional language-specific scaffolding. Supports multiple project types.
-argument-hint: <project-name> [--type bare|sui-dapp|python|rust|ocaml|node|go] [description]
+description: Initialize a new project with bare git repo, beads, branch protection, agent instructions, and optional language-specific scaffolding. Supports multiple project types. Also provides --sync to report drift between an existing repo and the canonical scaffold templates.
+argument-hint: <project-name> [--type bare|sui-dapp|python|rust|ocaml|node|go] [description] | --sync <repo-path>
 allowed-tools: Bash(~/.claude/skills/initialize-repo/scripts/*), Read, Write, Edit, Glob, Grep, WebFetch
 ---
 
@@ -13,6 +13,7 @@ Set up a new project from scratch with the full development environment: bare gi
 
 ```
 /initialize-repo <project-name> [--type <type>] [description]
+/initialize-repo --sync <repo-path>
 ```
 
 ## Arguments
@@ -20,6 +21,7 @@ Set up a new project from scratch with the full development environment: bare gi
 - `<project-name>`: The project name (used for directory, GitHub repo, and package names)
 - `--type <type>`: Project type (default: `bare`). See [Project Types](#project-types).
 - `[description]`: Optional one-line description for GitHub repo and README
+- `--sync <repo-path>`: Don't scaffold anything; report drift between an existing repo and the templates. See [Sync mode](#sync-mode---sync).
 
 ## Project Types
 
@@ -33,6 +35,38 @@ Set up a new project from scratch with the full development environment: bare gi
 | `node` | pnpm + TypeScript, Nix flake with Node.js |
 | `go` | Go module, Nix flake with Go toolchain |
 
+## Templates
+
+`templates/` (inside this skill) is the **single canonical source** for the scaffold files that repos previously copy-pasted from each other. When scaffolding, copy from here — never from another repo. When one of these files needs a fix, fix the template first, then propagate.
+
+| Template | Lands at (in new repos) | Kind |
+|----------|-------------------------|------|
+| `templates/scripts/install-bd.sh` | `scripts/install-bd.sh` | verbatim |
+| `templates/scripts/configure-git-beads-merge-driver.sh` | `scripts/configure-git-beads-merge-driver.sh` | verbatim |
+| `templates/create-worktree` | `~/Projects/<project-name>/create-worktree` (project root, next to the bare `.git/`) | verbatim |
+| `templates/PLANS.md` | `.planning/PLANS.md` | verbatim |
+| `templates/github-workflows/claude.yml` | `.github/workflows/claude.yml` | verbatim |
+| `templates/github-workflows/claude-code-review.yml` | `.github/workflows/claude-code-review.yml` | verbatim |
+| `templates/github-workflows/ci-nix.yml` | `.github/workflows/ci.yml` | skeleton — replace the TODO build/test steps |
+| `templates/AGENTS.md` | `AGENTS.md` | skeleton — fill `{{PROJECT_NAME}}`, `{{PROJECT_DESCRIPTION}}`, `{{ISSUE_PREFIX}}` and the TODO sections |
+| `templates/flake-snippets/playwright.nix` | spliced into `flake.nix` | snippet — copy the pieces into the dev shell |
+
+**Verbatim** templates work as-is and should stay byte-identical to the template until a repo has a real reason to diverge. **Skeleton** templates are starting points that every repo customizes; only their shared structure is canonical. The Playwright **snippet** is for repos that run browser tests under Nix.
+
+## Sync mode (--sync)
+
+`scripts/sync-check.sh` reports drift between a repo's copies of these files and the templates:
+
+```bash
+~/.claude/skills/initialize-repo/scripts/sync-check.sh ~/Projects/<project>/master
+```
+
+For each verbatim template it checks the known candidate locations (`scripts/` and repo root; `.planning/PLANS.md` and root `PLANS.md`; `../create-worktree` for the project-root layout) and prints one line per file found: `identical`, `drifted` (with changed-line counts), or `missing`. Skeleton templates are reported presence-only, never diffed. The Playwright snippet is detected by grepping `flake.nix` for `playwright-driver`.
+
+The script is **read-only** — it never modifies the target repo. Divergence after scaffolding is allowed; the report exists to make drift *visible* so it can be reviewed deliberately, not to enforce conformance. It always exits 0 (it's a report, not a gate) except on usage errors.
+
+When "landing the plane" in a repo that was scaffolded by this skill, it's worth occasionally running sync-check and mentioning any drift in the handoff notes — drift that nobody knows about is how these files forked in the first place.
+
 ## What It Creates
 
 ### Base (all types)
@@ -41,15 +75,20 @@ Set up a new project from scratch with the full development environment: bare gi
 ~/Projects/<project-name>/
 ├── .git/                          # Bare git repo
 ├── .beads/                        # Beads issue database
+├── create-worktree                # Worktree helper (from templates/)
 └── master/                        # Primary worktree
     ├── .beads/redirect            # Points to bare root's .beads/
     ├── .claude/skills/            # Agent skills (copied from dotfiles)
+    ├── .github/workflows/         # claude.yml, claude-code-review.yml (from templates/)
     ├── .gitignore                 # Standard ignores
     ├── .planning/
-    │   └── PLANS.md               # ExecPlan format guide
-    ├── AGENTS.md                  # Agent instructions (source of truth)
+    │   └── PLANS.md               # ExecPlan format guide (from templates/)
+    ├── AGENTS.md                  # Agent instructions (from templates/, source of truth)
     ├── CLAUDE.md -> AGENTS.md     # Symlink for Claude Code
-    └── README.md                  # Project README
+    ├── README.md                  # Project README
+    └── scripts/
+        ├── install-bd.sh          # Beads CLI installer (from templates/)
+        └── configure-git-beads-merge-driver.sh  # (from templates/)
 ```
 
 ### sui-dapp additions
@@ -219,15 +258,14 @@ Thumbs.db
 .env.*.local
 ```
 
-### Step B4: Fetch PLANS.md
-
-Fetch the ExecPlan format guide from the OpenAI cookbook:
+### Step B4: Copy PLANS.md from templates
 
 ```bash
-gh api repos/openai/openai-cookbook/contents/articles/codex_exec_plans.md --jq '.content' | base64 -d
+cp ~/.claude/skills/initialize-repo/templates/PLANS.md \
+   ~/Projects/<project-name>/master/.planning/PLANS.md
 ```
 
-Extract the content inside the `~~~md` code fence (starting with `# Codex Execution Plans (ExecPlans):`) and write it to `.planning/PLANS.md`. Do not include the article wrapper.
+(The template originally came from the OpenAI cookbook's ExecPlan article; the copy in `templates/` is canonical now.)
 
 ### Step B5: Copy skills from dotfiles
 
@@ -238,6 +276,29 @@ Copy the skill directories from `~/Projects/dotfiles/.claude/skills/` into the r
 - `initialize-repo/` (this skill)
 
 Preserve executable permissions on scripts.
+
+### Step B6: Copy scaffold files from templates
+
+All from `~/.claude/skills/initialize-repo/templates/` (see [Templates](#templates)):
+
+```bash
+cd ~/Projects/<project-name>/master
+mkdir -p scripts .github/workflows
+T=~/.claude/skills/initialize-repo/templates
+cp "$T/scripts/install-bd.sh" "$T/scripts/configure-git-beads-merge-driver.sh" scripts/
+cp "$T/github-workflows/claude.yml" "$T/github-workflows/claude-code-review.yml" .github/workflows/
+cp "$T/create-worktree" ~/Projects/<project-name>/create-worktree
+```
+
+`create-worktree` lives at the project root (next to the bare `.git/`), untracked or tracked per project taste; it derives the remote, worktree prefix, and base branch from its surroundings, so it needs no editing.
+
+**For types with a Nix flake**, also seed CI:
+
+```bash
+cp "$T/github-workflows/ci-nix.yml" .github/workflows/ci.yml
+```
+
+Then replace the TODO build/test steps below the end-of-preamble marker with the type-specific commands (the same ones listed in the type's AGENTS.md sections).
 
 ---
 
@@ -671,15 +732,13 @@ Include these in the AGENTS.md written during Part 3:
 
 ### Step F1: Write AGENTS.md
 
-Write agent instructions covering:
-- Project overview and description
+Start from `templates/AGENTS.md`. Replace the placeholders (`{{PROJECT_NAME}}`, `{{PROJECT_DESCRIPTION}}`, `{{ISSUE_PREFIX}}` — the issue prefix is the project name passed to `bd init`) and fill in the TODO sections:
 - Project structure (directory layout — adapt to the selected type)
 - Environment setup (Nix + direnv if the type includes a flake, or just note "no special environment" for `bare`)
-- ExecPlans reference to `.planning/PLANS.md`
-- Beads issue tracking quick reference (`bd ready`, `bd show`, `bd create`, etc.)
-- Beads worktree setup (the portable redirect recipe using `git worktree list --porcelain`)
 - **Type-specific build and test commands** (see the "AGENTS.md sections" in the type above)
-- Git workflow: PR-only, draft PRs early, normal merges, stacked PRs, granular commits, worktrees
+- Repo specifics (domain constraints, licensing, deploy targets — whatever is genuinely unique)
+
+**Do not add sections restating global workflow rules** (landing the plane, branch/PR discipline, granular commits, stacked PRs, worktree layout). Those live in `~/.claude/CLAUDE.md` and the skeleton already points at them; restating them is how per-repo copies drift.
 
 ### Step F2: Create CLAUDE.md symlink
 
@@ -809,3 +868,4 @@ Report the results to the user.
 - The skill assumes the user's GitHub username is `tedks`. Adjust the `gh repo create` and remote URL if needed.
 - Skills are copied into the repo (not symlinked) so the repo is self-contained. Check `~/Projects/dotfiles/.claude/skills/` for upstream updates periodically.
 - To add a new project type: add a new section under Part 2, define its AGENTS.md sections, and add verification checks to Step F9.
+- To fix a bug in a scaffold file: fix it in `templates/` first, then use `scripts/sync-check.sh` on the repos that carry copies to see where the fix needs to propagate.
