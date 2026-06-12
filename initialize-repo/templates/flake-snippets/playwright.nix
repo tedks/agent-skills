@@ -27,8 +27,10 @@
     export PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=true
 
     # Optional (used by power): pin chromium to the nixpkgs binary
-    # instead of the playwright-driver bundle.
-    # export PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH="${pkgs.chromium}/bin/chromium"
+    # instead of the playwright-driver bundle. The ''$ escape keeps Nix from
+    # interpolating (and pulling chromium into the closure) while the line
+    # is commented out — change ''${ to ${ when enabling it.
+    # export PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH="''${pkgs.chromium}/bin/chromium"
 
     echo "  playwright: ${pkgs.playwright-driver.version} (browsers pinned via nix)"
   '';

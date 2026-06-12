@@ -99,8 +99,9 @@ for entry in "${VERBATIM[@]}"; do
       # Count changed lines from the unified diff. tail -n +3 drops the
       # ---/+++ headers without excluding content lines (a bare '+'/'-'
       # is an added/removed blank line and must be counted).
-      added=$(diff -u "$template_file" "$target" | tail -n +3 | grep -c '^+' || true)
-      removed=$(diff -u "$template_file" "$target" | tail -n +3 | grep -c '^-' || true)
+      diff_body=$(diff -u "$template_file" "$target" | tail -n +3 || true)
+      added=$(grep -c '^+' <<<"$diff_body" || true)
+      removed=$(grep -c '^-' <<<"$diff_body" || true)
       report "drifted" "$candidate (vs $template: +$added/-$removed lines)"
       n_drifted=$((n_drifted + 1))
     fi

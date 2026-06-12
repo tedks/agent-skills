@@ -14,8 +14,8 @@
 #   └── <project>-<branch>/      # feature worktrees created by this script
 #
 # Branch names containing '/' are flattened to '-' in the worktree directory
-# name. Worktree paths containing spaces are not supported (the grep -Fx
-# path comparisons assume space-free paths).
+# name (note: feat/x and feat-x therefore map to the same directory; the
+# reuse check below catches the collision).
 #
 # Environment overrides:
 #   REMOTE    Remote URL. Defaults to the bare repo's origin URL; only
@@ -36,6 +36,12 @@ usage() {
 worktree_for_ref() {
   git --git-dir="$GIT_DIR" worktree list --porcelain 2>/dev/null \
     | awk -v ref="$1" '/^worktree /{p=substr($0,10)} $1=="branch" && $2==ref{print p; exit}'
+}
+
+# Print the ref checked out at worktree <path>, if any (empty if detached).
+ref_for_worktree() {
+  git --git-dir="$GIT_DIR" worktree list --porcelain 2>/dev/null \
+    | awk -v dir="$1" '/^worktree /{p=substr($0,10)} $1=="branch" && p==dir{print $2; exit}'
 }
 
 find_primary_worktree() {
@@ -170,15 +176,6 @@ echo "Worktree path:    $WORKTREE_DIR"
 echo "Base reference:   $BASE_REF"
 echo "Remote:           ${REMOTE:-<none configured>}"
 
-# Ensure the branch exists locally.
-if git --git-dir="$GIT_DIR" show-ref --verify --quiet "refs/heads/$BRANCH"; then
-  :
-elif git --git-dir="$GIT_DIR" ls-remote --exit-code origin "refs/heads/$BRANCH" >/dev/null 2>&1; then
-  git --git-dir="$GIT_DIR" branch --track "$BRANCH" "origin/$BRANCH"
-else
-  git --git-dir="$GIT_DIR" branch "$BRANCH" "$BASE_REF"
-fi
-
 # If the branch is already checked out somewhere, reuse it only when it is
 # at the expected worktree path; never steal a branch from another worktree.
 CHECKED_OUT_AT="$(worktree_for_ref "refs/heads/$BRANCH")"
@@ -187,13 +184,34 @@ if [ -n "$CHECKED_OUT_AT" ] && [ "$CHECKED_OUT_AT" != "$WORKTREE_DIR" ]; then
   exit 1
 fi
 
-# Add the worktree if needed.
+# Reuse or add the worktree. All path checks happen before the branch is
+# created locally, so aborts leave no stray branch behind.
 if git --git-dir="$GIT_DIR" worktree list --porcelain | awk '/^worktree /{print substr($0,10)}' | grep -Fx "$WORKTREE_DIR" >/dev/null; then
-  echo "Worktree already registered at $WORKTREE_DIR."
+  # Registered: reuse only if it is intact and has the requested branch.
+  if [ ! -e "$WORKTREE_DIR/.git" ]; then
+    echo "Worktree $WORKTREE_DIR is registered but missing on disk." >&2
+    echo "Run: git --git-dir=\"$GIT_DIR\" worktree prune   and rerun." >&2
+    exit 1
+  fi
+  if [ "$CHECKED_OUT_AT" != "$WORKTREE_DIR" ]; then
+    ACTUAL_REF="$(ref_for_worktree "$WORKTREE_DIR")"
+    echo "Worktree $WORKTREE_DIR has ${ACTUAL_REF:-a detached HEAD} checked out, not refs/heads/$BRANCH." >&2
+    echo "(Branch names with '/' flatten to '-', so this may be a name collision.) Aborting." >&2
+    exit 1
+  fi
+  echo "Worktree already registered at $WORKTREE_DIR; reusing."
 elif [ -e "$WORKTREE_DIR" ]; then
   echo "Path $WORKTREE_DIR exists but is not registered as a worktree. Aborting to avoid overwriting." >&2
   exit 1
 else
+  # Ensure the branch exists locally, then add the worktree.
+  if git --git-dir="$GIT_DIR" show-ref --verify --quiet "refs/heads/$BRANCH"; then
+    :
+  elif git --git-dir="$GIT_DIR" ls-remote --exit-code origin "refs/heads/$BRANCH" >/dev/null 2>&1; then
+    git --git-dir="$GIT_DIR" branch --track "$BRANCH" "origin/$BRANCH"
+  else
+    git --git-dir="$GIT_DIR" branch "$BRANCH" "$BASE_REF"
+  fi
   echo "Adding worktree at $WORKTREE_DIR..."
   git --git-dir="$GIT_DIR" worktree add "$WORKTREE_DIR" "$BRANCH"
 fi
