@@ -2,13 +2,20 @@
 
 # Create or reuse a sibling worktree for the given branch, using the central
 # bare repository located at .git in the directory containing this script.
+# Idempotent: rerunning for an existing worktree reuses it (and repairs a
+# missing beads redirect).
 #
 # Expected project layout (this script lives at the project root):
 #   ~/Projects/<project>/
 #   ├── .git/                    # bare repo
+#   ├── .beads/                  # canonical beads dir (if the project uses beads)
 #   ├── create-worktree          # this script
 #   ├── master/                  # primary worktree (master or main)
 #   └── <project>-<branch>/      # feature worktrees created by this script
+#
+# Branch names containing '/' are flattened to '-' in the worktree directory
+# name. Worktree paths containing spaces are not supported (the grep -Fx
+# path comparisons assume space-free paths).
 #
 # Environment overrides:
 #   REMOTE    Remote URL. Defaults to the bare repo's origin URL; only
@@ -23,42 +30,63 @@ usage() {
   exit 1
 }
 
+# Print the path of the worktree that has <ref> checked out, if any.
+# Paths are taken from the full porcelain line ("worktree <path>"), so
+# embedded spaces survive this parse.
+worktree_for_ref() {
+  git --git-dir="$GIT_DIR" worktree list --porcelain 2>/dev/null \
+    | awk -v ref="$1" '/^worktree /{p=substr($0,10)} $1=="branch" && $2==ref{print p; exit}'
+}
+
 find_primary_worktree() {
   # Prefer the worktree on master, then main; otherwise use the first listed
-  # worktree (excluding the bare repo itself).
+  # worktree (the bare repo is always the first stanza, so take the second).
   local primary path
   for primary in master main; do
-    path="$(git --git-dir="$GIT_DIR" worktree list --porcelain 2>/dev/null | awk -v ref="refs/heads/$primary" '$1=="worktree"{p=$2} $1=="branch" && $2==ref{print p}')"
+    path="$(worktree_for_ref "refs/heads/$primary")"
     if [[ -n "$path" ]]; then
       echo "$path"
       return
     fi
   done
-  git --git-dir="$GIT_DIR" worktree list --porcelain 2>/dev/null | awk 'NR==1{next} $1=="worktree"{print $2; exit}'
+  git --git-dir="$GIT_DIR" worktree list --porcelain 2>/dev/null \
+    | awk '/^worktree /{c++; if (c == 2) { print substr($0,10); exit }}'
 }
 
 setup_beads_redirect() {
-  local canonical_worktree
-  canonical_worktree="$(find_primary_worktree)"
-  if [[ -z "$canonical_worktree" ]]; then
-    echo "[beads][warn] No primary worktree found; skipping redirect setup."
-    return 0
+  # Find the canonical .beads/: the project root first (the layout the
+  # initialize-repo skill scaffolds), then the primary worktree (legacy
+  # layout). If neither has one, the project does not use beads and
+  # nothing is written.
+  local canonical_beads_dir=""
+  if [[ -d "$ROOT/.beads" ]]; then
+    canonical_beads_dir="$ROOT/.beads"
+  else
+    local canonical_worktree
+    canonical_worktree="$(find_primary_worktree)"
+    if [[ "$canonical_worktree" == "$WORKTREE_DIR" ]]; then
+      echo "[beads] This worktree is the primary worktree; no redirect needed."
+      return 0
+    fi
+    if [[ -n "$canonical_worktree" && -d "$canonical_worktree/.beads" ]]; then
+      canonical_beads_dir="$canonical_worktree/.beads"
+    fi
   fi
-  if [[ "$canonical_worktree" == "$WORKTREE_DIR" ]]; then
-    echo "[beads] This worktree is the primary worktree; no redirect needed."
+
+  if [[ -z "$canonical_beads_dir" ]]; then
+    echo "[beads] No canonical .beads/ found; skipping redirect setup (project may not use beads)."
     return 0
   fi
 
-  local canonical_beads_dir="$canonical_worktree/.beads"
   local worktree_beads_dir="$WORKTREE_DIR/.beads"
   local redirect_file="$worktree_beads_dir/redirect"
-
-  mkdir -p "$canonical_beads_dir" "$worktree_beads_dir"
 
   if [[ -f "$redirect_file" ]]; then
     echo "[beads] Redirect already present: $redirect_file"
     return 0
   fi
+
+  mkdir -p "$worktree_beads_dir"
 
   local target_ref="$canonical_beads_dir"
   if command -v realpath >/dev/null 2>&1; then
@@ -82,8 +110,8 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 GIT_DIR="$ROOT/.git"
 PROJECT="$(basename "$ROOT")"
 case "$BRANCH" in
-  master|main) WORKTREE_DIR="$ROOT/$BRANCH" ;;          # primary worktree
-  *)           WORKTREE_DIR="$ROOT/$PROJECT-$BRANCH" ;; # feature worktrees
+  master|main) WORKTREE_DIR="$ROOT/$BRANCH" ;;                  # primary worktree
+  *)           WORKTREE_DIR="$ROOT/$PROJECT-${BRANCH//\//-}" ;; # feature worktrees
 esac
 
 # Ensure the central bare repo exists.
@@ -117,8 +145,10 @@ if ! git --git-dir="$GIT_DIR" config --get-all remote.origin.fetch >/dev/null 2>
   git --git-dir="$GIT_DIR" config remote.origin.fetch "+refs/heads/*:refs/remotes/origin/*"
 fi
 
-# Stay up to date.
-git --git-dir="$GIT_DIR" fetch origin --prune
+# Stay up to date. Non-fatal: offline use is fine when the refs already exist.
+if ! git --git-dir="$GIT_DIR" fetch origin --prune; then
+  echo "[warn] Fetch from origin failed; continuing with local refs." >&2
+fi
 
 # Pick the base reference for new branches: origin/master, then origin/main.
 if [ -z "${BASE_REF:-}" ]; then
@@ -149,14 +179,16 @@ else
   git --git-dir="$GIT_DIR" branch "$BRANCH" "$BASE_REF"
 fi
 
-# Avoid checking out a branch already in use.
-if git --git-dir="$GIT_DIR" worktree list --porcelain | awk '$1=="branch"{print $2}' | grep -Fx "refs/heads/$BRANCH" >/dev/null; then
-  echo "Branch $BRANCH is already checked out in another worktree. Reuse it or pick a new branch name." >&2
+# If the branch is already checked out somewhere, reuse it only when it is
+# at the expected worktree path; never steal a branch from another worktree.
+CHECKED_OUT_AT="$(worktree_for_ref "refs/heads/$BRANCH")"
+if [ -n "$CHECKED_OUT_AT" ] && [ "$CHECKED_OUT_AT" != "$WORKTREE_DIR" ]; then
+  echo "Branch $BRANCH is already checked out at $CHECKED_OUT_AT. Reuse it there or pick a new branch name." >&2
   exit 1
 fi
 
 # Add the worktree if needed.
-if git --git-dir="$GIT_DIR" worktree list --porcelain | awk '$1=="worktree"{print $2}' | grep -Fx "$WORKTREE_DIR" >/dev/null; then
+if git --git-dir="$GIT_DIR" worktree list --porcelain | awk '/^worktree /{print substr($0,10)}' | grep -Fx "$WORKTREE_DIR" >/dev/null; then
   echo "Worktree already registered at $WORKTREE_DIR."
 elif [ -e "$WORKTREE_DIR" ]; then
   echo "Path $WORKTREE_DIR exists but is not registered as a worktree. Aborting to avoid overwriting." >&2
