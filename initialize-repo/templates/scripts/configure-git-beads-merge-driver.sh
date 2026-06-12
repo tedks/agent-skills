@@ -77,6 +77,9 @@ if [[ "$FORCE" != "1" && -n "$EXISTING_DRIVER" && -n "$EXISTING_NAME" ]]; then
   exit 0
 fi
 
+# Argument order per `bd merge --help` (bd 0.47.x): <output> <base> <left> <right>,
+# i.e. "bd merge %A %O %A %B". The classic git merge-driver order (%O %A %B)
+# seen in some drifted copies is WRONG for bd.
 git -C "$ROOT" config merge.beads.name "bd JSONL merge driver"
 git -C "$ROOT" config merge.beads.driver "bd merge %A %O %A %B"
 

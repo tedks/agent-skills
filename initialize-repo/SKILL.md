@@ -63,7 +63,7 @@ Set up a new project from scratch with the full development environment: bare gi
 
 For each verbatim template it checks the known candidate locations (`scripts/` and repo root; `.planning/PLANS.md` and root `PLANS.md`; `../create-worktree` for the project-root layout) and prints one line per file found: `identical`, `drifted` (with changed-line counts), or `missing`. Skeleton templates are reported presence-only, never diffed. The Playwright snippet is detected by grepping `flake.nix` for `playwright-driver`.
 
-The script is **read-only** — it never modifies the target repo. Divergence after scaffolding is allowed; the report exists to make drift *visible* so it can be reviewed deliberately, not to enforce conformance. It always exits 0 (it's a report, not a gate) except on usage errors.
+The script is **read-only** — it never modifies the target repo. Divergence after scaffolding is allowed; the report exists to make drift *visible* so it can be reviewed deliberately, not to enforce conformance. It always exits 0 (it's a report, not a gate) except on usage errors or a broken skill install (missing template files).
 
 When "landing the plane" in a repo that was scaffolded by this skill, it's worth occasionally running sync-check and mentioning any drift in the handoff notes — drift that nobody knows about is how these files forked in the first place.
 

@@ -22,6 +22,7 @@ agent genuinely needs divergent instructions.
 
 ## Environment
 
+<!-- TODO: delete this paragraph (and .envrc note) if the project has no flake -->
 This repo uses a Nix flake. Run project tooling through it:
 
 ```bash
@@ -52,9 +53,10 @@ bd close {{ISSUE_PREFIX}}-1                 # complete work
 bd sync                                     # sync with git
 ```
 
-The canonical `.beads/` lives in the primary worktree; feature worktrees
-reach it via `.beads/redirect` (created automatically by
-`create-worktree`). Include `bd sync` in the end-of-session push workflow.
+The canonical `.beads/` lives at the project root, next to the bare
+`.git/`; every worktree reaches it via `.beads/redirect` (committed at
+scaffold time, and recreated by `create-worktree` if missing). Include
+`bd sync` in the end-of-session push workflow.
 If `bd sync` complains about the merge driver, rerun
 `scripts/configure-git-beads-merge-driver.sh`.
 

@@ -12,17 +12,23 @@
 #
 # Exit codes:
 #   0  report printed (drift or not — this is a report, not a gate)
-#   2  usage error (bad arguments, missing repo or templates dir)
+#   2  usage error, or the skill install itself is broken (missing
+#      templates dir or template file)
+#
+# Assumes target files are readable; unreadable files surface as diff/cmp
+# errors rather than tidy report lines.
 
 set -euo pipefail
 
-usage() {
-  echo "Usage: $(basename "$0") <repo-path>" >&2
-  exit 2
+print_usage() {
+  echo "Usage: $(basename "$0") <repo-path>"
 }
 
-[[ $# -eq 1 ]] || usage
-case "$1" in -h|--help) usage ;; esac
+case "${1:-}" in -h|--help) print_usage; exit 0 ;; esac
+if [[ $# -ne 1 ]]; then
+  print_usage >&2
+  exit 2
+fi
 
 REPO="$1"
 if [[ ! -d "$REPO" ]]; then
@@ -90,9 +96,11 @@ for entry in "${VERBATIM[@]}"; do
       report "identical" "$candidate"
       n_identical=$((n_identical + 1))
     else
-      # Count changed lines from the unified diff, excluding headers.
-      added=$(diff -u "$template_file" "$target" | grep -c '^+[^+]' || true)
-      removed=$(diff -u "$template_file" "$target" | grep -c '^-[^-]' || true)
+      # Count changed lines from the unified diff. tail -n +3 drops the
+      # ---/+++ headers without excluding content lines (a bare '+'/'-'
+      # is an added/removed blank line and must be counted).
+      added=$(diff -u "$template_file" "$target" | tail -n +3 | grep -c '^+' || true)
+      removed=$(diff -u "$template_file" "$target" | tail -n +3 | grep -c '^-' || true)
       report "drifted" "$candidate (vs $template: +$added/-$removed lines)"
       n_drifted=$((n_drifted + 1))
     fi
@@ -104,7 +112,9 @@ for entry in "${VERBATIM[@]}"; do
 done
 
 for entry in "${SKELETON[@]}"; do
-  IFS='|' read -r template candidate <<<"$entry"
+  IFS='|' read -r -a parts <<<"$entry"
+  template="${parts[0]}"
+  candidate="${parts[1]}"
   if [[ -f "$REPO/$candidate" ]]; then
     report "skeleton" "$candidate (present; repo-specific by design, not diffed)"
     n_skeleton=$((n_skeleton + 1))

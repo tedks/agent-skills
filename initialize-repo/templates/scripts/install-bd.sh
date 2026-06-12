@@ -57,7 +57,12 @@ if ! command -v npm >/dev/null 2>&1; then
 fi
 
 echo "[install-bd] Installing @beads/bd@$VERSION..."
-npm install -g "@beads/bd@$VERSION"
+if ! npm install -g "@beads/bd@$VERSION"; then
+  echo "[install-bd][error] npm install failed." >&2
+  echo "[install-bd][error] If this is a permissions error, set a user-writable prefix:" >&2
+  echo "[install-bd][error]   npm config set prefix ~/.npm-global   (and add ~/.npm-global/bin to PATH)" >&2
+  exit 1
+fi
 
 if ! command -v bd >/dev/null 2>&1; then
   echo "[install-bd][error] bd not found in PATH after install" >&2
