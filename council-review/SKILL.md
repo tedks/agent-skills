@@ -1,12 +1,12 @@
 ---
 name: council-review
-description: Multi-agent code review council - gets reviews from Claude, Codex, and Gemini simultaneously
+description: Multi-agent code review council - gets reviews from Claude, Codex, and Antigravity (agy) simultaneously
 argument-hint: '[target] — e.g. PR #42, staged, branch, or a file path'
 ---
 
 # council-review
 
-Launch a code review "council" — get reviews from all three AI agents (Claude, Codex, Gemini) simultaneously, then synthesize the results.
+Launch a code review "council" — get reviews from all three AI agents (Claude, Codex, agy) simultaneously, then synthesize the results.
 
 ## Usage
 
@@ -73,7 +73,7 @@ PR targets are simpler — each agent can pull context from the PR itself. Deter
 Launch all three in a single parallel tool invocation:
 1. **Your own review (subagent):** Use the `Agent` tool with the review prompt + PR diff
 2. **Codex:** `/ask-agent codex "Review PR #N in <owner/repo>. <review prompt template from Step 2, without the diff — the agent will pull it>"`
-3. **Gemini:** `/ask-agent gemini "Review PR #N in <owner/repo>. <review prompt template from Step 2, without the diff — the agent will pull it>"`
+3. **agy (Antigravity CLI):** `/ask-agent agy "Review PR #N in <owner/repo>. <review prompt template from Step 2, without the diff — the agent will pull it>"`
 
 #### For all other targets
 
@@ -90,7 +90,7 @@ REVIEW_EOF
 Then launch all three in a single parallel tool invocation:
 1. **Your own review (subagent):** Use the `Agent` tool with the review prompt
 2. **Codex:** `/ask-agent codex --prompt-file "$PROMPT_FILE"`
-3. **Gemini:** `/ask-agent gemini --prompt-file "$PROMPT_FILE"`
+3. **agy (Antigravity CLI):** `/ask-agent agy --prompt-file "$PROMPT_FILE"`
 
 ### Step 4: Present the council's findings
 
@@ -108,7 +108,7 @@ Once all three reviews are collected, present a unified summary:
 ### Codex's Review
 <summary of unique points>
 
-### Gemini's Review
+### agy's Review
 <summary of unique points>
 
 ### Recommendations

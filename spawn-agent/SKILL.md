@@ -19,7 +19,7 @@ fan-out workflows where you want multiple agents working simultaneously.
 ## Arguments
 
 - `<session:window>`: tmux target (e.g., `chaos:review`)
-- `<agent>`: The agent to spawn (`claude`, `codex`, `gemini`)
+- `<agent>`: The agent to spawn (`claude`, `codex`, `agy`)
 - `[directory]`: Working directory (default: current)
 - `[prompt]`: Initial prompt for the agent
 
@@ -106,8 +106,8 @@ This prints the current socket, server PID, all sessions, and all windows.
 # Spawn Codex for a different perspective
 /spawn-agent chaos:codex-review codex ./project "Help refactor this"
 
-# Spawn Gemini
-/spawn-agent chaos:gemini-review gemini ./project "Check this design"
+# Spawn agy (Antigravity CLI)
+/spawn-agent chaos:agy-review agy ./project "Check this design"
 
 # Spawn without initial prompt (interactive from start)
 /spawn-agent chaos:helper claude .

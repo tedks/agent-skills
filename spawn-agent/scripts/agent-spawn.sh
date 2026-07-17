@@ -4,7 +4,7 @@
 # Usage: agent-spawn.sh <session:window> <agent> [directory] [prompt]
 #        agent-spawn.sh <session:window> <agent> [directory] --prompt-file <file>
 #
-# Agents: claude, codex, gemini
+# Agents: claude, codex, agy (Antigravity CLI)
 #
 # Options:
 #   -f, --prompt-file <file>   Read prompt from file (avoids ARG_MAX)
@@ -30,7 +30,7 @@ usage() {
     echo "Usage: agent-spawn.sh <session:window> <agent> [directory] [prompt]" >&2
     echo "       agent-spawn.sh <session:window> <agent> [directory] --prompt-file <file>" >&2
     echo "  session:window: tmux target (e.g., 'chaos:review')" >&2
-    echo "  agent: claude, codex, gemini" >&2
+    echo "  agent: claude, codex, agy" >&2
     echo "  directory: working directory (default: current)" >&2
     echo "  prompt: initial prompt for the agent" >&2
     echo "  --prompt-file: read prompt from file (avoids ARG_MAX)" >&2
@@ -95,10 +95,10 @@ window="${target#*:}"
 
 # Validate agent
 case "$agent" in
-    claude|codex|gemini) ;;
+    claude|codex|agy) ;;
     *)
         echo "Unknown agent: $agent" >&2
-        echo "Supported agents: claude, codex, gemini" >&2
+        echo "Supported agents: claude, codex, agy" >&2
         exit 1
         ;;
 esac

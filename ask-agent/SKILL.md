@@ -8,7 +8,7 @@ allowed-tools: Bash(~/.claude/skills/ask-agent/scripts/*)
 # ask-agent
 
 Query another AI agent non-interactively and get the response back. Use this
-when you want a second opinion from a different agent (Claude, Codex, Gemini, etc.).
+when you want a second opinion from a different agent (Claude, Codex, Antigravity/agy, etc.).
 
 ## Usage
 
@@ -18,7 +18,7 @@ when you want a second opinion from a different agent (Claude, Codex, Gemini, et
 
 ## Arguments
 
-- `<agent>`: The agent to query (`claude`, `codex`, `gemini`)
+- `<agent>`: The agent to query (`claude`, `codex`, `agy`)
 - `<prompt>`: The question or request for the agent
 
 ## Options
@@ -71,11 +71,11 @@ Report the response back to the user.
 # Query from a specific directory
 /ask-agent codex -d ./src "Explain what the auth module does"
 
-# Ask Gemini for a summary
-/ask-agent gemini "Summarize this codebase"
+# Ask agy (Antigravity CLI) for a summary
+/ask-agent agy "Summarize this codebase"
 
-# Ask Gemini with a specific model
-/ask-agent gemini -m gemini-2.5-pro "Review this architecture"
+# Ask agy with a specific model (see `agy models` for available names)
+/ask-agent agy -m <model> "Review this architecture"
 
 # Use a prompt file for large prompts (avoids ARG_MAX)
 /ask-agent codex --prompt-file /tmp/review-prompt.txt
@@ -87,7 +87,7 @@ Report the response back to the user.
 |--------|------------------------|-------|
 | claude | `claude -p` | Yes - reads from stdin when no positional prompt given |
 | codex  | `codex exec -` | Yes - `-` reads from stdin |
-| gemini | `gemini -p "" -o text` | Yes - `-p ""` enables headless mode, reads prompt from stdin |
+| agy | `agy -p -` | Yes - `-p -` reads the prompt from stdin (Antigravity CLI) |
 
 ## Notes
 

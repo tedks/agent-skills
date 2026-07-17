@@ -4,7 +4,7 @@
 # Usage: agent-query.sh <agent> [options] <prompt>
 #        agent-query.sh <agent> [options] --prompt-file <file>
 #
-# Agents: claude, codex, gemini
+# Agents: claude, codex, agy (Antigravity CLI)
 #
 # Options:
 #   -d, --dir <dir>              Set working directory
@@ -18,7 +18,7 @@
 #   agent-query.sh claude "Explain this error"
 #   agent-query.sh codex -d ./project "Review the auth module"
 #   agent-query.sh codex --model o3 "Optimize this function"
-#   agent-query.sh gemini "Summarize this codebase"
+#   agent-query.sh agy "Summarize this codebase"
 #   agent-query.sh claude --prompt-file /tmp/review-prompt.txt
 
 set -e
@@ -26,7 +26,7 @@ set -e
 usage() {
     echo "Usage: agent-query.sh <agent> [options] <prompt>" >&2
     echo "       agent-query.sh <agent> [options] --prompt-file <file>" >&2
-    echo "Agents: claude, codex, gemini" >&2
+    echo "Agents: claude, codex, agy" >&2
     echo "Options:" >&2
     echo "  -d, --dir <dir>              Set working directory" >&2
     echo "  -m, --model <model>          Specify model" >&2
@@ -112,8 +112,7 @@ fi
 
 # Build command array — the prompt is NOT included in argv.
 # It will be piped via stdin to avoid ARG_MAX limits.
-# All three agents (claude, codex, gemini) read from stdin when
-# no positional prompt argument is given — verified empirically.
+# All three agents (claude, codex, agy) read the prompt from stdin.
 case "$agent" in
     claude)
         cmd=(claude -p)
@@ -123,15 +122,16 @@ case "$agent" in
         cmd=(codex exec -)
         [[ -n "$model" ]] && cmd+=(-m "$model")
         ;;
-    gemini)
-        # gemini requires -p for headless mode; with -p "" it reads
-        # the actual prompt from stdin ("Appended to input on stdin").
-        cmd=(gemini -p "" -o text)
-        [[ -n "$model" ]] && cmd+=(-m "$model")
+    agy)
+        # Antigravity CLI: --print/-p runs a single prompt non-interactively.
+        # `-p -` (dash) makes it read the prompt from stdin, which keeps the
+        # prompt out of argv (ARG_MAX-safe). Model flag is --model.
+        cmd=(agy -p -)
+        [[ -n "$model" ]] && cmd+=(--model "$model")
         ;;
     *)
         echo "Unknown agent: $agent" >&2
-        echo "Supported agents: claude, codex, gemini" >&2
+        echo "Supported agents: claude, codex, agy" >&2
         exit 1
         ;;
 esac
