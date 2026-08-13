@@ -49,6 +49,7 @@ this repo can run `ditz`. Install via Nix:
 `nix run github:tedks/ditz -- <cmd>` (or install `github:tedks/ditz#ditz`).
 
 ```bash
+ditz add "title"              # file a new issue (-t bugfix|feature|task, -c <component>)
 ditz ready                    # find available work (unblocked, ranked)
 ditz show <id>                # view issue details (add --json for machine output)
 ditz start <id>               # claim work (marks in_progress)
