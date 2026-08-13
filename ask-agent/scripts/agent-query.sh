@@ -18,6 +18,10 @@
 # it at 128 KiB and expose it in `ps` -- the script stages it in a private temp
 # directory and passes agy a path plus --add-dir. See the agy branch below.
 #
+# Exit status is the agent's own, with one addition: 3 means agy exited 0 but
+# its reply did not carry the end-of-prompt sentinel, i.e. it may have answered
+# without reading the staged prompt to the end. See the agy branch.
+#
 # Examples:
 #   agent-query.sh claude "Explain this error"
 #   agent-query.sh codex -d ./project "Review the auth module"
@@ -83,12 +87,17 @@ _cleanup_prompt_file=""
 # actually removes it -- on success, failure, and signals alike.
 _cleanup_agy_dir=""
 
+# agy's stdout is captured to a file rather than inherited, so the sentinel can
+# be checked and stripped before anything reaches the caller.
+_cleanup_agy_out=""
+
 # Trap to clean up temp files on any exit (failure paths).
 # On the claude/codex success path, we manually delete before exec, because
 # exec replaces this process and the trap would never fire.
 cleanup() {
     [[ -n "$_cleanup_prompt_file" ]] && rm -f "$_cleanup_prompt_file"
     [[ -n "$_cleanup_agy_dir" ]] && rm -rf -- "$_cleanup_agy_dir"
+    [[ -n "$_cleanup_agy_out" ]] && rm -f -- "$_cleanup_agy_out"
 }
 trap cleanup EXIT
 
@@ -204,11 +213,30 @@ if [[ -n "$prompt_via_file" ]]; then
     _cleanup_agy_dir="$agy_dir"
     agy_prompt="$agy_dir/prompt.txt"
 
+    # End-of-prompt sentinel. Nothing forces agy to read the staged file to its
+    # end -- a partial read answers plausibly and exits 0, which is the same
+    # silent failure the `agy -p -` form had. So the file ends with a marker
+    # that agy is told to echo back, and a reply without it is rejected below.
+    #
+    # Derived from mktemp's suffix: unpredictable, and unique across concurrent
+    # runs for the same reason the directory name is. The instruction in argv
+    # deliberately does NOT spell the marker out -- it can only say where the
+    # marker is -- otherwise agy could reproduce it from the instruction alone
+    # and the guard would prove nothing.
+    agy_sentinel="__ASK_AGENT_EOP_${agy_dir##*.}__"
+
     # 0600 before content lands: on a shared /tmp the window between create and
     # chmod is a real read window, and the prompt may be private source.
-    ( umask 077; cat -- "$prompt_file" > "$agy_prompt" )
+    # The redirect must stay inside the subshell, after umask: a redirect
+    # attached to `( ... )` is performed at fork time, under the outer umask.
+    ( umask 077
+      { cat -- "$prompt_file"
+        printf '\n\n[end-of-prompt marker -- not part of the prompt above]\n%s\n' \
+               "$agy_sentinel"
+      } > "$agy_prompt"
+    )
 
-    cmd+=(--add-dir "$agy_dir" -p "Read the file $agy_prompt in full and follow the instructions in it. Treat its entire contents as your prompt. Do not ask for confirmation before reading it.")
+    cmd+=(--add-dir "$agy_dir" -p "Read the file $agy_prompt in full and follow the instructions in it. Treat its entire contents as your prompt, except for its final line, which is an end-of-prompt marker rather than part of the prompt. Do not ask for confirmation before reading it. When you have finished, reproduce that final marker line verbatim, on a line of its own, as the very last line of your reply, so the caller can confirm you read the whole prompt.")
 
     # Deliberately NOT exec: agy must be able to read the staging file for its
     # whole run, so this script has to outlive it in order to clean up.
@@ -219,7 +247,19 @@ if [[ -n "$prompt_via_file" ]]; then
     # directory out from under a still-running agy, and leave it orphaned on
     # the caller's stdout. Callers here DO run this under `timeout`, so that is
     # the expected path, not a corner case.
-    "${cmd[@]}" &
+    # Capture stdout so the sentinel can be verified and stripped before the
+    # reply reaches the caller. This costs streaming -- the reply lands when agy
+    # exits, not live -- but every caller of this script captures the whole
+    # reply anyway. stderr is left inherited, so agy's own diagnostics still
+    # arrive as they happen.
+    #
+    # The capture file lives OUTSIDE $agy_dir on purpose: that directory is the
+    # --add-dir workspace, and "holds nothing but this prompt" is what bounds
+    # the grant. mktemp creates it 0600.
+    agy_out="$(mktemp /tmp/ask-agent-agy-out.XXXXXX)"
+    _cleanup_agy_out="$agy_out"
+
+    "${cmd[@]}" > "$agy_out" &
     agy_pid=$!
 
     # Forward the signal we actually received rather than translating
@@ -255,6 +295,27 @@ if [[ -n "$prompt_via_file" ]]; then
         status=0
         wait "$agy_pid" || status=$?
     done
+
+    # A run that exited 0 without the marker is the failure this guard exists
+    # for: agy answered, but there is no evidence it read the prompt to the end.
+    # Report it loudly and distinctly (3) rather than passing a maybe-truncated
+    # answer off as success. The reply is still emitted -- it is usually mostly
+    # right, and a caller that ignores both stderr and the exit status was never
+    # going to be saved by withholding it.
+    if (( status == 0 )) && ! grep -qF -- "$agy_sentinel" "$agy_out"; then
+        echo "Error: response missing prompt-completion sentinel; prompt may have been read partially" >&2
+        status=3
+    fi
+
+    # Strip the marker, plus the trailing blank line it leaves behind. Removal
+    # is unconditional: on a nonzero status the marker is usually absent anyway,
+    # and it must never survive into the reply when it is not.
+    response="$(< "$agy_out")"                            # drops trailing \n
+    response="${response//"$agy_sentinel"/}"              # quoted: literal
+    response="${response%"${response##*[![:space:]]}"}"   # re-trim the tail
+    if [[ -n "$response" ]]; then
+        printf '%s\n' "$response"
+    fi
 
     exit "$status"
 fi

@@ -114,3 +114,9 @@ Report the response back to the user.
     for as long as agy runs.
   - `--add-dir` is required: without it agy auto-denies its own `read_file`
     in headless mode and exits with no output. Loud, not silent.
+  - The staged prompt ends with a per-run marker that agy is told to reproduce
+    as the last line of its reply. A reply without it means agy may have
+    answered without reading the prompt to the end, so the script says so on
+    stderr and **exits 3**. The reply is still printed (marker stripped), but
+    treat exit 3 as "this answer may be based on a partial prompt", not as a
+    clean result.
