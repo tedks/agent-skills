@@ -139,15 +139,48 @@ headless mode cannot prompt for, so it was auto-denied.
 ```
 
 Which tool it picks varies run to run, so this presents as an intermittent
-failure (roughly 1 in 8 from an untrusted workspace). Two mitigations, neither
-touching machine-wide permissions:
+failure (roughly 1 in 8 from an untrusted workspace).
+
+**It arrives in two shapes**, and they look completely different from outside:
+
+| | stdout | stderr | exit |
+|---|---|---|---|
+| **hard** — agy aborts | *empty* | the `jetski:` message | 0 |
+| **soft** — agy carries on | the message is *in the reply* | — | 0 |
+
+The script captures stdout but not stderr (stderr passes through live, which is
+what you want for visibility), so the hard shape shows up simply as **an empty
+reply that exited 0**.
+
+Mitigations, neither touching machine-wide permissions:
 
 - the preamble tells agy to use its file-reading tool and not a shell command;
-- the script retries **once**, only when the run exited 0 *and* the output
-  carries that auto-deny signature, announcing the retry on stderr.
+- the script retries **once**, when the run exited 0 **and the reply does not
+  carry the marker**, and is then either empty (hard) or carries the auto-deny
+  text (soft). The stderr note says which shape it was.
+
+The marker-absence gate is what makes this safe. A genuine denial produced no
+answer, so it cannot carry the marker; a real reply that merely *quotes* the
+denial text — which every "review ask-agent" prompt does, since that phrase is
+in this very file — does carry it. Without the gate, a good answer was thrown
+away and re-asked. And given the gate, "empty" is a sound trigger by itself:
+the marker is mandatory, so empty-and-exit-0 can never be a valid reply.
 
 It is deliberately **not** a general retry on exit 3 — that would paper over
 genuine partial reads, which is what the marker exists to catch. If you see the
 retry note often, the durable fix is a permission allow-rule in
 `~/.gemini/config/config.json`, which is an operator security decision and is
-tracked separately rather than shipped here.
+tracked separately (ditz `agy-headless-command-permission`) rather than shipped
+here.
+
+### Known residuals
+
+- **Replies above ~500KB with no newline at all** hit a quadratic parameter
+  expansion when the last line is located: ~0.36s at 200KB, ~3.4s at 500KB,
+  ~15.4s at 1MB. Any plausible reply is far below the cliff, but callers run
+  this under `timeout`, so it is worth knowing the shape.
+- **A signal arriving after agy is reaped but during reply handling discards
+  the reply** (~0.4s window). Deliberate: the signal-forwarding traps are
+  disarmed once the child is reaped, because leaving them armed meant firing
+  `kill` at a PID that may already have been recycled. Losing a reply to a
+  signal that arrived in a 0.4s window is the better failure.

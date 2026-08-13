@@ -73,7 +73,26 @@ PR targets are simpler — each agent can pull context from the PR itself. Deter
 Launch all three in a single parallel tool invocation:
 1. **Your own review (subagent):** Use the `Agent` tool with the review prompt + PR diff
 2. **Codex:** `/ask-agent codex "Review PR #N in <owner/repo>. <review prompt template from Step 2, without the diff — the agent will pull it>"`
-3. **agy (Antigravity CLI):** `/ask-agent agy "Review PR #N in <owner/repo>. <review prompt template from Step 2, without the diff — the agent will pull it>"`
+3. **agy (Antigravity CLI):** **must be given the diff inline** — see below. Do *not* tell agy to pull the PR.
+
+> **agy cannot fetch anything.** Headless agy has no usable tool access: the
+> `command` permission cannot be prompted for in headless mode and is
+> auto-denied, so `gh pr diff`, `git`, `cat` — anything but reading the one
+> staged prompt file — will fail, and the run produces no output at all. See
+> ditz `agy-headless-command-permission`; granting it is an operator decision
+> and is deliberately not part of the tooling.
+>
+> So for **every** agy review: put the complete diff *in the prompt*, tell it
+> explicitly not to run commands or fetch anything, and run it from a neutral
+> directory so nothing in the cwd invites exploration:
+>
+> ```bash
+> /ask-agent agy -d /tmp --prompt-file "$PROMPT_FILE"
+> ```
+>
+> and open the prompt with a line like: *"Everything you need is in this
+> prompt. Do not run any commands and do not fetch anything — review only what
+> is written below."*
 
 #### For all other targets
 
@@ -90,7 +109,13 @@ REVIEW_EOF
 Then launch all three in a single parallel tool invocation:
 1. **Your own review (subagent):** Use the `Agent` tool with the review prompt
 2. **Codex:** `/ask-agent codex --prompt-file "$PROMPT_FILE"`
-3. **agy (Antigravity CLI):** `/ask-agent agy --prompt-file "$PROMPT_FILE"`
+3. **agy (Antigravity CLI):** `/ask-agent agy -d /tmp --prompt-file "$PROMPT_FILE"`
+
+This mode already inlines the diff, which is why it suits agy. Still add the
+"everything you need is in this prompt, do not run commands" line for agy, and
+keep `-d /tmp` — a neutral cwd. Reading the staged prompt file is the *one*
+tool agy is permitted (that is what `--add-dir` grants); anything else is
+auto-denied and costs you the whole review.
 
 ### Step 4: Present the council's findings
 
