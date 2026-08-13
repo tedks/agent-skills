@@ -16,6 +16,10 @@ A stack is a chain: `main ← PR1 ← PR2 ← PR3`. Each PR targets the one belo
 - PR3 targets PR2's branch
 - If you're confused about what targets what, run `gh pr view --json baseRefName`
 
+This is what keeps each PR's diff limited to its own changes. Target them
+all at main instead and every PR shows the cumulative diff of the whole
+stack below it, which is what makes a stack unreviewable.
+
 ## Merging a Stack
 
 When the bottom PR is approved:
