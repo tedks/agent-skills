@@ -299,10 +299,19 @@ if [[ -n "$prompt_via_file" ]]; then
     # ${x%"${x##*[![:space:]]}"} is O(len x trailing-ws-run) -- 18.0s on a 200KB
     # reply with 1000 trailing spaces. The regex is 20ms on the same input.
     _agy_rtrim() {   # sets _rtrim_out; no subshell, no fork
+        # LC_ALL=C is not a preference, it is what makes this safe. Under a
+        # UTF-8 locale glibc's regexec REFUSES to match a string containing an
+        # invalid multibyte sequence, and the no-match branch below means
+        # "nothing but whitespace" -- so an undecodable byte anywhere would
+        # silently empty the whole reply. agy killed mid-reply ends inside a
+        # multibyte character routinely, so that is the `timeout` path, not an
+        # exotic one. Under C every byte is valid and [[:space:]] stays ASCII,
+        # so the match cannot fail for encoding reasons.
+        local LC_ALL=C
         if [[ "$1" =~ ^(.*[^[:space:]])[[:space:]]*$ ]]; then
             _rtrim_out="${BASH_REMATCH[1]}"
         else
-            _rtrim_out=""    # nothing but whitespace
+            _rtrim_out=""    # genuinely nothing but whitespace
         fi
     }
 
