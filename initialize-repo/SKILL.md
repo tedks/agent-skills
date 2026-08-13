@@ -59,7 +59,7 @@ Set up a new project from scratch with the full development environment: bare gi
 ~/.claude/skills/initialize-repo/scripts/sync-check.sh ~/Projects/<project>/master
 ```
 
-For each verbatim template it checks the known candidate locations (`scripts/` and repo root; `.planning/PLANS.md` and root `PLANS.md`; `../create-worktree` for the project-root layout) and prints one line per file found: `identical`, `drifted` (with changed-line counts), or `missing`. Skeleton templates are reported presence-only, never diffed. The Playwright snippet is detected by grepping `flake.nix` for `playwright-driver`.
+For each verbatim template it checks the known candidate locations (`.planning/PLANS.md` and root `PLANS.md`; `../create-worktree` for the project-root layout) and prints one line per file found: `identical`, `drifted` (with changed-line counts), or `missing`. Skeleton templates are reported presence-only, never diffed. The Playwright snippet is detected by grepping `flake.nix` for `playwright-driver`.
 
 The script is **read-only** — it never modifies the target repo. Divergence after scaffolding is allowed; the report exists to make drift *visible* so it can be reviewed deliberately, not to enforce conformance. It always exits 0 (it's a report, not a gate) except on usage errors or a broken skill install (missing template files).
 
