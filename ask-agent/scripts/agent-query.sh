@@ -138,6 +138,13 @@ case "$agent" in
         # So the prompt must travel in argv. Do not "fix" this back to a dash;
         # the failure mode is invisible -- every review would come back as
         # cheerful nonsense and nothing would error.
+        #
+        # KNOWN TRADEOFF, accepted because agy leaves no alternative: an argv
+        # prompt is world-readable in `ps` / /proc/<pid>/cmdline for as long as
+        # agy runs. The stdin path used by claude and codex does not expose it.
+        # Review prompts routinely contain private source, so on a multi-user
+        # box any local account can read them mid-run. Prefer claude or codex
+        # for sensitive material until agy grows a stdin or --prompt-file mode.
         # NOTE: -p consumes the very next argv entry as its value, so the
         # prompt must be appended LAST, after any flags. Putting --model after
         # -p would make the string "--model" the prompt.
@@ -162,7 +169,13 @@ if [[ -n "$prompt_in_argv" ]]; then
     # loudly here with an actionable message rather than letting it surface as
     # an opaque "Argument list too long".
     prompt_text="$(cat -- "$prompt_file")"
-    prompt_bytes=${#prompt_text}
+
+    # Measure BYTES, from the file. Do not use ${#prompt_text}: under a UTF-8
+    # locale that counts characters, not bytes, so a prompt full of multi-byte
+    # text -- em-dashes and box-drawing characters are common in diffs and in
+    # our own comments -- undercounts by up to 4x and sails past this guard
+    # into the very E2BIG it exists to prevent.
+    prompt_bytes=$(wc -c < "$prompt_file")
     max_bytes=120000   # headroom under the 131072-byte MAX_ARG_STRLEN
 
     if (( prompt_bytes > max_bytes )); then
