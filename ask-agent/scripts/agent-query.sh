@@ -192,13 +192,15 @@ if [[ -n "$prompt_via_file" ]]; then
     # stripped. Kept OUT of $agy_dir ("nothing but this prompt" is what bounds
     # the --add-dir grant) and unlinked once both fds are open, as the stdin
     # path below does, so a SIGKILL cannot strand it.
+    # Let bash allocate the fds rather than naming 4 and 5, which a caller may
+    # already be using for something of its own.
     agy_out="$(mktemp /tmp/ask-agent-agy-out.XXXXXX)"
-    exec 4> "$agy_out" 5< "$agy_out"
+    exec {agy_w}> "$agy_out" {agy_r}< "$agy_out"
     rm -f -- "$agy_out"
 
-    "${cmd[@]}" >&4 &
+    "${cmd[@]}" >&"$agy_w" &
     agy_pid=$!
-    exec 4>&-
+    exec {agy_w}>&-   # only the child needs the write end now
 
     # Forward the actual signal, not a translated TERM. HUP matters: these run
     # from tmux, where a hangup delivers HUP. (INT/QUIT are inert in background
@@ -231,7 +233,7 @@ if [[ -n "$prompt_via_file" ]]; then
         fi
     done
 
-    response="$(cat <&5)"   # command substitution drops trailing newlines
+    response="$(cat <&"$agy_r")"   # command substitution drops trailing newlines
 
     # Exit 0 with no marker is the failure this guard exists for. Distinct
     # status (3); the reply is still emitted, since withholding it would not
