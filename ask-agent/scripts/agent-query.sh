@@ -220,7 +220,10 @@ if [[ -n "$prompt_via_file" ]]; then
     # stdout is captured, not inherited, so the marker can be checked and
     # stripped. Kept OUT of $agy_dir ("nothing but this prompt" is what bounds
     # the --add-dir grant) and unlinked once both fds are open, as the stdin
-    # path below does, so a SIGKILL cannot strand it.
+    # path below does, so a SIGKILL cannot strand the REPLY. The staging
+    # directory is a different matter: agy has to open the prompt by path, so it
+    # cannot be unlinked in use, and a SIGKILL does strand it (ditz
+    # ask-agent-sigkill-staging-leak).
     # Let bash allocate the fds rather than naming 4 and 5, which a caller may
     # already be using for something of its own.
     # Bounded retry: even with the steer above, agy sometimes answers by shelling
@@ -255,21 +258,27 @@ if [[ -n "$prompt_via_file" ]]; then
         # Tell that from a real signal death by the trap's flag, never `kill -0`:
         # a reaped PID can be recycled, and probing it spins forever on the
         # remembered status.
+        # Re-waiting relies on bash remembering a reaped child's status and
+        # returning it again rather than failing "not a child" (bash >= 5.1 --
+        # verified on 5.2.21: three successive waits on the same reaped PID all
+        # returned 143). An earlier version carried a 127 fallback for shells
+        # that discard it; on this fleet that branch was unreachable except in
+        # the one case where it did harm -- a child that ignored our signal and
+        # then genuinely exited 127 was reported as 143.
         status=0
         _agy_signalled=""
         wait "$agy_pid" || status=$?
         while (( status > 128 )) && [[ -n "$_agy_signalled" ]]; do
             _agy_signalled=""
-            _prev_status=$status
             status=0
-            wait "$agy_pid" 2>/dev/null || status=$?
-            # Insurance for shells that discard a reaped child's status (bash 5.2
-            # keeps it): "not a child" means the earlier wait already reaped agy.
-            if (( status == 127 )); then
-                status=$_prev_status
-                break
-            fi
+            wait "$agy_pid" || status=$?
         done
+
+        # Disarm before the reply handling below: from here on $agy_pid is
+        # reaped, so a late signal would fire `kill` at a PID that may already
+        # belong to someone else -- the same reuse hazard the loop above avoids
+        # on the `kill -0` side. The window is however long the strip takes.
+        trap - HUP INT TERM QUIT
 
         response="$(cat <&"$agy_r")"   # command substitution drops trailing \n
         exec {agy_r}<&-                # not into the next attempt
