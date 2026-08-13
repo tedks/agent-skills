@@ -110,9 +110,11 @@ if [[ -n "$dir" ]]; then
     cd "$dir"
 fi
 
-# Build command array — the prompt is NOT included in argv.
-# It will be piped via stdin to avoid ARG_MAX limits.
-# All three agents (claude, codex, agy) read the prompt from stdin.
+# Build command array. claude and codex read the prompt from stdin, which keeps
+# it out of argv and sidesteps the per-argument length cap. agy cannot -- see
+# the agy branch -- so it is handled separately below.
+prompt_in_argv=""
+
 case "$agent" in
     claude)
         cmd=(claude -p)
@@ -123,10 +125,24 @@ case "$agent" in
         [[ -n "$model" ]] && cmd+=(-m "$model")
         ;;
     agy)
-        # Antigravity CLI: --print/-p runs a single prompt non-interactively.
-        # `-p -` (dash) makes it read the prompt from stdin, which keeps the
-        # prompt out of argv (ARG_MAX-safe). Model flag is --model.
-        cmd=(agy -p -)
+        # Antigravity CLI has NO stdin mode. Verified empirically against
+        # agy 1.1.3 on 2026-08-12:
+        #
+        #   agy -p -            -> takes the literal "-" as the prompt and
+        #                          IGNORES stdin entirely, answering with a
+        #                          generic greeting. Silently wrong: exit 0,
+        #                          plausible-looking output, prompt discarded.
+        #   agy -p              -> "flag needs an argument: -p"
+        #   agy -p "<prompt>"   -> works.
+        #
+        # So the prompt must travel in argv. Do not "fix" this back to a dash;
+        # the failure mode is invisible -- every review would come back as
+        # cheerful nonsense and nothing would error.
+        # NOTE: -p consumes the very next argv entry as its value, so the
+        # prompt must be appended LAST, after any flags. Putting --model after
+        # -p would make the string "--model" the prompt.
+        cmd=(agy)
+        prompt_in_argv=1
         [[ -n "$model" ]] && cmd+=(--model "$model")
         ;;
     *)
@@ -135,6 +151,31 @@ case "$agent" in
         exit 1
         ;;
 esac
+
+if [[ -n "$prompt_in_argv" ]]; then
+    # agy only: the prompt goes in argv, so the stdin trick below does not
+    # apply and the per-argument size cap does.
+    #
+    # Linux limits a SINGLE argv entry to MAX_ARG_STRLEN (128 KiB), separately
+    # from the total ARG_MAX. A council-review prompt carrying a large diff can
+    # exceed that, and the kernel's failure is E2BIG at exec -- so refuse
+    # loudly here with an actionable message rather than letting it surface as
+    # an opaque "Argument list too long".
+    prompt_text="$(cat -- "$prompt_file")"
+    prompt_bytes=${#prompt_text}
+    max_bytes=120000   # headroom under the 131072-byte MAX_ARG_STRLEN
+
+    if (( prompt_bytes > max_bytes )); then
+        echo "agent-query.sh: prompt is ${prompt_bytes} bytes, over the ${max_bytes}-byte limit for agy." >&2
+        echo "  agy has no stdin mode, so the prompt must fit in a single argv entry (kernel cap: 131072)." >&2
+        echo "  Use claude or codex for this prompt, or narrow the diff being reviewed." >&2
+        exit 1
+    fi
+
+    cmd+=(-p "$prompt_text")
+    [[ -n "$_cleanup_prompt_file" ]] && rm -f "$_cleanup_prompt_file"
+    exec "${cmd[@]}"
+fi
 
 # Pipe prompt via stdin — this is the key ARG_MAX fix.
 # We open the file descriptor, delete the temp file (if we created it),
