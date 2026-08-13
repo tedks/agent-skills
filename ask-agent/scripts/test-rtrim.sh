@@ -46,6 +46,12 @@ checked=0
 # check <name> <input-hex> <expected-hex>
 check() {
     local name="$1" in_hex="$2" want="$3" got in
+    # An odd-length literal silently mis-tests: the trailing digit becomes an
+    # ASCII character rather than half a byte. Refuse it rather than measure it.
+    if (( ${#in_hex} % 2 != 0 )); then
+        echo "bad hex literal in case '$name': odd length (${#in_hex})" >&2
+        exit 2
+    fi
     in="$(printf '%b' "$(sed 's/../\\x&/g' <<<"$in_hex")")"
     _rtrim_out=""
     _agy_rtrim "$in"
@@ -153,6 +159,62 @@ else
     # Restore the real function for anything that follows.
     eval "$fn"
 fi
+
+# --- the counter must be honest -------------------------------------------
+# A deleted or commented-out case used to leave the suite green. Pin the total.
+EXPECTED=112
+if (( checked != EXPECTED )); then
+    echo "FAIL  case count is $checked, expected $EXPECTED -- a case was added or lost" >&2
+    fails=$(( fails + 1 ))
+fi
+
+# --- end-to-end: the call sites, not just the function ---------------------
+# The function is only half the story. Both bugs that shipped lived inside it,
+# but the damage a user sees -- a blanked reply, a leaked marker, an invisible
+# answer passing as success -- is produced where it is CALLED. Deleting either
+# call site left this suite green while reopening a shipped bug, so the call
+# sites get asserted too, through the real script with a stub agy.
+echo "  end-to-end (real script, stub agy):"
+e2e_dir="$(mktemp -d /tmp/test-rtrim-e2e.XXXXXX)"
+trap 'rm -r -f -- "$e2e_dir"' EXIT
+cat > "$e2e_dir/agy" <<'STUB'
+#!/bin/bash
+dir=""
+while [[ $# -gt 0 ]]; do case "$1" in --add-dir) dir="$2"; shift 2;; -p) shift 2;; *) shift;; esac; done
+M="$(tail -1 "$dir/prompt.txt")"
+case "$E2E_MODE" in
+  compliant) printf 'Answer body.\n\n%s\n' "$M";;
+  ws_after)  printf 'Answer body.\n\n%s\n   \n' "$M";;
+  mk_em)     printf '%s\xe2\x80\x83\n' "$M";;
+  utf8bad)   printf 'Findings \xf0\x9f partial\n\n%s\n' "$M";;
+esac
+STUB
+chmod +x "$e2e_dir/agy"
+printf 'probe prompt\n' > "$e2e_dir/prompt.txt"
+
+e2e() {  # <mode> <want-exit> <want-stdout-hex> <why>
+    local mode="$1" want_rc="$2" want_hex="$3" why="$4" got rc
+    # Captured to a FILE, not "$( )". Command substitution strips trailing
+    # newlines, so a $()-based assertion cannot see stray blank lines at the end
+    # of a reply -- which is one of the two bugs these cases exist to catch. The
+    # first version of this helper used $() and missed it.
+    E2E_MODE="$mode" PATH="$e2e_dir:$PATH" "$SRC" agy -f "$e2e_dir/prompt.txt" \
+        > "$e2e_dir/out.bin" 2>/dev/null; rc=$?
+    got="$(od -An -tx1 < "$e2e_dir/out.bin" | tr -d ' \n')"
+    if [[ "$rc" == "$want_rc" && "$got" == "$want_hex" ]]; then
+        printf '    %-10s OK   (%s)\n' "$mode" "$why"
+    else
+        printf '    %-10s FAIL exit=%s want=%s  out=%s want=%s\n' \
+               "$mode" "$rc" "$want_rc" "$got" "$want_hex" >&2
+        fails=$(( fails + 1 ))
+    fi
+}
+# "Answer body.\n" = 416e7377657220626f64792e0a -- the trailing 0a is asserted
+# on purpose: without it, extra blank lines at the end would go unnoticed.
+e2e compliant 0 "416e7377657220626f64792e0a" "exactly one trailing newline"
+e2e ws_after  0 "416e7377657220626f64792e0a" "whitespace-only final line, no marker leak"
+e2e mk_em     3 ""                           "marker+EM SPACE is not an answer"
+e2e utf8bad   0 "46696e64696e677320f09f207061727469616c0a" "undecodable byte preserved"
 
 echo
 if (( fails == 0 )); then
