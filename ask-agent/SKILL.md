@@ -25,12 +25,21 @@ when you want a second opinion from a different agent (Claude, Codex, Antigravit
 
 - `-d, --dir <dir>`: Set working directory for the agent
 - `-m, --model <model>`: Specify model (agent-specific)
-- `-f, --prompt-file <file>`: Read prompt from a file instead of inline (use for large prompts to avoid ARG_MAX limits)
+- `-f, --prompt-file <file>`: Read prompt from a file instead of inline (use for
+  large prompts to avoid ARG_MAX limits at the caller-to-script boundary).
+  **Does not raise any limit for `agy`** -- see Notes; agy is argv-only and
+  capped at 120000 bytes regardless of how the prompt reaches this script.
 
 ## Instructions
 
 When this skill is invoked, **always pass the prompt via a temp file** to avoid
-ARG_MAX errors with large prompts:
+ARG_MAX errors with large prompts.
+
+This protects the *caller-to-script* boundary for every agent. It does NOT make
+prompts unbounded: for `claude` and `codex` the script then pipes via stdin and
+size is a non-issue, but `agy` has no stdin mode and its prompt must fit in one
+argv entry (120000-byte cap, enforced with a clear error). For a prompt larger
+than that, use `claude` or `codex` -- no file-based workaround exists for agy.
 
 ```bash
 # 1. Write prompt to a temp file
@@ -47,7 +56,7 @@ rm -f "$prompt_file"
 ```
 
 For short prompts that are clearly under the ARG_MAX limit (~128KB), inline
-is also fine:
+is also fine (same agy caveat applies):
 
 ```bash
 ~/.claude/skills/ask-agent/scripts/agent-query.sh <agent> [options] <prompt>
