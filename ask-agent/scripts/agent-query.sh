@@ -357,7 +357,7 @@ if [[ -n "$prompt_via_file" ]]; then
         # Escapes rather than literals: these are invisible in an editor, and a
         # maintainer reflowing the line could delete them with no test failing
         # outside the marker-plus-NBSP cases.
-        local _nb=$'  ﻿'
+        local _nb=$'\u00a0\u202f\ufeff'
 
         # If C.UTF-8 was unavailable bash has fallen back to a byte locale and
         # _nb is 8 bytes rather than 3 characters. Drop the named characters
