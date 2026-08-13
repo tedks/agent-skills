@@ -14,10 +14,9 @@
 # For claude and codex the prompt is piped via stdin, never passed as a CLI
 # argument, which avoids ARG_MAX limits on execve(2).
 #
-# agy is the exception: it has no stdin mode, so its prompt goes in argv and is
-# capped at 120000 bytes and visible in `ps`. See the agy branch below for the
-# empirical basis and the tradeoff. --prompt-file does NOT lift the cap for
-# agy; it only changes where this script reads the prompt from.
+# agy has no stdin mode. Rather than put the prompt in argv -- which would cap
+# it at 128 KiB and expose it in `ps` -- the script stages it in a private temp
+# directory and passes agy a path plus --add-dir. See the agy branch below.
 #
 # Examples:
 #   agent-query.sh claude "Explain this error"
@@ -79,10 +78,17 @@ done
 # agent, which would hit ARG_MAX for large prompts.
 _cleanup_prompt_file=""
 
+# The agy path stages a copy of the prompt in a private directory (see the agy
+# branch). Unlike the claude/codex path it does NOT exec, so this trap is what
+# actually removes it -- on success, failure, and signals alike.
+_cleanup_agy_dir=""
+
 # Trap to clean up temp files on any exit (failure paths).
-# On the success path, we manually delete before exec.
+# On the claude/codex success path, we manually delete before exec, because
+# exec replaces this process and the trap would never fire.
 cleanup() {
     [[ -n "$_cleanup_prompt_file" ]] && rm -f "$_cleanup_prompt_file"
+    [[ -n "$_cleanup_agy_dir" ]] && rm -rf -- "$_cleanup_agy_dir"
 }
 trap cleanup EXIT
 
@@ -118,7 +124,7 @@ fi
 # Build command array. claude and codex read the prompt from stdin, which keeps
 # it out of argv and sidesteps the per-argument length cap. agy cannot -- see
 # the agy branch -- so it is handled separately below.
-prompt_in_argv=""
+prompt_via_file=""
 
 case "$agent" in
     claude)
@@ -140,21 +146,36 @@ case "$agent" in
         #   agy -p              -> "flag needs an argument: -p"
         #   agy -p "<prompt>"   -> works.
         #
-        # So the prompt must travel in argv. Do not "fix" this back to a dash;
-        # the failure mode is invisible -- every review would come back as
-        # cheerful nonsense and nothing would error.
+        # Do not "fix" the dash form back in; its failure mode is invisible --
+        # every review would come back as cheerful nonsense and nothing would
+        # error.
         #
-        # KNOWN TRADEOFF, accepted because agy leaves no alternative: an argv
-        # prompt is world-readable in `ps` / /proc/<pid>/cmdline for as long as
-        # agy runs. The stdin path used by claude and codex does not expose it.
-        # Review prompts routinely contain private source, so on a multi-user
-        # box any local account can read them mid-run. Prefer claude or codex
-        # for sensitive material until agy grows a stdin or --prompt-file mode.
+        # Rather than put the prompt itself in argv, hand agy a PATH and let it
+        # read the file with its own tools. agy is an agent, so this works, and
+        # it avoids both problems an argv prompt would create:
+        #
+        #   * SIZE. A single argv entry is capped at MAX_ARG_STRLEN (128 KiB),
+        #     which review prompts carrying a diff can exceed. Via file there is
+        #     no cap: verified reading a 251031-byte prompt in full, returning a
+        #     marker planted on its last line.
+        #   * PRIVACY. An argv prompt is world-readable in `ps` and
+        #     /proc/<pid>/cmdline for as long as agy runs, and review prompts
+        #     routinely contain private source. Only the path is exposed here.
+        #
+        # --add-dir is REQUIRED. Without it the read is auto-denied: headless
+        # mode cannot prompt for the read_file permission, and agy exits having
+        # produced no output with an explicit message saying so. Loud, not
+        # silent -- verified.
+        #
+        # The grant is scoped to a private 0700 directory holding only this
+        # prompt, so we never hand agy the caller's directory (which for a
+        # --prompt-file inside a repo would be the whole repo).
+        #
         # NOTE: -p consumes the very next argv entry as its value, so the
-        # prompt must be appended LAST, after any flags. Putting --model after
-        # -p would make the string "--model" the prompt.
+        # instruction must be appended LAST, after any flags. Putting --model
+        # after -p would make the string "--model" the prompt.
         cmd=(agy)
-        prompt_in_argv=1
+        prompt_via_file=1
         [[ -n "$model" ]] && cmd+=(--model "$model")
         ;;
     *)
@@ -164,35 +185,30 @@ case "$agent" in
         ;;
 esac
 
-if [[ -n "$prompt_in_argv" ]]; then
-    # agy only: the prompt goes in argv, so the stdin trick below does not
-    # apply and the per-argument size cap does.
+if [[ -n "$prompt_via_file" ]]; then
+    # agy only: stage the prompt in a private directory and point agy at it.
     #
-    # Linux limits a SINGLE argv entry to MAX_ARG_STRLEN (128 KiB), separately
-    # from the total ARG_MAX. A council-review prompt carrying a large diff can
-    # exceed that, and the kernel's failure is E2BIG at exec -- so refuse
-    # loudly here with an actionable message rather than letting it surface as
-    # an opaque "Argument list too long".
-    prompt_text="$(cat -- "$prompt_file")"
+    # Copy rather than reuse $prompt_file in place. --add-dir grants agy read
+    # access to a whole directory, and a caller-supplied --prompt-file may sit
+    # anywhere -- inside a repo, in a shared /tmp. Copying into a 0700 dir that
+    # contains nothing else keeps the grant to exactly this one prompt.
+    agy_dir="$(mktemp -d "${TMPDIR:-/tmp}/ask-agent-agy.XXXXXX")"
+    chmod 700 "$agy_dir"
+    _cleanup_agy_dir="$agy_dir"
+    agy_prompt="$agy_dir/prompt.txt"
 
-    # Measure BYTES, from the file. Do not use ${#prompt_text}: under a UTF-8
-    # locale that counts characters, not bytes, so a prompt full of multi-byte
-    # text -- em-dashes and box-drawing characters are common in diffs and in
-    # our own comments -- undercounts by up to 4x and sails past this guard
-    # into the very E2BIG it exists to prevent.
-    prompt_bytes=$(wc -c < "$prompt_file")
-    max_bytes=120000   # headroom under the 131072-byte MAX_ARG_STRLEN
+    # 0600 before content lands: on a shared /tmp the window between create and
+    # chmod is a real read window, and the prompt may be private source.
+    ( umask 077; cat -- "$prompt_file" > "$agy_prompt" )
 
-    if (( prompt_bytes > max_bytes )); then
-        echo "agent-query.sh: prompt is ${prompt_bytes} bytes, over the ${max_bytes}-byte limit for agy." >&2
-        echo "  agy has no stdin mode, so the prompt must fit in a single argv entry (kernel cap: 131072)." >&2
-        echo "  Use claude or codex for this prompt, or narrow the diff being reviewed." >&2
-        exit 1
-    fi
+    cmd+=(--add-dir "$agy_dir" -p "Read the file $agy_prompt in full and follow the instructions in it. Treat its entire contents as your prompt. Do not ask for confirmation before reading it.")
 
-    cmd+=(-p "$prompt_text")
-    [[ -n "$_cleanup_prompt_file" ]] && rm -f "$_cleanup_prompt_file"
-    exec "${cmd[@]}"
+    # Deliberately NOT exec: agy must be able to read the file while it runs,
+    # so the directory has to outlive the call. Running it as a child keeps
+    # this script alive to clean up, and the EXIT trap covers signals and
+    # failures. Propagate agy's exit status so callers still see it.
+    "${cmd[@]}"
+    exit $?
 fi
 
 # Pipe prompt via stdin — this is the key ARG_MAX fix.
