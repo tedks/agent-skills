@@ -321,19 +321,52 @@ if [[ -n "$prompt_via_file" ]]; then
     # ${x%"${x##*[![:space:]]}"} is O(len x trailing-ws-run) -- 18.0s on a 200KB
     # reply with 1000 trailing spaces. The regex is 20ms on the same input.
     _agy_rtrim() {   # sets _rtrim_out; no subshell, no fork
-        # LC_ALL=C is not a preference, it is what makes this safe. Under a
-        # UTF-8 locale glibc's regexec REFUSES to match a string containing an
-        # invalid multibyte sequence, and the no-match branch below means
-        # "nothing but whitespace" -- so an undecodable byte anywhere would
-        # silently empty the whole reply. agy killed mid-reply ends inside a
-        # multibyte character routinely, so that is the `timeout` path, not an
-        # exotic one. Under C every byte is valid and [[:space:]] stays ASCII,
-        # so the match cannot fail for encoding reasons.
+        # Trailing whitespace has to be trimmed correctly in two situations that
+        # pull in opposite directions, so this is three passes rather than one.
+        #
+        # Under a UTF-8 locale glibc's regexec REFUSES to match a string holding
+        # an invalid multibyte sequence -- and agy killed mid-reply ends inside a
+        # character routinely, so that is the `timeout` path. Treating no-match
+        # as "all whitespace" therefore blanked whole replies. But forcing C to
+        # dodge that stops [[:space:]] matching U+00A0 / U+2003 / U+3000, and a
+        # reply of "<marker><EM SPACE>" then survives as invisible content,
+        # slipping past the marker-only guard with status 0.
+        #
+        # So: trim in the caller's locale, and only fall back to C for input
+        # that provably cannot be decoded. A MATCH is the only thing that
+        # rewrites anything, so a refused match can never blank a reply.
+
+        # glibc deliberately excludes the NON-BREAKING spaces from [[:space:]]
+        # -- U+00A0, U+202F and U+FEFF are all Zs/format characters that
+        # isspace() says no to -- so the class has to name them. Without that,
+        # "<marker><NBSP>" survives as one invisible character, the reply is not
+        # empty, and it slips past the marker-only guard with status 0. That is
+        # the same bypass, one character over. (U+2003, U+3000 and U+2009 ARE
+        # space-class and need no help.)
+        #
+        # Passes 1-2 only. Pass 3 runs under C, where these literals would be
+        # matched byte-wise and could cut a multibyte sequence in half.
+        local _nb=$'  ﻿'
+        local _re_trim="^(.*[^[:space:]${_nb}])[[:space:]${_nb}]*\$"
+        local _re_blank="^[[:space:]${_nb}]*\$"
+
+        # 1. Caller's locale: full Unicode trim, the common case.
+        if [[ "$1" =~ $_re_trim ]]; then
+            _rtrim_out="${BASH_REMATCH[1]}"
+            return
+        fi
+        # 2. Caller's locale: genuinely nothing but whitespace (Unicode too).
+        if [[ "$1" =~ $_re_blank ]]; then
+            _rtrim_out=""
+            return
+        fi
+        # 3. Neither matched, so the bytes do not decode. Under C every byte is
+        #    valid; trim ASCII whitespace and keep the content.
         local LC_ALL=C
         if [[ "$1" =~ ^(.*[^[:space:]])[[:space:]]*$ ]]; then
             _rtrim_out="${BASH_REMATCH[1]}"
         else
-            _rtrim_out=""    # genuinely nothing but whitespace
+            _rtrim_out=""
         fi
     }
 
