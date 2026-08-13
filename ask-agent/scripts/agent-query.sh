@@ -283,10 +283,32 @@ if [[ -n "$prompt_via_file" ]]; then
         response="$(cat <&"$agy_r")"   # command substitution drops trailing \n
         exec {agy_r}<&-                # not into the next attempt
 
+        # The headless auto-deny arrives in two shapes, and the retry has to
+        # catch both without catching a real answer:
+        #
+        #   HARD  agy aborts. stdout is EMPTY, the jetski text goes to stderr
+        #         (which we do not capture -- it passes through live, and we
+        #         want that), exit 0.
+        #   SOFT  agy carries on and puts the denial text in its own output.
+        #
+        # The marker's ABSENCE gates both. A genuine denial produced no answer,
+        # so it cannot carry the marker; a real reply that merely quotes the
+        # denial text -- which every "review ask-agent" prompt does, since that
+        # phrase is a few lines above this one -- does carry it. Without this
+        # gate a good reply was thrown away and re-asked, nondeterministically.
+        #
+        # Given that gate, "empty" is a safe trigger on its own and needs no
+        # stderr capture: the marker is mandatory, so empty-and-exit-0 can never
+        # be a valid reply.
         if (( agy_attempt == 1 && status == 0 )) &&
-           [[ "$response" == *"a tool required the"* && "$response" == *permission* ]]; then
-            echo "Note: agy auto-denied a tool permission in headless mode (it tried to run a command rather than read the file); retrying once" >&2
-            continue
+           [[ "$response" != *"$agy_sentinel"* ]]; then
+            if [[ -z "$response" ]]; then
+                echo "Note: agy produced no output and exited 0 (headless tool permission auto-denied); retrying once" >&2
+                continue
+            elif [[ "$response" == *"a tool required the"* && "$response" == *permission* ]]; then
+                echo "Note: agy reported an auto-denied tool permission in its output (it tried to run a command rather than read the file); retrying once" >&2
+                continue
+            fi
         fi
         break
     done
