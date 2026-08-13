@@ -128,7 +128,33 @@ fi
 
 if [[ -n "$prompt_file" ]]; then
     # Wait for the agent to initialize before sending the prompt
-    sleep 2
+    if [[ "$agent" == "agy" ]]; then
+        # agy paints a full-screen TUI and discards anything delivered before it
+        # is listening. The flat `sleep 2` below loses that race on a cold start
+        # -- fresh tmux server, agy's first run -- and the prompt disappears with
+        # the spawn still reporting success. Reproduced: warm start paints in
+        # ~1.0s, cold start does not make it inside 2s.
+        #
+        # So wait for the input box (its rule line) rather than for the clock.
+        agy_ready=""
+        for _ in $(seq 1 120); do
+            if "${TMUX_CMD[@]}" capture-pane -p -t "$session:$window" 2>/dev/null \
+                 | grep -q '─'; then
+                agy_ready=1
+                break
+            fi
+            sleep 0.25
+        done
+        if [[ -z "$agy_ready" ]]; then
+            echo "Error: agy's input box did not appear within 30s; prompt not sent" >&2
+            echo "  the agent is running in $session:$window -- type the prompt by hand" >&2
+            exit 1
+        fi
+        # The box is painted a beat before input is accepted.
+        sleep 1
+    else
+        sleep 2
+    fi
     buf_name="spawn-agent-$$"
     "${TMUX_CMD[@]}" load-buffer -b "$buf_name" "$prompt_file"
     if ! "${TMUX_CMD[@]}" paste-buffer -d -t "$session:$window" -b "$buf_name"; then
