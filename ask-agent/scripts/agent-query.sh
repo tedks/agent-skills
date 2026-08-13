@@ -242,6 +242,13 @@ if [[ -n "$prompt_via_file" ]]; then
 
     response="$(cat <&"$agy_r")"   # command substitution drops trailing newlines
 
+    # Trim the tail BEFORE splitting off the last line. Command substitution
+    # dropped trailing newlines but nothing else, so a whitespace-only trailing
+    # line -- one stray space -- would become "the last line", fail the check,
+    # and reject a compliant reply while printing the raw marker.
+    # ${x##*[![:space:]]} is the run of trailing whitespace; %-ing it off drops it.
+    response="${response%"${response##*[![:space:]]}"}"
+
     # The contract is "the marker, on the LAST line". Check exactly that, not
     # "appears anywhere": anywhere would accept a reply whose tail is wrong, and
     # stripping every occurrence would silently delete the marker out of the
@@ -254,10 +261,15 @@ if [[ -n "$prompt_via_file" ]]; then
     if [[ "$agy_last" == *"$agy_sentinel"* ]]; then
         # Remove the marker from that line alone. Not the whole line: a terse
         # model may put its answer and the marker on the same one.
-        # ${x##*[![:space:]]} is the run of trailing whitespace; %-ing it off
-        # drops the blank line the marker leaves behind.
         response="${response%"$agy_last"}${agy_last//"$agy_sentinel"/}"
         response="${response%"${response##*[![:space:]]}"}"
+        # The marker and nothing else is not a clean run: it is the emptiest
+        # possible answer wearing the proof-of-reading. Without this it would
+        # be the only reply that returns 0 with no output at all.
+        if [[ -z "$response" ]] && (( status == 0 )); then
+            echo "Error: response was the completion sentinel and nothing else" >&2
+            status=3
+        fi
     elif (( status == 0 )); then
         echo "Error: response missing prompt-completion sentinel; prompt may have been read partially" >&2
         status=3
