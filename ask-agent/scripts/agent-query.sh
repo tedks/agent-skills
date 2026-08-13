@@ -168,16 +168,23 @@ if [[ -n "$prompt_via_file" ]]; then
 
     # Nothing forces agy to read the file to its end, and a partial read answers
     # plausibly and exits 0. So the file ends with a marker agy must echo back
-    # (checked below). The instruction must NOT spell it out -- agy could then
-    # reproduce it unread, and the check would prove nothing.
-    agy_sentinel="__ASK_AGENT_EOP_${agy_dir##*.}__"
+    # (checked below). Nothing that reaches argv may allow the marker to be
+    # RECONSTRUCTED, or agy could produce it unread and the check would prove
+    # nothing. That rules out deriving it from the staging directory: the
+    # instruction below has to name the path, and a prompt containing this
+    # script -- every council review of ask-agent itself -- would hand over the
+    # derivation rule to go with it. Independent randomness instead.
+    agy_sentinel="__ASK_AGENT_EOP_$(od -An -N12 -tx1 /dev/urandom | tr -d ' \n')__"
 
     # The redirect belongs on the inner group, after umask: a redirect attached
     # to `( ... )` is performed at fork time, under the OUTER umask.
+    # Nothing but the marker is appended: a explanatory line here would sit
+    # ABOVE the final line, so by the instruction's own wording it would be part
+    # of the prompt, and it would perturb any request with a strict output
+    # format. The instruction is the only place the marker is explained.
     ( umask 077
       { cat -- "$prompt_file"
-        printf '\n\n[end-of-prompt marker -- not part of the prompt above]\n%s\n' \
-               "$agy_sentinel"
+        printf '\n%s\n' "$agy_sentinel"
       } > "$agy_prompt"
     )
 
@@ -235,17 +242,27 @@ if [[ -n "$prompt_via_file" ]]; then
 
     response="$(cat <&"$agy_r")"   # command substitution drops trailing newlines
 
-    # Exit 0 with no marker is the failure this guard exists for. Distinct
-    # status (3); the reply is still emitted, since withholding it would not
-    # save a caller who ignores both stderr and the exit status.
-    if (( status == 0 )) && [[ "$response" != *"$agy_sentinel"* ]]; then
+    # The contract is "the marker, on the LAST line". Check exactly that, not
+    # "appears anywhere": anywhere would accept a reply whose tail is wrong, and
+    # stripping every occurrence would silently delete the marker out of the
+    # middle of a legitimate reply that happens to quote it.
+    #
+    # Exit 0 without it is the failure this guard exists for. Distinct status
+    # (3); the reply is still emitted, since withholding it would not save a
+    # caller who ignores both stderr and the exit status.
+    agy_last="${response##*$'\n'}"   # last line, or the whole reply if only one
+    if [[ "$agy_last" == *"$agy_sentinel"* ]]; then
+        # Remove the marker from that line alone. Not the whole line: a terse
+        # model may put its answer and the marker on the same one.
+        # ${x##*[![:space:]]} is the run of trailing whitespace; %-ing it off
+        # drops the blank line the marker leaves behind.
+        response="${response%"$agy_last"}${agy_last//"$agy_sentinel"/}"
+        response="${response%"${response##*[![:space:]]}"}"
+    elif (( status == 0 )); then
         echo "Error: response missing prompt-completion sentinel; prompt may have been read partially" >&2
         status=3
     fi
 
-    # Strip the marker on every path; it must never reach the caller.
-    response="${response//"$agy_sentinel"/}"              # quoted: literal
-    response="${response%"${response##*[![:space:]]}"}"   # re-trim the tail
     if [[ -n "$response" ]]; then
         printf '%s\n' "$response"
     fi

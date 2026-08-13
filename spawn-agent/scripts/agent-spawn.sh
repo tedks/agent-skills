@@ -136,6 +136,9 @@ if [[ -n "$prompt_file" ]]; then
         # ~1.0s, cold start does not make it inside 2s.
         #
         # So wait for the input box (its rule line) rather than for the clock.
+        # This assumes agy draws that rule with U+2500; if a future version
+        # falls back to ASCII the poll just times out and says so, which is the
+        # safe direction to be wrong in.
         agy_ready=""
         for _ in $(seq 1 120); do
             if "${TMUX_CMD[@]}" capture-pane -p -t "$session:$window" 2>/dev/null \
