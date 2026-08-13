@@ -242,12 +242,26 @@ if [[ -n "$prompt_via_file" ]]; then
 
     response="$(cat <&"$agy_r")"   # command substitution drops trailing newlines
 
+    # Everything below runs on model-generated text built from an untrusted
+    # prompt, AFTER agy has already answered, and callers run this under
+    # `timeout`. So the string handling has to be linear-ish: burning seconds
+    # here gets the wrapper killed and loses a reply that was already in hand
+    # (the capture file is unlinked, so there is nothing left to recover).
+    # ${x%"${x##*[![:space:]]}"} is O(len x trailing-ws-run) -- 18.0s on a 200KB
+    # reply with 1000 trailing spaces. The regex is 20ms on the same input.
+    _agy_rtrim() {   # sets _rtrim_out; no subshell, no fork
+        if [[ "$1" =~ ^(.*[^[:space:]])[[:space:]]*$ ]]; then
+            _rtrim_out="${BASH_REMATCH[1]}"
+        else
+            _rtrim_out=""    # nothing but whitespace
+        fi
+    }
+
     # Trim the tail BEFORE splitting off the last line. Command substitution
     # dropped trailing newlines but nothing else, so a whitespace-only trailing
     # line -- one stray space -- would become "the last line", fail the check,
     # and reject a compliant reply while printing the raw marker.
-    # ${x##*[![:space:]]} is the run of trailing whitespace; %-ing it off drops it.
-    response="${response%"${response##*[![:space:]]}"}"
+    _agy_rtrim "$response"; response="$_rtrim_out"
 
     # The contract is "the marker, on the LAST line". Check exactly that, not
     # "appears anywhere": anywhere would accept a reply whose tail is wrong, and
@@ -257,12 +271,26 @@ if [[ -n "$prompt_via_file" ]]; then
     # Exit 0 without it is the failure this guard exists for. Distinct status
     # (3); the reply is still emitted, since withholding it would not save a
     # caller who ignores both stderr and the exit status.
-    agy_last="${response##*$'\n'}"   # last line, or the whole reply if only one
+    # Split off the last line by locating the final newline, not with
+    # ${response##*$'\n'}: that is O(len x last-line-len) -- 9.0s on a 200KB
+    # reply containing no newline at all, 1.8s on one with a 20k-char last line.
+    # This form is 0.36s and 0.01s on the same two.
+    agy_prefix="${response%$'\n'*}"
+    if [[ "$agy_prefix" == "$response" ]]; then
+        agy_prefix=""                              # single-line reply
+        agy_last="$response"
+        agy_joiner=""
+    else
+        agy_last="${response:${#agy_prefix}+1}"
+        agy_joiner=$'\n'
+    fi
+
     if [[ "$agy_last" == *"$agy_sentinel"* ]]; then
         # Remove the marker from that line alone. Not the whole line: a terse
-        # model may put its answer and the marker on the same one.
-        response="${response%"$agy_last"}${agy_last//"$agy_sentinel"/}"
-        response="${response%"${response##*[![:space:]]}"}"
+        # model may put its answer and the marker on the same one. Rebuilt from
+        # the prefix we already have, so no second scan of the whole reply.
+        response="$agy_prefix$agy_joiner${agy_last//"$agy_sentinel"/}"
+        _agy_rtrim "$response"; response="$_rtrim_out"
         # The marker and nothing else is not a clean run: it is the emptiest
         # possible answer wearing the proof-of-reading. Without this it would
         # be the only reply that returns 0 with no output at all.
