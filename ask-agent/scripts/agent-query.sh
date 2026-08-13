@@ -276,24 +276,39 @@ if [[ -n "$prompt_via_file" ]]; then
     # to the whole foreground process group, so agy receives INT directly and
     # the forwarding is redundant. HUP and TERM are the ones that genuinely
     # need this, and they are the ones exercised by `timeout` and by tmux.
-    _forward_to_agy() { kill -"$1" "$agy_pid" 2>/dev/null || true; }
+    _agy_signalled=""
+    _forward_to_agy() { _agy_signalled=1; kill -"$1" "$agy_pid" 2>/dev/null || true; }
     for _sig in HUP INT TERM QUIT; do
         # shellcheck disable=SC2064  # expand _sig now, at trap definition
         trap "_forward_to_agy $_sig" "$_sig"
     done
     unset _sig
 
+    # A trapped signal makes `wait` return >128 *without reaping the child*, so
+    # that status is ours, not agy's, and we have to wait again -- otherwise the
+    # EXIT trap deletes the staging directory while agy is still reading it.
+    #
+    # The two >128 cases (wait interrupted / child died by signal) are told
+    # apart by whether a trap actually fired, never by probing the child with
+    # `kill -0`: after the child is reaped its PID can be recycled, and a probe
+    # that hits the recycled PID re-enters a `wait` that returns the reaped
+    # child's remembered status forever -- a hot spin that never terminates.
     status=0
+    _agy_signalled=""
     wait "$agy_pid" || status=$?
-
-    # A trapped signal makes `wait` return >128 immediately while the child may
-    # still be shutting down. Keep waiting until it is genuinely reaped, so the
-    # EXIT trap never removes the staging directory while agy is alive. If the
-    # child is already gone, kill -0 fails and a >128 status is its real
-    # died-by-signal status.
-    while (( status > 128 )) && kill -0 "$agy_pid" 2>/dev/null; do
+    while (( status > 128 )) && [[ -n "$_agy_signalled" ]]; do
+        _agy_signalled=""
+        _prev_status=$status
         status=0
-        wait "$agy_pid" || status=$?
+        wait "$agy_pid" 2>/dev/null || status=$?
+        # Insurance for shells that drop a reaped child's status instead of
+        # remembering it (bash 5.2 remembers, so this is not the usual path):
+        # "not a child" means the earlier wait had already reaped agy, and the
+        # status we were holding is its real one.
+        if (( status == 127 )); then
+            status=$_prev_status
+            break
+        fi
     done
 
     # A run that exited 0 without the marker is the failure this guard exists
