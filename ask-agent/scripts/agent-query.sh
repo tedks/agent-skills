@@ -90,9 +90,15 @@ _cleanup_agy_dir=""
 # Trap to clean up temp files on any exit (failure paths).
 # On the claude/codex success path, we manually delete before exec, because
 # exec replaces this process and the trap would never fire.
+# An EXIT trap's status BECOMES the script's, overriding even an explicit
+# `exit N`. Cleanup must therefore be unable to fail: a removal that errored
+# would rewrite the sentinel's 3 -- and 143/129/137 -- to a meaningless 1.
+# Both halves are needed. `|| true` keeps `set -e` from killing the trap at the
+# failing rm, and `return 0` covers the guards themselves being false.
 cleanup() {
-    [[ -n "$_cleanup_prompt_file" ]] && rm -f "$_cleanup_prompt_file"
-    [[ -n "$_cleanup_agy_dir" ]] && rm -rf -- "$_cleanup_agy_dir"
+    if [[ -n "$_cleanup_prompt_file" ]]; then rm -f "$_cleanup_prompt_file" || true; fi
+    if [[ -n "$_cleanup_agy_dir" ]]; then rm -rf -- "$_cleanup_agy_dir" || true; fi
+    return 0
 }
 trap cleanup EXIT
 

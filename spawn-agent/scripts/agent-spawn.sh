@@ -54,8 +54,13 @@ _cleanup_prompt_file=""
 
 # Trap to clean up temp files on exit/interrupt (only files we created).
 # Set early so failure paths during parsing don't leak temp files.
+# An EXIT trap's status BECOMES the script's, so cleanup must be unable to
+# fail. Without `return 0` every no-prompt spawn -- where the guard is simply
+# false -- reported failure after succeeding; without `|| true` a failing rm
+# would kill the trap under `set -e` before it got there.
 cleanup() {
-    [[ -n "$_cleanup_prompt_file" ]] && rm -f "$_cleanup_prompt_file"
+    if [[ -n "$_cleanup_prompt_file" ]]; then rm -f "$_cleanup_prompt_file" || true; fi
+    return 0
 }
 trap cleanup EXIT
 
