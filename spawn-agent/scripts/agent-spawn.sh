@@ -135,27 +135,55 @@ if [[ -n "$prompt_file" ]]; then
     # Wait for the agent to initialize before sending the prompt
     if [[ "$agent" == "agy" ]]; then
         # agy paints a full-screen TUI and discards anything delivered before it
-        # is listening. The flat `sleep 2` below loses that race on a cold start
-        # -- fresh tmux server, agy's first run -- and the prompt disappears with
-        # the spawn still reporting success. Reproduced: warm start paints in
-        # ~1.0s, cold start does not make it inside 2s.
+        # is listening, so a flat `sleep 2` races it -- on a cold start the
+        # prompt vanishes and the spawn still reports success.
         #
-        # So wait for the input box (its rule line) rather than for the clock.
-        # This assumes agy draws that rule with U+2500; if a future version
-        # falls back to ASCII the poll just times out and says so, which is the
-        # safe direction to be wrong in.
+        # Worse, agy's FIRST run in an untrusted directory opens a modal asking
+        # whether to trust it, whose default button is "Yes, I trust this
+        # folder" and whose footer is "enter Confirm". Pasting into that does
+        # nothing and the Enter that follows GRANTS TRUST. That is how
+        # /tmp/pr64-test ended up in agy's trustedWorkspaces during testing.
+        # Never send keys until the composer specifically is on screen.
         agy_ready=""
+        agy_gone=0
         for _ in $(seq 1 120); do
-            if "${TMUX_CMD[@]}" capture-pane -p -t "$session:$window" 2>/dev/null \
-                 | grep -q '─'; then
+            # A window that disappeared is not a slow window: say so, rather
+            # than burning 30s and then claiming the agent is waiting for input.
+            if pane="$("${TMUX_CMD[@]}" capture-pane -p -t "$session:$window" 2>/dev/null)"; then
+                agy_gone=0
+            else
+                agy_gone=$(( agy_gone + 1 ))
+                if (( agy_gone >= 3 )); then
+                    echo "Error: $session:$window is gone -- $agent exited before the prompt could be sent." >&2
+                    echo "  Nothing was pasted." >&2
+                    exit 1
+                fi
+                sleep 0.25
+                continue
+            fi
+
+            if [[ "$pane" == *"Do you trust the contents of this project?"* ]]; then
+                echo "Error: agy is asking whether to trust this directory before it will run:" >&2
+                echo "    $directory" >&2
+                echo "  Nothing was pasted, and no key was sent -- answering that prompt is a" >&2
+                echo "  permission decision this tooling will not make for you." >&2
+                echo "  Answer it yourself, then re-run:  tmux attach -t $session" >&2
+                exit 1
+            fi
+
+            # The composer specifically: its rule AND the shortcuts hint. The
+            # rule alone is not enough -- a banner can draw box characters
+            # before the input box is live, which would paste even earlier than
+            # the flat sleep did. The trust modal has neither.
+            if [[ "$pane" == *"? for shortcuts"* && "$pane" == *"─"* ]]; then
                 agy_ready=1
                 break
             fi
             sleep 0.25
         done
         if [[ -z "$agy_ready" ]]; then
-            echo "Error: agy's input box did not appear within 30s; prompt not sent" >&2
-            echo "  the agent is running in $session:$window -- type the prompt by hand" >&2
+            echo "Error: agy's input box did not appear within 30s; prompt not sent." >&2
+            echo "  $agent is running in $session:$window -- attach and type it by hand." >&2
             exit 1
         fi
         # The box is painted a beat before input is accepted.
