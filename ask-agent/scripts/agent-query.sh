@@ -222,8 +222,26 @@ if [[ -n "$prompt_via_file" ]]; then
     "${cmd[@]}" &
     agy_pid=$!
 
-    trap 'kill -TERM "$agy_pid" 2>/dev/null' TERM
-    trap 'kill -INT  "$agy_pid" 2>/dev/null' INT
+    # Forward the signal we actually received rather than translating
+    # everything to TERM, and cover the whole set that can reach us. HUP is not
+    # optional: these run from tmux, and a TTY hangup delivers HUP, not TERM --
+    # forwarding only TERM/INT leaves exactly the orphan-with-deleted-prompt
+    # bug this construction exists to prevent.
+    # The INT and QUIT traps are best-effort by nature, and their absence is
+    # not a gap worth chasing: when this script is itself started in the
+    # background by a non-interactive shell, POSIX has already set INT and QUIT
+    # to SIG_IGN, and bash cannot trap a signal that was ignored on entry -- so
+    # those two traps are simply inert there, and the signal never arrives to
+    # be forwarded either. In a real terminal the opposite holds: Ctrl-C goes
+    # to the whole foreground process group, so agy receives INT directly and
+    # the forwarding is redundant. HUP and TERM are the ones that genuinely
+    # need this, and they are the ones exercised by `timeout` and by tmux.
+    _forward_to_agy() { kill -"$1" "$agy_pid" 2>/dev/null || true; }
+    for _sig in HUP INT TERM QUIT; do
+        # shellcheck disable=SC2064  # expand _sig now, at trap definition
+        trap "_forward_to_agy $_sig" "$_sig"
+    done
+    unset _sig
 
     status=0
     wait "$agy_pid" || status=$?
