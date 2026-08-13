@@ -33,10 +33,12 @@ when you want a second opinion from a different agent (Claude, Codex, Antigravit
 When this skill is invoked, **always pass the prompt via a temp file** to avoid
 ARG_MAX errors with large prompts.
 
-This protects the *caller-to-script* boundary. Past that point every agent is
-unbounded: `claude` and `codex` receive the prompt on stdin, and `agy` -- which
-has no stdin mode -- is handed a file path to read instead of the prompt text,
-so nothing large ever transits argv.
+This protects the *caller-to-script* boundary. Past that point no agent is
+constrained by argv: `claude` and `codex` receive the prompt on stdin, and
+`agy` -- which has no stdin mode -- is handed a file path to read instead of
+the prompt text, so nothing large ever transits argv. Ordinary limits still
+apply of course: the model's context window, and whatever the agent decides to
+do with a very long prompt.
 
 ```bash
 # 1. Write prompt to a temp file

@@ -192,8 +192,15 @@ if [[ -n "$prompt_via_file" ]]; then
     # access to a whole directory, and a caller-supplied --prompt-file may sit
     # anywhere -- inside a repo, in a shared /tmp. Copying into a 0700 dir that
     # contains nothing else keeps the grant to exactly this one prompt.
-    agy_dir="$(mktemp -d "${TMPDIR:-/tmp}/ask-agent-agy.XXXXXX")"
-    chmod 700 "$agy_dir"
+    # Fixed /tmp base, matching the inline-prompt path above, rather than
+    # ${TMPDIR:-/tmp}. TMPDIR would be trusted twice over: as a filesystem
+    # location, and as text interpolated into the natural-language instruction
+    # below, where newlines or control characters in it would become extra
+    # prompt content. A relative TMPDIR would also resolve after the `cd "$dir"`
+    # above and stage the prompt somewhere unintended.
+    #
+    # mktemp -d already creates the directory 0700, so no chmod is needed.
+    agy_dir="$(mktemp -d /tmp/ask-agent-agy.XXXXXX)"
     _cleanup_agy_dir="$agy_dir"
     agy_prompt="$agy_dir/prompt.txt"
 
@@ -203,12 +210,35 @@ if [[ -n "$prompt_via_file" ]]; then
 
     cmd+=(--add-dir "$agy_dir" -p "Read the file $agy_prompt in full and follow the instructions in it. Treat its entire contents as your prompt. Do not ask for confirmation before reading it.")
 
-    # Deliberately NOT exec: agy must be able to read the file while it runs,
-    # so the directory has to outlive the call. Running it as a child keeps
-    # this script alive to clean up, and the EXIT trap covers signals and
-    # failures. Propagate agy's exit status so callers still see it.
-    "${cmd[@]}"
-    exit $?
+    # Deliberately NOT exec: agy must be able to read the staging file for its
+    # whole run, so this script has to outlive it in order to clean up.
+    #
+    # That costs exec's signal transparency, which has to be paid back by hand.
+    # Without the forwarding below, a `timeout` or supervisor signalling only
+    # this PID would kill the wrapper, fire the EXIT trap, delete the staging
+    # directory out from under a still-running agy, and leave it orphaned on
+    # the caller's stdout. Callers here DO run this under `timeout`, so that is
+    # the expected path, not a corner case.
+    "${cmd[@]}" &
+    agy_pid=$!
+
+    trap 'kill -TERM "$agy_pid" 2>/dev/null' TERM
+    trap 'kill -INT  "$agy_pid" 2>/dev/null' INT
+
+    status=0
+    wait "$agy_pid" || status=$?
+
+    # A trapped signal makes `wait` return >128 immediately while the child may
+    # still be shutting down. Keep waiting until it is genuinely reaped, so the
+    # EXIT trap never removes the staging directory while agy is alive. If the
+    # child is already gone, kill -0 fails and a >128 status is its real
+    # died-by-signal status.
+    while (( status > 128 )) && kill -0 "$agy_pid" 2>/dev/null; do
+        status=0
+        wait "$agy_pid" || status=$?
+    done
+
+    exit "$status"
 fi
 
 # Pipe prompt via stdin — this is the key ARG_MAX fix.
