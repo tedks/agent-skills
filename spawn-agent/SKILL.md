@@ -187,3 +187,37 @@ of waiting for user input. To detect when agents are ready:
 - Use claude-send.sh to send messages to running agents
 - Socket detection is automatic -- you don't need to think about `-L` or `-S`
 - Prompts are passed via temp files to avoid ARG_MAX limits
+
+## agy and the workspace trust prompt
+
+The **first** interactive `agy` in a directory it has not been trusted with
+opens a modal before the composer exists:
+
+```
+Do you trust the contents of this project?
+
+Antigravity CLI requires permission to read, edit, and execute files here.
+
+> Yes, I trust this folder
+  No, exit
+
+  ↑/↓ Navigate · enter Confirm
+```
+
+The default button is *Yes* and the footer is *enter Confirm*, so a blind
+`Enter` grants trust — and answering it writes the directory into
+`trustedWorkspaces` in `~/.gemini/antigravity-cli/settings.json`, permanently.
+
+**The spawner never answers it.** When that modal is on screen the spawn fails
+immediately, having sent no keystroke at all, and tells you to answer it
+yourself. Granting a coding agent read/edit/execute over a directory is an
+operator decision, not something a script should make on your behalf while you
+are looking elsewhere.
+
+So: attach to the session, answer the prompt, then re-run the spawn.
+
+This is also why the readiness check waits for the composer *specifically* — its
+rule line **and** its `? for shortcuts` hint — rather than for any box-drawing
+character. The banner draws rules before the input box is live, and the modal
+draws none at all; matching on rules alone pasted into whatever happened to be
+on screen.

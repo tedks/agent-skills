@@ -119,4 +119,35 @@ Report the response back to the user.
     answered without reading the prompt to the end, so the script says so on
     stderr and **exits 3**. The reply is still printed (marker stripped), but
     treat exit 3 as "this answer may be based on a partial prompt", not as a
-    clean result.
+    clean result. Exit 3 also covers a reply that is *only* the marker.
+  - The marker is stripped from the last line only, so if agy decorates it the
+    punctuation survives: a reply ending `**MARKER**` leaves a stray `****`
+    line. A known trade-off — stripping the whole line would eat a short answer
+    that shares the line with the marker, and stripping every occurrence would
+    corrupt a reply that legitimately quotes it mid-body.
+
+### The headless permission flake
+
+`--add-dir` grants a directory **read**, and nothing else. agy usually reads the
+staged prompt with its built-in file tool, but it sometimes decides to shell out
+(`cat`) instead — and the `command` permission that needs cannot be prompted for
+in headless mode, so it is auto-denied and the run produces nothing:
+
+```
+jetski: no output produced — a tool required the "command" permission that
+headless mode cannot prompt for, so it was auto-denied.
+```
+
+Which tool it picks varies run to run, so this presents as an intermittent
+failure (roughly 1 in 8 from an untrusted workspace). Two mitigations, neither
+touching machine-wide permissions:
+
+- the preamble tells agy to use its file-reading tool and not a shell command;
+- the script retries **once**, only when the run exited 0 *and* the output
+  carries that auto-deny signature, announcing the retry on stderr.
+
+It is deliberately **not** a general retry on exit 3 — that would paper over
+genuine partial reads, which is what the marker exists to catch. If you see the
+retry note often, the durable fix is a permission allow-rule in
+`~/.gemini/config/config.json`, which is an operator security decision and is
+tracked separately rather than shipped here.
