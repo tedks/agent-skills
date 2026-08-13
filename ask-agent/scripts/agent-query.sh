@@ -204,7 +204,13 @@ if [[ -n "$prompt_via_file" ]]; then
       } > "$agy_prompt"
     )
 
-    cmd+=(--add-dir "$agy_dir" -p "Read the file $agy_prompt in full and follow the instructions in it. Treat its entire contents as your prompt, except for its final line, which is an end-of-prompt marker rather than part of the prompt. Do not ask for confirmation before reading it. When you have finished, reproduce that final marker line verbatim, on a line of its own, as the very last line of your reply, so the caller can confirm you read the whole prompt.")
+    # "with your built-in file-reading tool, not a shell command" is load-bearing,
+    # not politeness: --add-dir grants a directory READ, and nothing else. If agy
+    # decides to `cat` the file instead, that needs the "command" permission,
+    # which headless mode cannot prompt for and therefore auto-denies -- the run
+    # produces no output at all. Steering the tool choice is the cheap half of
+    # the fix; the retry below is the other half.
+    cmd+=(--add-dir "$agy_dir" -p "Read the file $agy_prompt in full, using your built-in file-reading tool -- do not use a shell command such as cat or head to read it. Follow the instructions in it. Treat its entire contents as your prompt, except for its final line, which is an end-of-prompt marker rather than part of the prompt. Do not ask for confirmation before reading it. When you have finished, reproduce that final marker line verbatim, on a line of its own, as the very last line of your reply, so the caller can confirm you read the whole prompt.")
 
     # NOT exec'd: agy must read the staging file for its whole run, so this
     # script outlives it to clean up -- forfeiting exec's signal transparency,
@@ -217,46 +223,64 @@ if [[ -n "$prompt_via_file" ]]; then
     # path below does, so a SIGKILL cannot strand it.
     # Let bash allocate the fds rather than naming 4 and 5, which a caller may
     # already be using for something of its own.
-    agy_out="$(mktemp /tmp/ask-agent-agy-out.XXXXXX)"
-    exec {agy_w}> "$agy_out" {agy_r}< "$agy_out"
-    rm -f -- "$agy_out"
+    # Bounded retry: even with the steer above, agy sometimes answers by shelling
+    # out, and headless mode auto-denies the "command" permission it would need,
+    # leaving a run that exits 0 having produced nothing. Which tool it reaches
+    # for is a model decision that varies run to run, so one retry clears it.
+    # Keyed on the auto-deny text specifically, NOT on exit 3 in general -- a
+    # blanket retry would paper over genuine partial reads, which is the failure
+    # this whole mechanism exists to surface.
+    for agy_attempt in 1 2; do
+        agy_out="$(mktemp /tmp/ask-agent-agy-out.XXXXXX)"
+        exec {agy_w}> "$agy_out" {agy_r}< "$agy_out"
+        rm -f -- "$agy_out"
 
-    "${cmd[@]}" >&"$agy_w" &
-    agy_pid=$!
-    exec {agy_w}>&-   # only the child needs the write end now
+        "${cmd[@]}" >&"$agy_w" &
+        agy_pid=$!
+        exec {agy_w}>&-   # only the child needs the write end now
 
-    # Forward the actual signal, not a translated TERM. HUP matters: these run
-    # from tmux, where a hangup delivers HUP. (INT/QUIT are inert in background
-    # -- SIG_IGN on entry -- and redundant in a terminal; trapped for symmetry.)
-    _agy_signalled=""
-    _forward_to_agy() { _agy_signalled=1; kill -"$1" "$agy_pid" 2>/dev/null || true; }
-    for _sig in HUP INT TERM QUIT; do
-        # shellcheck disable=SC2064  # expand _sig now, at trap definition
-        trap "_forward_to_agy $_sig" "$_sig"
-    done
-    unset _sig
-
-    # A trapped signal makes `wait` return >128 WITHOUT reaping, so we must wait
-    # again or the EXIT trap deletes the staging dir under a live agy. Tell that
-    # from a real signal death by the trap's flag, never `kill -0`: a reaped PID
-    # can be recycled, and probing it spins on the remembered status forever.
-    status=0
-    _agy_signalled=""
-    wait "$agy_pid" || status=$?
-    while (( status > 128 )) && [[ -n "$_agy_signalled" ]]; do
+        # Forward the actual signal, not a translated TERM. HUP matters: these
+        # run from tmux, where a hangup delivers HUP. (INT/QUIT are inert in
+        # background -- SIG_IGN on entry -- and redundant in a terminal.)
         _agy_signalled=""
-        _prev_status=$status
-        status=0
-        wait "$agy_pid" 2>/dev/null || status=$?
-        # Insurance for shells that discard a reaped child's status (bash 5.2
-        # keeps it): "not a child" means the earlier wait already reaped agy.
-        if (( status == 127 )); then
-            status=$_prev_status
-            break
-        fi
-    done
+        _forward_to_agy() { _agy_signalled=1; kill -"$1" "$agy_pid" 2>/dev/null || true; }
+        for _sig in HUP INT TERM QUIT; do
+            # shellcheck disable=SC2064  # expand _sig now, at trap definition
+            trap "_forward_to_agy $_sig" "$_sig"
+        done
+        unset _sig
 
-    response="$(cat <&"$agy_r")"   # command substitution drops trailing newlines
+        # A trapped signal makes `wait` return >128 WITHOUT reaping, so we must
+        # wait again or the EXIT trap deletes the staging dir under a live agy.
+        # Tell that from a real signal death by the trap's flag, never `kill -0`:
+        # a reaped PID can be recycled, and probing it spins forever on the
+        # remembered status.
+        status=0
+        _agy_signalled=""
+        wait "$agy_pid" || status=$?
+        while (( status > 128 )) && [[ -n "$_agy_signalled" ]]; do
+            _agy_signalled=""
+            _prev_status=$status
+            status=0
+            wait "$agy_pid" 2>/dev/null || status=$?
+            # Insurance for shells that discard a reaped child's status (bash 5.2
+            # keeps it): "not a child" means the earlier wait already reaped agy.
+            if (( status == 127 )); then
+                status=$_prev_status
+                break
+            fi
+        done
+
+        response="$(cat <&"$agy_r")"   # command substitution drops trailing \n
+        exec {agy_r}<&-                # not into the next attempt
+
+        if (( agy_attempt == 1 && status == 0 )) &&
+           [[ "$response" == *"a tool required the"* && "$response" == *permission* ]]; then
+            echo "Note: agy auto-denied a tool permission in headless mode (it tried to run a command rather than read the file); retrying once" >&2
+            continue
+        fi
+        break
+    done
 
     # Everything below runs on model-generated text built from an untrusted
     # prompt, AFTER agy has already answered, and callers run this under
