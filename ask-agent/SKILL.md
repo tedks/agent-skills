@@ -173,6 +173,26 @@ retry note often, the durable fix is a permission allow-rule in
 tracked separately (ditz `agy-headless-command-permission`) rather than shipped
 here.
 
+### Reply trimming is locale-sensitive — there is a tripwire
+
+`scripts/test-rtrim.sh` exercises the reply-trimming function across
+`en_US.UTF-8`, `C.UTF-8`, `C` and `POSIX` and asserts byte-identical results.
+**Run it after touching anything in the reply-handling path.** It takes a second
+and needs no framework:
+
+```bash
+.claude/skills/ask-agent/scripts/test-rtrim.sh
+```
+
+It exists because this exact code shipped a bug twice, from opposite directions
+— once blanking whole replies containing an undecodable byte (the `timeout`
+path, where agy is killed mid-character), once letting an invisible character
+pass as a successful answer. The caller's locale is not reliable: `LANG` is
+unset under cron, systemd units, `ssh host cmd`, `docker exec` and `sudo` with
+`env_reset`, and a `LANG` naming an ungenerated locale degrades to `C` silently.
+The test extracts the function from `agent-query.sh` rather than copying it, so
+it cannot drift.
+
 ### Known residuals
 
 - **Replies above ~500KB with no newline at all** hit a quadratic parameter
@@ -184,3 +204,12 @@ here.
   disarmed once the child is reaped, because leaving them armed meant firing
   `kill` at a PID that may already have been recycled. Losing a reply to a
   signal that arrived in a 0.4s window is the better failure.
+- **On a system without `C.UTF-8`, trimming degrades to ASCII-only.** The trim
+  pins `C.UTF-8`; if that is unavailable the guard detects the byte locale and
+  drops the named non-breaking characters rather than letting the character
+  class shred multibyte tails. Consequence: **no corruption ever**, but a reply
+  ending in U+00A0 / U+202F / U+FEFF is not trimmed, so the invisible-content
+  case would pass as success *in that environment only*. glibc ships `C.UTF-8`
+  built in — `LOCPATH` cannot even unseat it — so this is a documented edge, not
+  a live hole on this fleet. Asserted in `test-rtrim.sh` rather than only
+  described here.
