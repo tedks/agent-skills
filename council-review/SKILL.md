@@ -78,9 +78,15 @@ Launch all three in a single parallel tool invocation:
 > **agy cannot fetch anything.** Headless agy has no usable tool access: the
 > `command` permission cannot be prompted for in headless mode and is
 > auto-denied, so `gh pr diff`, `git`, `cat` — anything but reading the one
-> staged prompt file — will fail, and the run produces no output at all. See
-> ditz `agy-headless-command-permission`; granting it is an operator decision
-> and is deliberately not part of the tooling.
+> staged prompt file — will fail. See ditz `agy-headless-command-permission`;
+> granting it is an operator decision and is deliberately not part of the
+> tooling.
+>
+> The denial shows up in one of two ways, and **neither is review content**:
+> the *hard* shape produces no output at all, while the *soft* shape puts the
+> denial text on stdout, where it looks superficially like a reply. ask-agent
+> retries once and normally absorbs both — so if that text ever does reach you,
+> read it as the flake, not as agy's opinion of the diff.
 >
 > So for **every** agy review: put the complete diff *in the prompt*, tell it
 > explicitly not to run commands or fetch anything, and run it from a neutral
