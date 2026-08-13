@@ -87,17 +87,12 @@ _cleanup_prompt_file=""
 # actually removes it -- on success, failure, and signals alike.
 _cleanup_agy_dir=""
 
-# agy's stdout is captured to a file rather than inherited, so the sentinel can
-# be checked and stripped before anything reaches the caller.
-_cleanup_agy_out=""
-
 # Trap to clean up temp files on any exit (failure paths).
 # On the claude/codex success path, we manually delete before exec, because
 # exec replaces this process and the trap would never fire.
 cleanup() {
     [[ -n "$_cleanup_prompt_file" ]] && rm -f "$_cleanup_prompt_file"
     [[ -n "$_cleanup_agy_dir" ]] && rm -rf -- "$_cleanup_agy_dir"
-    [[ -n "$_cleanup_agy_out" ]] && rm -f -- "$_cleanup_agy_out"
 }
 trap cleanup EXIT
 
@@ -255,12 +250,18 @@ if [[ -n "$prompt_via_file" ]]; then
     #
     # The capture file lives OUTSIDE $agy_dir on purpose: that directory is the
     # --add-dir workspace, and "holds nothing but this prompt" is what bounds
-    # the grant. mktemp creates it 0600.
+    # the grant.
+    #
+    # It is unlinked as soon as both fds are open, the same trick the stdin path
+    # below uses. The reply never has a name another account could open, and a
+    # SIGKILL -- which no EXIT trap can survive -- cannot strand it in /tmp.
     agy_out="$(mktemp /tmp/ask-agent-agy-out.XXXXXX)"
-    _cleanup_agy_out="$agy_out"
+    exec 4> "$agy_out" 5< "$agy_out"
+    rm -f -- "$agy_out"
 
-    "${cmd[@]}" > "$agy_out" &
+    "${cmd[@]}" >&4 &
     agy_pid=$!
+    exec 4>&-
 
     # Forward the signal we actually received rather than translating
     # everything to TERM, and cover the whole set that can reach us. HUP is not
@@ -311,13 +312,15 @@ if [[ -n "$prompt_via_file" ]]; then
         fi
     done
 
+    response="$(cat <&5)"   # command substitution drops trailing newlines
+
     # A run that exited 0 without the marker is the failure this guard exists
     # for: agy answered, but there is no evidence it read the prompt to the end.
     # Report it loudly and distinctly (3) rather than passing a maybe-truncated
     # answer off as success. The reply is still emitted -- it is usually mostly
     # right, and a caller that ignores both stderr and the exit status was never
     # going to be saved by withholding it.
-    if (( status == 0 )) && ! grep -qF -- "$agy_sentinel" "$agy_out"; then
+    if (( status == 0 )) && [[ "$response" != *"$agy_sentinel"* ]]; then
         echo "Error: response missing prompt-completion sentinel; prompt may have been read partially" >&2
         status=3
     fi
@@ -325,7 +328,6 @@ if [[ -n "$prompt_via_file" ]]; then
     # Strip the marker, plus the trailing blank line it leaves behind. Removal
     # is unconditional: on a nonzero status the marker is usually absent anyway,
     # and it must never survive into the reply when it is not.
-    response="$(< "$agy_out")"                            # drops trailing \n
     response="${response//"$agy_sentinel"/}"              # quoted: literal
     response="${response%"${response##*[![:space:]]}"}"   # re-trim the tail
     if [[ -n "$response" ]]; then
