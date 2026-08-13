@@ -1,13 +1,13 @@
 ---
 name: initialize-repo
-description: Initialize a new project with bare git repo, beads, branch protection, agent instructions, and optional language-specific scaffolding. Supports multiple project types. Also provides --sync to report drift between an existing repo and the canonical scaffold templates.
+description: Initialize a new project with bare git repo, ditz issue tracking, branch protection, agent instructions, and optional language-specific scaffolding. Supports multiple project types. Also provides --sync to report drift between an existing repo and the canonical scaffold templates.
 argument-hint: <project-name> [--type bare|sui-dapp|python|rust|ocaml|node|go] [description] | --sync <repo-path>
 allowed-tools: Bash(~/.claude/skills/initialize-repo/scripts/*), Read, Write, Edit, Glob, Grep, WebFetch
 ---
 
 # initialize-repo
 
-Set up a new project from scratch with the full development environment: bare git repo with worktrees, beads issue tracking, GitHub repo with branch protection, agent instruction files, and optional language-specific scaffolding.
+Set up a new project from scratch with the full development environment: bare git repo with worktrees, ditz issue tracking, GitHub repo with branch protection, agent instruction files, and optional language-specific scaffolding.
 
 ## Usage
 
@@ -27,7 +27,7 @@ Set up a new project from scratch with the full development environment: bare gi
 
 | Type | What it adds |
 |------|-------------|
-| `bare` | Just the infrastructure — git, beads, agents, planning. No language opinion. |
+| `bare` | Just the infrastructure — git, ditz, agents, planning. No language opinion. |
 | `sui-dapp` | Sui Move contracts, frontend skeleton, Nix flake with pinned Sui binary |
 | `python` | pyproject.toml (uv), pytest, src layout, Nix flake with Python |
 | `rust` | Cargo project, clippy/rustfmt config, Nix flake with Rust toolchain |
@@ -41,14 +41,12 @@ Set up a new project from scratch with the full development environment: bare gi
 
 | Template | Lands at (in new repos) | Kind |
 |----------|-------------------------|------|
-| `templates/scripts/install-bd.sh` | `scripts/install-bd.sh` | verbatim |
-| `templates/scripts/configure-git-beads-merge-driver.sh` | `scripts/configure-git-beads-merge-driver.sh` | verbatim |
 | `templates/create-worktree` | `~/Projects/<project-name>/create-worktree` (project root, next to the bare `.git/`) | verbatim |
 | `templates/PLANS.md` | `.planning/PLANS.md` | verbatim |
 | `templates/github-workflows/claude.yml` | `.github/workflows/claude.yml` | verbatim |
 | `templates/github-workflows/claude-code-review.yml` | `.github/workflows/claude-code-review.yml` | verbatim |
 | `templates/github-workflows/ci-nix.yml` | `.github/workflows/ci.yml` | skeleton — replace the TODO build/test steps |
-| `templates/AGENTS.md` | `AGENTS.md` | skeleton — fill `{{PROJECT_NAME}}`, `{{PROJECT_DESCRIPTION}}`, `{{ISSUE_PREFIX}}` and the TODO sections |
+| `templates/AGENTS.md` | `AGENTS.md` | skeleton — fill `{{PROJECT_NAME}}`, `{{PROJECT_DESCRIPTION}}` and the TODO sections |
 | `templates/flake-snippets/playwright.nix` | spliced into `flake.nix` | snippet — copy the pieces into the dev shell |
 
 **Verbatim** templates work as-is and should stay byte-identical to the template until a repo has a real reason to diverge. **Skeleton** templates are starting points that every repo customizes; only their shared structure is canonical. The Playwright **snippet** is for repos that run browser tests under Nix.
@@ -74,10 +72,8 @@ When "landing the plane" in a repo that was scaffolded by this skill, it's worth
 ```
 ~/Projects/<project-name>/
 ├── .git/                          # Bare git repo
-├── .beads/                        # Beads issue database
 ├── create-worktree                # Worktree helper (from templates/)
 └── master/                        # Primary worktree
-    ├── .beads/redirect            # Points to bare root's .beads/
     ├── .claude/skills/            # Agent skills (copied from dotfiles)
     ├── .github/workflows/         # claude.yml, claude-code-review.yml (from templates/)
     ├── .gitignore                 # Standard ignores
@@ -85,11 +81,12 @@ When "landing the plane" in a repo that was scaffolded by this skill, it's worth
     │   └── PLANS.md               # ExecPlan format guide (from templates/)
     ├── AGENTS.md                  # Agent instructions (from templates/, source of truth)
     ├── CLAUDE.md -> AGENTS.md     # Symlink for Claude Code
-    ├── README.md                  # Project README
-    └── scripts/
-        ├── install-bd.sh          # Beads CLI installer (from templates/)
-        └── configure-git-beads-merge-driver.sh  # (from templates/)
+    └── README.md                  # Project README
 ```
+
+Issues are not in this tree: ditz keeps them as YAML on the orphan
+`ditz-metadata` branch and manages its own worktree, so nothing is
+checked out into the working tree and no per-worktree wiring is needed.
 
 ### sui-dapp additions
 
@@ -283,9 +280,8 @@ All from `~/.claude/skills/initialize-repo/templates/` (see [Templates](#templat
 
 ```bash
 cd ~/Projects/<project-name>/master
-mkdir -p scripts .github/workflows
+mkdir -p .github/workflows
 T=~/.claude/skills/initialize-repo/templates
-cp "$T/scripts/install-bd.sh" "$T/scripts/configure-git-beads-merge-driver.sh" scripts/
 cp "$T/github-workflows/claude.yml" "$T/github-workflows/claude-code-review.yml" .github/workflows/
 cp "$T/create-worktree" ~/Projects/<project-name>/create-worktree
 ```
@@ -732,7 +728,7 @@ Include these in the AGENTS.md written during Part 3:
 
 ### Step F1: Write AGENTS.md
 
-Start from `templates/AGENTS.md`. Replace the placeholders (`{{PROJECT_NAME}}`, `{{PROJECT_DESCRIPTION}}`, `{{ISSUE_PREFIX}}` — the issue prefix is the project name passed to `bd init`) and fill in the TODO sections:
+Start from `templates/AGENTS.md`. Replace the placeholders (`{{PROJECT_NAME}}`, `{{PROJECT_DESCRIPTION}}`) and fill in the TODO sections:
 - Project structure (directory layout — adapt to the selected type)
 - Environment setup (Nix + direnv if the type includes a flake, or just note "no special environment" for `bare`)
 - **Type-specific build and test commands** (see the "AGENTS.md sections" in the type above)
@@ -786,30 +782,36 @@ git push -u origin master
 
 Note: `gh repo create --source` does not work from a worktree. Create the repo without `--source`, then add the remote manually.
 
-### Step F7: Initialize beads
+### Step F7: Initialize ditz
 
-Beads must be initialized from the bare repo root, not from a worktree:
+`ditz` is installed via Nix — `nix run github:tedks/ditz -- <cmd>`, or
+install it once with `nix profile install github:tedks/ditz#ditz`.
+
+Run `ditz init` from inside the worktree. It creates the orphan
+`ditz-metadata` branch that holds the issues; nothing lands in the
+working tree, so there is no redirect to create and no per-worktree
+setup for later worktrees.
 
 ```bash
-cd ~/Projects/<project-name>
-bd init --branch beads-metadata --prefix <project-name>
+cd ~/Projects/<project-name>/master
+ditz init --no-onboarding
 ```
 
-Then configure it:
-1. Edit `.beads/config.yaml`: set `no-daemon: true`
-2. Delete the stray `AGENTS.md` that `bd init` creates at the bare root: `rm ~/Projects/<project-name>/AGENTS.md`
-3. Create the redirect in the worktree:
-   ```bash
-   cd ~/Projects/<project-name>/master
-   mkdir -p .beads
-   printf '%s\n' ../.beads > .beads/redirect
-   ```
-4. Commit and push the redirect:
-   ```bash
-   git add .beads/redirect
-   git commit -m "Add beads issue tracking redirect for worktree"
-   git push
-   ```
+`--no-onboarding` suppresses the onboarding block ditz would otherwise
+append to `AGENTS.md`; the AGENTS.md written in Step F1 already carries a
+curated "Issue tracking (ditz)" section, and letting ditz append its own
+would duplicate it. Drop the flag if you would rather have ditz's text
+and delete the template's section instead — but do not keep both.
+
+Then push the branch so the issues exist on the remote:
+
+```bash
+ditz sync
+```
+
+No merge driver is needed: issues are one YAML file each, so concurrent
+edits to different issues do not collide, and git's default merge handles
+the branch.
 
 ### Step F8: Set up branch protection
 
@@ -849,7 +851,7 @@ RULES
 Run the following checks:
 - `cd ~/Projects/<project-name>/master && git status` — clean working tree
 - `git worktree list` — shows bare root and master worktree
-- `bd ready` — beads works (returns empty list)
+- `ditz list` — ditz works (returns an empty list on a fresh repo)
 
 **Type-specific checks (skip for `bare`):**
 - `nix develop --command echo "ok"` — Nix shell loads

@@ -2,16 +2,18 @@
 
 # Create or reuse a sibling worktree for the given branch, using the central
 # bare repository located at .git in the directory containing this script.
-# Idempotent: rerunning for an existing worktree reuses it (and repairs a
-# missing beads redirect).
+# Idempotent: rerunning for an existing worktree reuses it.
 #
 # Expected project layout (this script lives at the project root):
 #   ~/Projects/<project>/
 #   ├── .git/                    # bare repo
-#   ├── .beads/                  # canonical beads dir (if the project uses beads)
 #   ├── create-worktree          # this script
 #   ├── master/                  # primary worktree (master or main)
 #   └── <project>-<branch>/      # feature worktrees created by this script
+#
+# Issue tracking needs nothing here: ditz keeps its issues on the
+# ditz-metadata branch and manages its own worktree, so a new worktree
+# requires no per-worktree issue-tracker setup.
 #
 # Branch names containing '/' are flattened to '-' in the worktree directory
 # name (note: feat/x and feat-x therefore map to the same directory; the
@@ -42,71 +44,6 @@ worktree_for_ref() {
 ref_for_worktree() {
   git --git-dir="$GIT_DIR" worktree list --porcelain 2>/dev/null \
     | awk -v dir="$1" '/^worktree /{p=substr($0,10)} $1=="branch" && p==dir{print $2; exit}'
-}
-
-find_primary_worktree() {
-  # Prefer the worktree on master, then main; otherwise use the first listed
-  # worktree (the bare repo is always the first stanza, so take the second).
-  local primary path
-  for primary in master main; do
-    path="$(worktree_for_ref "refs/heads/$primary")"
-    if [[ -n "$path" ]]; then
-      echo "$path"
-      return
-    fi
-  done
-  git --git-dir="$GIT_DIR" worktree list --porcelain 2>/dev/null \
-    | awk '/^worktree /{c++; if (c == 2) { print substr($0,10); exit }}'
-}
-
-setup_beads_redirect() {
-  # Find the canonical .beads/: the project root first (the layout the
-  # initialize-repo skill scaffolds), then the primary worktree (legacy
-  # layout). If neither has one, the project does not use beads and
-  # nothing is written.
-  local canonical_beads_dir=""
-  if [[ -d "$ROOT/.beads" ]]; then
-    canonical_beads_dir="$ROOT/.beads"
-  else
-    local canonical_worktree
-    canonical_worktree="$(find_primary_worktree)"
-    if [[ "$canonical_worktree" == "$WORKTREE_DIR" ]]; then
-      echo "[beads] This worktree is the primary worktree; no redirect needed."
-      return 0
-    fi
-    if [[ -n "$canonical_worktree" && -d "$canonical_worktree/.beads" ]]; then
-      canonical_beads_dir="$canonical_worktree/.beads"
-    fi
-  fi
-
-  if [[ -z "$canonical_beads_dir" ]]; then
-    echo "[beads] No canonical .beads/ found; skipping redirect setup (project may not use beads)."
-    return 0
-  fi
-
-  local worktree_beads_dir="$WORKTREE_DIR/.beads"
-  local redirect_file="$worktree_beads_dir/redirect"
-
-  if [[ -f "$redirect_file" ]]; then
-    echo "[beads] Redirect already present: $redirect_file"
-    return 0
-  fi
-
-  mkdir -p "$worktree_beads_dir"
-
-  local target_ref="$canonical_beads_dir"
-  if command -v realpath >/dev/null 2>&1; then
-    target_ref="$(realpath --relative-to="$worktree_beads_dir" "$canonical_beads_dir" 2>/dev/null || echo "$canonical_beads_dir")"
-  elif command -v python3 >/dev/null 2>&1; then
-    target_ref="$(
-      python3 -c 'import os,sys; print(os.path.relpath(sys.argv[1], sys.argv[2]))' \
-        "$canonical_beads_dir" \
-        "$worktree_beads_dir"
-    )"
-  fi
-
-  printf '%s\n' "$target_ref" >"$redirect_file"
-  echo "[beads] Configured redirect: $redirect_file -> $target_ref"
 }
 
 BRANCH="${1:-}"
@@ -215,9 +152,6 @@ else
   echo "Adding worktree at $WORKTREE_DIR..."
   git --git-dir="$GIT_DIR" worktree add "$WORKTREE_DIR" "$BRANCH"
 fi
-
-echo
-setup_beads_redirect
 
 echo
 echo "Active worktrees:"

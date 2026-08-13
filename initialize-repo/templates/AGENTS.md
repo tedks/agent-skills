@@ -40,25 +40,38 @@ nix develop --command <build>
 nix develop --command <test>
 -->
 
-## Issue tracking (beads)
+## Issue tracking (ditz)
 
-Issues use the prefix `{{ISSUE_PREFIX}}-` (e.g. `{{ISSUE_PREFIX}}-1`).
+Issues live as plain-text YAML on the `ditz-metadata` git branch, one
+file per issue; the `ditz` CLI reads and writes them. Nothing appears in
+the working tree, and no per-worktree setup is needed — any worktree of
+this repo can run `ditz`. Install via Nix:
+`nix run github:tedks/ditz -- <cmd>` (or install `github:tedks/ditz#ditz`).
 
 ```bash
-bd ready                                    # find available work
-bd show {{ISSUE_PREFIX}}-1                  # view issue details
-bd update {{ISSUE_PREFIX}}-1 --status in_progress   # claim work
-bd comment {{ISSUE_PREFIX}}-1 "progress"    # add notes
-bd close {{ISSUE_PREFIX}}-1                 # complete work
-bd sync                                     # sync with git
+ditz ready                    # find available work (unblocked, ranked)
+ditz show <id>                # view issue details (add --json for machine output)
+ditz start <id>               # claim work (marks in_progress)
+ditz close <id> --reason "…"  # complete work (or --wontfix / --reorg)
+ditz comment <id> "message"   # add a progress note
+ditz sync                     # fetch/merge/push the ditz-metadata branch
 ```
 
-The canonical `.beads/` lives at the project root, next to the bare
-`.git/`; every worktree reaches it via `.beads/redirect` (committed at
-scaffold time, and recreated by `create-worktree` if missing). Include
-`bd sync` in the end-of-session push workflow.
-If `bd sync` complains about the merge driver, rerun
-`scripts/configure-git-beads-merge-driver.sh`.
+Include `ditz sync` in the end-of-session push workflow:
+
+```bash
+git pull --rebase
+ditz sync
+git push
+```
+
+Use `ditz` commands rather than hand-editing the `ditz-metadata` branch.
+Ditz has no priority / label / assignee fields: grouping is by component
+(`-c <component>`), sequencing is by the dependency graph
+(`ditz blocks <a> <b>`), and urgency is derived. Use a deterministic id
+with `--id <name>` when you need an idempotent add — re-creating with the
+same id is a no-op, which is what makes `ditz add` safe to call from
+unattended jobs.
 
 ## Planning
 

@@ -51,8 +51,6 @@ TEMPLATES="$(cd "$TEMPLATES" && pwd)"
 # project layout where loose scripts sit at the project root above the
 # primary worktree.
 VERBATIM=(
-  "scripts/install-bd.sh|scripts/install-bd.sh|install-bd.sh"
-  "scripts/configure-git-beads-merge-driver.sh|scripts/configure-git-beads-merge-driver.sh|configure-git-beads-merge-driver.sh"
   "create-worktree|create-worktree|create-worktree.sh|../create-worktree|../create-worktree.sh"
   "PLANS.md|.planning/PLANS.md|PLANS.md"
   "github-workflows/claude.yml|.github/workflows/claude.yml"
