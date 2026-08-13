@@ -85,8 +85,8 @@ When "landing the plane" in a repo that was scaffolded by this skill, it's worth
 ```
 
 Issues are not in this tree: ditz keeps them as YAML on the orphan
-`ditz-metadata` branch and manages its own worktree, so nothing is
-checked out into the working tree and no per-worktree wiring is needed.
+`ditz-metadata` branch, which is never checked out over the working tree,
+so no per-worktree wiring is needed.
 
 ### sui-dapp additions
 

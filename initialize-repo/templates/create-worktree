@@ -12,7 +12,7 @@
 #   └── <project>-<branch>/      # feature worktrees created by this script
 #
 # Issue tracking needs nothing here: ditz keeps its issues on the
-# ditz-metadata branch and manages its own worktree, so a new worktree
+# ditz-metadata branch rather than in the working tree, so a new worktree
 # requires no per-worktree issue-tracker setup.
 #
 # Branch names containing '/' are flattened to '-' in the worktree directory
