@@ -11,8 +11,13 @@
 #   -m, --model <model>          Specify model (agent-specific)
 #   -f, --prompt-file <file>     Read prompt from file (avoids ARG_MAX)
 #
-# The prompt is always piped via stdin to the downstream agent, never
-# passed as a CLI argument. This avoids ARG_MAX limits on execve(2).
+# For claude and codex the prompt is piped via stdin, never passed as a CLI
+# argument, which avoids ARG_MAX limits on execve(2).
+#
+# agy is the exception: it has no stdin mode, so its prompt goes in argv and is
+# capped at 120000 bytes and visible in `ps`. See the agy branch below for the
+# empirical basis and the tradeoff. --prompt-file does NOT lift the cap for
+# agy; it only changes where this script reads the prompt from.
 #
 # Examples:
 #   agent-query.sh claude "Explain this error"

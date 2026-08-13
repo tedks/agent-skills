@@ -53,8 +53,10 @@ is also fine:
 ~/.claude/skills/ask-agent/scripts/agent-query.sh <agent> [options] <prompt>
 ```
 
-The script pipes the prompt via stdin to the downstream agent, so even inline
-prompts are safe at the script-to-agent boundary. The --prompt-file approach
+The script pipes the prompt via stdin to `claude` and `codex`, so even inline
+prompts are safe at the script-to-agent boundary for those two. `agy` is the
+exception -- it has no stdin mode and its prompt travels in argv, subject to
+the 120000-byte cap and `ps` visibility described under Notes. The --prompt-file approach
 protects the caller-to-script boundary as well.
 
 Report the response back to the user.
@@ -87,11 +89,20 @@ Report the response back to the user.
 |--------|------------------------|-------|
 | claude | `claude -p` | Yes - reads from stdin when no positional prompt given |
 | codex  | `codex exec -` | Yes - `-` reads from stdin |
-| agy | `agy -p -` | Yes - `-p -` reads the prompt from stdin (Antigravity CLI) |
+| agy | `agy -p <prompt>` | **No** - agy has no stdin mode; prompt goes in argv (see caveats) |
 
 ## Notes
 
 - Response is synchronous - the calling agent waits for the response
 - Useful for getting a second opinion or different perspective
 - Each agent has different training data and reasoning patterns
-- Prompts are piped via stdin to downstream agents (never as CLI args)
+- Prompts are piped via stdin to `claude` and `codex` (never as CLI args)
+- **`agy` is the exception**: it has no stdin mode, so its prompt is passed in
+  argv. Two consequences, both enforced/documented by the script:
+  - **Size**: capped at 120000 bytes (Linux `MAX_ARG_STRLEN` is 131072 for a
+    single argv entry). Over that the script refuses with an explanatory error.
+    `--prompt-file` does NOT lift this for agy -- it only changes where the
+    script reads the prompt from, not how agy receives it.
+  - **Privacy**: an argv prompt is readable via `ps` and `/proc/<pid>/cmdline`
+    by any local account while agy runs. Prefer `claude` or `codex` for
+    prompts containing private source.
