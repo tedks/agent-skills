@@ -327,42 +327,64 @@ if [[ -n "$prompt_via_file" ]]; then
         # Under a UTF-8 locale glibc's regexec REFUSES to match a string holding
         # an invalid multibyte sequence -- and agy killed mid-reply ends inside a
         # character routinely, so that is the `timeout` path. Treating no-match
-        # as "all whitespace" therefore blanked whole replies. But forcing C to
-        # dodge that stops [[:space:]] matching U+00A0 / U+2003 / U+3000, and a
-        # reply of "<marker><EM SPACE>" then survives as invisible content,
-        # slipping past the marker-only guard with status 0.
+        # as "all whitespace" therefore blanked whole replies. But a byte locale
+        # stops [[:space:]] matching U+2003 / U+3000, and a reply of
+        # "<marker><EM SPACE>" then survives as invisible content, slipping past
+        # the marker-only guard with status 0.
         #
-        # So: trim in the caller's locale, and only fall back to C for input
-        # that provably cannot be decoded. A MATCH is the only thing that
-        # rewrites anything, so a refused match can never blank a reply.
+        # So: trim multibyte-aware, and fall back to bytes only for input that
+        # provably cannot be decoded. A MATCH is the only thing that rewrites
+        # anything, so a refused match can never blank a reply.
+
+        # Passes 1-2 PIN C.UTF-8 rather than inheriting the caller's locale.
+        # They have to be multibyte-aware, and the caller's locale is not
+        # reliably UTF-8: LANG unset (cron, systemd units, `ssh host cmd`,
+        # `docker exec`, `sudo` with env_reset) lands in C, and so does LANG
+        # naming a locale that was never generated. Under a byte locale the
+        # named characters below decompose into their individual bytes and the
+        # class eats any reply whose last character ends in one of them.
+        # C.UTF-8 has the same space class as any UTF-8 locale and still refuses
+        # invalid multibyte, so pass 3 stays reachable.
+        local LC_ALL=C.UTF-8
 
         # glibc deliberately excludes the NON-BREAKING spaces from [[:space:]]
-        # -- U+00A0, U+202F and U+FEFF are all Zs/format characters that
-        # isspace() says no to -- so the class has to name them. Without that,
+        # -- U+00A0, U+202F and U+FEFF are Zs/format characters that isspace()
+        # says no to -- so the class has to name them. Without that,
         # "<marker><NBSP>" survives as one invisible character, the reply is not
-        # empty, and it slips past the marker-only guard with status 0. That is
-        # the same bypass, one character over. (U+2003, U+3000 and U+2009 ARE
-        # space-class and need no help.)
+        # empty, and it slips past the marker-only guard with status 0.
+        # (U+2003, U+3000 and U+2009 ARE space-class and need no help.)
         #
-        # Passes 1-2 only. Pass 3 runs under C, where these literals would be
-        # matched byte-wise and could cut a multibyte sequence in half.
+        # Escapes rather than literals: these are invisible in an editor, and a
+        # maintainer reflowing the line could delete them with no test failing
+        # outside the marker-plus-NBSP cases.
         local _nb=$'  ﻿'
+
+        # If C.UTF-8 was unavailable bash has fallen back to a byte locale and
+        # _nb is 8 bytes rather than 3 characters. Drop the named characters
+        # rather than let the class shred multibyte tails: an ASCII-only trim
+        # loses less than silent corruption does.
+        (( ${#_nb} == 3 )) || _nb=""
+
         local _re_trim="^(.*[^[:space:]${_nb}])[[:space:]${_nb}]*\$"
         local _re_blank="^[[:space:]${_nb}]*\$"
 
-        # 1. Caller's locale: full Unicode trim, the common case.
+        # 1. Full Unicode trim, the common case.
         if [[ "$1" =~ $_re_trim ]]; then
             _rtrim_out="${BASH_REMATCH[1]}"
             return
         fi
-        # 2. Caller's locale: genuinely nothing but whitespace (Unicode too).
+        # 2. Genuinely nothing but whitespace (Unicode too).
         if [[ "$1" =~ $_re_blank ]]; then
             _rtrim_out=""
             return
         fi
         # 3. Neither matched, so the bytes do not decode. Under C every byte is
-        #    valid; trim ASCII whitespace and keep the content.
-        local LC_ALL=C
+        #    valid; trim ASCII whitespace and keep the content. Plain
+        #    [[:space:]] here ON PURPOSE -- naming multibyte characters in a
+        #    class evaluated byte-wise is the corruption this pass exists to
+        #    avoid. LC_ALL is already function-local, so this reassignment does
+        #    not leak (`local` is function-scoped, not block-scoped).
+        LC_ALL=C
         if [[ "$1" =~ ^(.*[^[:space:]])[[:space:]]*$ ]]; then
             _rtrim_out="${BASH_REMATCH[1]}"
         else
