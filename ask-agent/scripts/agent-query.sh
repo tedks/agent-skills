@@ -180,7 +180,17 @@ if [[ -n "$prompt_via_file" ]]; then
     # instruction below has to name the path, and a prompt containing this
     # script -- every council review of ask-agent itself -- would hand over the
     # derivation rule to go with it. Independent randomness instead.
-    agy_sentinel="__ASK_AGENT_EOP_$(od -An -N12 -tx1 /dev/urandom | tr -d ' \n')__"
+    #
+    # The pipeline's status is tr's, so a failing od would sail straight past
+    # `set -e` and leave "__ASK_AGENT_EOP___" -- a constant, published in this
+    # repo, reconstructible from any prompt that quotes this script. That is the
+    # hole above, silently reopened. Assert the randomness rather than trust it.
+    agy_rand="$(od -An -N12 -tx1 /dev/urandom | tr -d ' \n')"
+    if (( ${#agy_rand} != 24 )); then
+        echo "Error: could not generate a random completion sentinel" >&2
+        exit 1
+    fi
+    agy_sentinel="__ASK_AGENT_EOP_${agy_rand}__"
 
     # The redirect belongs on the inner group, after umask: a redirect attached
     # to `( ... )` is performed at fork time, under the OUTER umask.
