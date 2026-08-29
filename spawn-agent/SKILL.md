@@ -5,6 +5,13 @@ argument-hint: <session:window> <agent> [directory] [prompt]
 allowed-tools: Bash(~/.claude/skills/spawn-agent/scripts/*)
 ---
 
+<!-- Codex loads this same directory: install-codex-config links every
+     .claude/skills/<name> into ~/.codex/skills/<name> as a shared default, so
+     there is deliberately no .codex/skills copy of this file (copies drift --
+     scripts/install/test-install-codex-config.sh fails on one). The
+     allowed-tools and script paths below therefore point at ~/.claude/skills/,
+     which means install-claude-config must have run on a Codex host too. -->
+
 # spawn-agent
 
 Spawn AI agents in tmux windows for interactive, parallel work. Use this for
