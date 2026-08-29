@@ -85,7 +85,7 @@ Rules — these are not style preferences, they are what makes the council a cou
    are one opinion twice, and a summary that hides the gap overstates the
    consensus.
 
-The worked examples below are written from a **Claude Code host** (native seat =
+The worked example below is written from a **Claude Code host** (native seat =
 Claude; foreign seats = Codex, agy). A Codex host swaps the roles — native seat
 = Codex, foreign seats = Claude and agy — and so on down the table.
 
@@ -136,37 +136,49 @@ provider, one `/ask-agent` per foreign provider. Start every seat
 host supports; the native subagent and the `/ask-agent` shell calls are
 different mechanisms, and "launch together" never means "put your own provider
 in the `/ask-agent` batch". Every seat gets the **same review prompt with the
-diff inline**, staged in a prompt file:
+diff inline**, staged in two files — the bare prompt for your own seat, and
+the same prompt behind a "do not run commands" opener for the foreign seats:
 
 ```bash
-PROMPT_FILE=$(mktemp)
-trap 'rm -f "$PROMPT_FILE"' EXIT
+# No `trap ... EXIT`, and do not rely on $PROMPT_FILE surviving: every shell
+# tool call is a fresh process, so a trap would delete the file the moment this
+# call returned and the variable would be gone before any seat launched. Use
+# the literal paths this prints in every launch, and rm them after Step 4.
+PROMPT_FILE=$(mktemp /tmp/council-prompt.XXXXXX)
+FOREIGN_FILE=$(mktemp /tmp/council-foreign.XXXXXX)
 {
   cat << 'REVIEW_EOF'
-Everything you need is in this prompt. Do not run any commands and do not fetch anything — review only what is written below.
-
 <the review prompt from step 2, without the diff>
 REVIEW_EOF
   <the diff from step 1>            # PR target: gh pr diff N
 } > "$PROMPT_FILE"
+{
+  echo "Everything you need is in this prompt. Do not run any commands and do not fetch anything — review only what is written below."
+  echo
+  cat "$PROMPT_FILE"
+} > "$FOREIGN_FILE"
+echo "$PROMPT_FILE $FOREIGN_FILE"
 ```
 
-The opener is there for every foreign seat, not just agy: `claude -p` runs
-under whatever permission settings the machine has (bare `claude -p`, no
-permission flags — see `agent-query.sh`) and may not be allowed to run `gh`;
-`codex exec` may or may not have network from inside its sandbox. Telling
-either to pull the PR is a gamble that costs a wasted turn at best and an
-"I couldn't fetch the diff" non-review at worst. Inline is right for all of
-them, and it is what makes the seats comparable: they all reviewed the same
-bytes.
+The opener goes to every foreign seat and **only** to foreign seats. It is
+there because `claude -p` runs under whatever permission settings the machine
+has (bare `claude -p`, no permission flags — see `agent-query.sh`) and may not
+be allowed to run `gh`, and `codex exec` may or may not have network from
+inside its sandbox: telling either to pull the PR is a gamble that costs a
+wasted turn at best and an "I couldn't fetch the diff" non-review at worst.
+Inline is right for all of them, and it is what makes the seats comparable:
+they all reviewed the same bytes. Your **own** seat must *not* get the opener:
+its native subagent has tools and project context, and that context — reading
+the post-change files, not just the diff — is the whole reason the seat exists
+(see Notes). Hand it `$PROMPT_FILE` and tell it so.
 
 Then, per seat:
 
 | Seat | If this is **your own** provider | If this is **foreign** to you |
 |------|----------------------------------|-------------------------------|
-| Claude | native subagent (Claude Code: `Agent` tool) given the prompt file — it has tools and project context, so it may also be told the PR number | `/ask-agent claude --prompt-file "$PROMPT_FILE"` |
-| Codex | native subagent (Codex CLI: `multi_agent`) given the prompt file | `/ask-agent codex --prompt-file "$PROMPT_FILE"` — **from a trusted directory** (the repo worktree). `codex exec` refuses to start outside a trusted directory: `-d /tmp` fails with "Not inside a trusted directory" and you get no review |
-| agy | in-process delegation if it has one, else inline (see Rule 1) | `/ask-agent agy -d /tmp --prompt-file "$PROMPT_FILE"` — `-d /tmp` is **required** here and only here, see below |
+| Claude | native subagent (Claude Code: `Agent` tool) given `$PROMPT_FILE`, told it has tools and project context and should read the post-change files (and the PR number, for a PR target) | `/ask-agent claude --prompt-file "$FOREIGN_FILE"` |
+| Codex | native subagent (Codex CLI: `multi_agent`) given `$PROMPT_FILE`, same instruction | `/ask-agent codex --prompt-file "$FOREIGN_FILE"` — **from a trusted directory**: any git repo (the worktree), or a directory trusted in Codex's config. `codex exec` refuses to start anywhere else — `-d /tmp`, or a non-repo scratch dir, fails with "Not inside a trusted directory" and you get no review |
+| agy | in-process delegation if it has one, else inline (see Rule 1) — given `$PROMPT_FILE` | `/ask-agent agy -d /tmp --prompt-file "$FOREIGN_FILE"` — `-d /tmp` is **required** here and only here, see below |
 
 `-d` is a plain working-directory option in `agent-query.sh`, valid for every
 agent; it is the two CLIs' behaviour that differs. agy needs a neutral cwd so
@@ -191,7 +203,7 @@ so leave it off.
 > directory so nothing in the cwd invites exploration:
 >
 > ```bash
-> /ask-agent agy -d /tmp --prompt-file "$PROMPT_FILE"
+> /ask-agent agy -d /tmp --prompt-file "$FOREIGN_FILE"
 > ```
 >
 > and open the prompt with a line like: *"Everything you need is in this
@@ -200,11 +212,12 @@ so leave it off.
 
 #### Worked example: a Claude Code host
 
-Concurrently: (1) own seat — `Agent` tool with the prompt file; (2) foreign —
-`/ask-agent codex --prompt-file "$PROMPT_FILE"` from the worktree; (3) foreign
-— `/ask-agent agy -d /tmp --prompt-file "$PROMPT_FILE"`. A Codex host swaps
-(1) for its built-in subagent and (2) for `/ask-agent claude --prompt-file
-"$PROMPT_FILE"`; any other host applies the matrix.
+Concurrently: (1) own seat — `Agent` tool with `$PROMPT_FILE` and the
+"you have project context, read the files" instruction; (2) foreign —
+`/ask-agent codex --prompt-file "$FOREIGN_FILE"` from the worktree; (3)
+foreign — `/ask-agent agy -d /tmp --prompt-file "$FOREIGN_FILE"`. A Codex host
+swaps (1) for its built-in subagent and (2) for `/ask-agent claude
+--prompt-file "$FOREIGN_FILE"`; any other host applies the matrix.
 
 Reading the staged prompt file is the *one* tool agy is permitted (that is
 what `--add-dir` grants); anything else is auto-denied and costs you the whole
@@ -222,7 +235,7 @@ Seats: <own provider> (native subagent | inline), <foreign> (ask-agent), <foreig
 ### Consensus (issues flagged by 2+ reviewers)
 - ...
 
-### <seat>'s Review        ← one section per seat that answered, in Seats order
+### <seat>'s Review
 <summary of unique points>
 
 ### Recommendations
@@ -230,7 +243,8 @@ Seats: <own provider> (native subagent | inline), <foreign> (ask-agent), <foreig
 ```
 
 Fill the `Seats:` line in from *your* host — it is a template, not a Claude
-Code example: it records which seat was native (or inline), which were
+Code example — and write one `<seat>'s Review` section per seat that answered,
+in `Seats:` order. The `Seats:` line records which seat was native (or inline), which were
 foreign, and names any seat that went unfilled. Highlight **consensus issues**
 (flagged by multiple reviewers) as highest priority — these are almost
 certainly real. Different agents may describe the same issue differently, so
@@ -243,6 +257,9 @@ tidy away. Consensus is counted over the seats that actually answered, and it
 is a **prioritisation signal, not a filter**: with two seats it means both
 agreed, with one seat there is no consensus section at all — and every
 Critical/Important still gets triaged regardless.
+
+Then remove the two staged files (`rm -f` the literal paths from Step 3) —
+there is no trap doing it for you.
 
 ## Notes
 
