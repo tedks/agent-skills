@@ -95,7 +95,7 @@ Based on the `[target]` argument (or lack thereof), gather the review material:
 
 | Target | How to gather context |
 |--------|----------------------|
-| *(none)* | `git diff HEAD` (all uncommitted changes — staged and unstaged) |
+| *(none)* — `worktree` in Step 3 | `git diff HEAD` (all uncommitted changes — staged and unstaged) |
 | `staged` | `git diff --cached` |
 | `branch` | Detect default branch (see below), then `git log --oneline <default>..HEAD` + `git diff <default>...HEAD` |
 | `PR #N` / `#N` | `gh pr view N` (title + description — the *why*, which reviewers need for design/scope calls), then `gh pr diff N` |
@@ -145,10 +145,10 @@ the same prompt behind a "do not run commands" opener for the foreign seats:
 # no diff in it. So: no `trap ... EXIT`, the context command runs HERE (not
 # "saved from Step 1"), the result is size-checked, and the literal paths this
 # prints are what every launch uses. rm them after Step 4.
-TARGET=pr        # what Step 1 decided: pr | staged | branch | file | worktree
-PR=N             # pr:     the PR number
-DEFAULT=master   # branch: the default branch Step 1 detected
-FILE=path        # file:   the path
+TARGET='pr'        # what Step 1 decided: pr | staged | branch | file | worktree
+PR='N'             # pr:     the PR number
+DEFAULT='master'   # branch: the default branch Step 1 detected
+FILE='path'        # file:   the path — keep the quotes, paths can contain spaces
 PROMPT_FILE=$(mktemp /tmp/council-prompt.XXXXXX)
 FOREIGN_FILE=$(mktemp /tmp/council-foreign.XXXXXX)
 fail() { rm -f "$PROMPT_FILE" "$FOREIGN_FILE"; echo "council: $1 — not launching" >&2; exit 1; }
@@ -170,7 +170,7 @@ case "$TARGET" in
             before=$(wc -c < "$PROMPT_FILE")
             git diff "$DEFAULT...HEAD" >> "$PROMPT_FILE" || fail "git diff failed" ;;
   file)     before=$(wc -c < "$PROMPT_FILE")
-            cat "$FILE" >> "$PROMPT_FILE" || fail "cannot read $FILE" ;;
+            cat -- "$FILE" >> "$PROMPT_FILE" || fail "cannot read $FILE" ;;   # `--`: a name starting with `-` is a file, not an option
   worktree) before=$(wc -c < "$PROMPT_FILE")
             git diff HEAD >> "$PROMPT_FILE" || fail "git diff failed" ;;
   *)        fail "unknown target '$TARGET'" ;;
