@@ -3,6 +3,10 @@ name: stacked-prs
 description: Detailed workflow for managing stacked PRs. Use when rebasing a PR stack, resolving merge conflicts in a stack, merging stacked PRs, or when user mentions "stack" and "PR" together.
 ---
 
+<!-- Codex reads this same file through the .codex/skills/stacked-prs symlink. Never
+     copy it into .codex/skills -- the copy that used to live there drifted a commit
+     behind; see the skills comment in scripts/install/install-codex-config. -->
+
 # Stacked PRs Workflow
 
 ## Mental Model
