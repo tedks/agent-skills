@@ -145,16 +145,37 @@ the same prompt behind a "do not run commands" opener for the foreign seats:
 # no diff in it. So: no `trap ... EXIT`, the context command runs HERE (not
 # "saved from Step 1"), the result is size-checked, and the literal paths this
 # prints are what every launch uses. rm them after Step 4.
+TARGET=pr        # what Step 1 decided: pr | staged | branch | file | worktree
+PR=N             # pr:     the PR number
+DEFAULT=master   # branch: the default branch Step 1 detected
+FILE=path        # file:   the path
 PROMPT_FILE=$(mktemp /tmp/council-prompt.XXXXXX)
 FOREIGN_FILE=$(mktemp /tmp/council-foreign.XXXXXX)
 fail() { rm -f "$PROMPT_FILE" "$FOREIGN_FILE"; echo "council: $1 — not launching" >&2; exit 1; }
 cat << 'REVIEW_EOF' > "$PROMPT_FILE"
 <the review prompt from step 2>
 REVIEW_EOF
-{ gh pr view N && echo; } >> "$PROMPT_FILE" || fail "gh pr view failed"   # PR target only: title + description
-before=$(wc -c < "$PROMPT_FILE")
-gh pr diff N >> "$PROMPT_FILE" || fail "diff command failed"              # or the Step 1 command: git diff HEAD, git diff --cached, cat <file>, ...
-[[ $(wc -c < "$PROMPT_FILE") -gt $before ]] || fail "diff is empty"        # measures the diff alone, so a title cannot mask an empty diff
+# `before` is taken AFTER any preamble (PR title, branch log) and BEFORE the
+# diff, so the guard measures the diff alone and a preamble cannot mask an
+# empty one. Only the `pr` arm touches gh: a bare `gh pr view` on a branch
+# that happens to have a PR would succeed and splice that PR's title into a
+# staged/branch/file review.
+case "$TARGET" in
+  pr)       { gh pr view "$PR" && echo; } >> "$PROMPT_FILE" || fail "gh pr view failed"
+            before=$(wc -c < "$PROMPT_FILE")
+            gh pr diff "$PR" >> "$PROMPT_FILE" || fail "gh pr diff failed" ;;
+  staged)   before=$(wc -c < "$PROMPT_FILE")
+            git diff --cached >> "$PROMPT_FILE" || fail "git diff failed" ;;
+  branch)   { git log --oneline "$DEFAULT..HEAD" && echo; } >> "$PROMPT_FILE" || fail "git log failed"
+            before=$(wc -c < "$PROMPT_FILE")
+            git diff "$DEFAULT...HEAD" >> "$PROMPT_FILE" || fail "git diff failed" ;;
+  file)     before=$(wc -c < "$PROMPT_FILE")
+            cat "$FILE" >> "$PROMPT_FILE" || fail "cannot read $FILE" ;;
+  worktree) before=$(wc -c < "$PROMPT_FILE")
+            git diff HEAD >> "$PROMPT_FILE" || fail "git diff failed" ;;
+  *)        fail "unknown target '$TARGET'" ;;
+esac
+[[ $(wc -c < "$PROMPT_FILE") -gt $before ]] || fail "nothing to review for target '$TARGET'"
 {
   echo "Everything you need is in this prompt. Do not run any commands and do not fetch anything — review only what is written below."
   echo
