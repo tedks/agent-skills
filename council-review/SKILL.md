@@ -85,10 +85,6 @@ Rules — these are not style preferences, they are what makes the council a cou
    are one opinion twice, and a summary that hides the gap overstates the
    consensus.
 
-The worked example below is written from a **Claude Code host** (native seat =
-Claude; foreign seats = Codex, agy). A Codex host swaps the roles — native seat
-= Codex, foreign seats = Claude and agy — and so on down the table.
-
 ## Instructions
 
 When this skill is invoked, follow these steps:
@@ -102,10 +98,18 @@ Based on the `[target]` argument (or lack thereof), gather the review material:
 | *(none)* | `git diff HEAD` (all uncommitted changes — staged and unstaged) |
 | `staged` | `git diff --cached` |
 | `branch` | Detect default branch (see below), then `git log --oneline <default>..HEAD` + `git diff <default>...HEAD` |
-| `PR #N` / `#N` | `gh pr diff N` (the diff), `gh pr view N` (title/description for the prompt's context) |
+| `PR #N` / `#N` | `gh pr view N` (title + description — the *why*, which reviewers need for design/scope calls), then `gh pr diff N` |
 | `<file>` | Read the file contents |
 
 **Detecting the default branch:** Run `git symbolic-ref refs/remotes/origin/HEAD 2>/dev/null | sed 's|.*/||'`. If that fails, check whether `main` or `master` exists as a local branch.
+
+Write everything you gathered — for a PR target, the `gh pr view` output
+*followed by* the diff — to a context file that Step 3 splices into the prompt:
+
+```bash
+CONTEXT_FILE=$(mktemp /tmp/council-context.XXXXXX)
+{ gh pr view N; echo; gh pr diff N; } > "$CONTEXT_FILE"     # PR target; other targets: the diff or file
+```
 
 If the diff is empty, tell the user there's nothing to review and stop.
 
@@ -148,9 +152,9 @@ PROMPT_FILE=$(mktemp /tmp/council-prompt.XXXXXX)
 FOREIGN_FILE=$(mktemp /tmp/council-foreign.XXXXXX)
 {
   cat << 'REVIEW_EOF'
-<the review prompt from step 2, without the diff>
+<the review prompt from step 2, without the context>
 REVIEW_EOF
-  <the diff from step 1>            # PR target: gh pr diff N
+  cat "$CONTEXT_FILE"               # from Step 1: PR title/description + diff, or the diff/file
 } > "$PROMPT_FILE"
 {
   echo "Everything you need is in this prompt. Do not run any commands and do not fetch anything — review only what is written below."
@@ -258,8 +262,8 @@ is a **prioritisation signal, not a filter**: with two seats it means both
 agreed, with one seat there is no consensus section at all — and every
 Critical/Important still gets triaged regardless.
 
-Then remove the two staged files (`rm -f` the literal paths from Step 3) —
-there is no trap doing it for you.
+Then remove the three staged files (`rm -f` the literal paths from Steps 1
+and 3) — there is no trap doing it for you.
 
 ## Notes
 
