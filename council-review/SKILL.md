@@ -103,15 +103,11 @@ Based on the `[target]` argument (or lack thereof), gather the review material:
 
 **Detecting the default branch:** Run `git symbolic-ref refs/remotes/origin/HEAD 2>/dev/null | sed 's|.*/||'`. If that fails, check whether `main` or `master` exists as a local branch.
 
-Write everything you gathered — for a PR target, the `gh pr view` output
-*followed by* the diff — to a context file that Step 3 splices into the prompt:
-
-```bash
-CONTEXT_FILE=$(mktemp /tmp/council-context.XXXXXX)
-{ gh pr view N; echo; gh pr diff N; } > "$CONTEXT_FILE"     # PR target; other targets: the diff or file
-```
-
-If the diff is empty, tell the user there's nothing to review and stop.
+Run the diff command now and look at it: if the diff is empty, tell the user
+there's nothing to review and stop. Do **not** stash it in a variable or a
+file for later — nothing survives from one tool call to the next (see the
+comment in Step 3), so Step 3 runs the same command again inside the one call
+that builds the prompt.
 
 ### Step 2: Build the review prompt
 
@@ -144,18 +140,20 @@ diff inline**, staged in two files — the bare prompt for your own seat, and
 the same prompt behind a "do not run commands" opener for the foreign seats:
 
 ```bash
-# No `trap ... EXIT`, and do not rely on $PROMPT_FILE surviving: every shell
-# tool call is a fresh process, so a trap would delete the file the moment this
-# call returned and the variable would be gone before any seat launched. Use
-# the literal paths this prints in every launch, and rm them after Step 4.
+# ONE tool call, start to finish. Every shell tool call is a fresh process:
+# a variable set in an earlier call is empty here, a file a trap deleted on
+# that call's exit is gone, and `cat ""` fails quietly into a prompt that has
+# no diff in it. So: no `trap ... EXIT`, the context command runs HERE (not
+# "saved from Step 1"), the result is size-checked, and the literal paths this
+# prints are what every launch uses. rm them after Step 4.
 PROMPT_FILE=$(mktemp /tmp/council-prompt.XXXXXX)
 FOREIGN_FILE=$(mktemp /tmp/council-foreign.XXXXXX)
-{
-  cat << 'REVIEW_EOF'
+cat << 'REVIEW_EOF' > "$PROMPT_FILE"
 <the review prompt from step 2, without the context>
 REVIEW_EOF
-  cat "$CONTEXT_FILE"               # from Step 1: PR title/description + diff, or the diff/file
-} > "$PROMPT_FILE"
+template_bytes=$(wc -c < "$PROMPT_FILE")
+{ gh pr view N; echo; gh pr diff N; } >> "$PROMPT_FILE"   # PR target; otherwise the Step 1 command: git diff HEAD, git diff --cached, cat <file>, ...
+[[ $(wc -c < "$PROMPT_FILE") -gt $template_bytes ]] || { echo "no context landed in the prompt — not launching" >&2; exit 1; }
 {
   echo "Everything you need is in this prompt. Do not run any commands and do not fetch anything — review only what is written below."
   echo
@@ -262,8 +260,8 @@ is a **prioritisation signal, not a filter**: with two seats it means both
 agreed, with one seat there is no consensus section at all — and every
 Critical/Important still gets triaged regardless.
 
-Then remove the three staged files (`rm -f` the literal paths from Steps 1
-and 3) — there is no trap doing it for you.
+Then remove the two staged files (`rm -f` the literal paths Step 3 printed)
+— there is no trap doing it for you.
 
 ## Notes
 
