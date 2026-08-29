@@ -5,12 +5,9 @@ argument-hint: <agent> [options] <prompt>
 allowed-tools: Bash(~/.claude/skills/ask-agent/scripts/*)
 ---
 
-<!-- Codex loads this same directory: install-codex-config links every
-     .claude/skills/<name> into ~/.codex/skills/<name> as a shared default, so
-     there is deliberately no .codex/skills copy of this file (copies drift --
-     scripts/install/test-install-codex-config.sh fails on one). The
-     allowed-tools and script paths below therefore point at ~/.claude/skills/,
-     which means install-claude-config must have run on a Codex host too. -->
+<!-- Codex reads this same file through the .codex/skills/<name> symlink, so the
+     paths below assume install-claude-config ran. Never copy this file into
+     .codex/skills -- see the skills comment in scripts/install/install-codex-config. -->
 
 # ask-agent
 
