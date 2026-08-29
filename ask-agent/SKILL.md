@@ -105,8 +105,10 @@ Report the response back to the user.
 - Each agent has different training data and reasoning patterns
 - ask-agent is for **foreign** providers. Never ask-agent your own provider
   (Claude must not ask-agent `claude`, Codex must not ask-agent `codex`, agy
-  must not ask-agent `agy`) — that is a second copy of yourself with none of
-  your context. For a same-provider second pass use your native subagent. In a
+  must not ask-agent `agy`) — that is another instance of your own model
+  family, correlated blind spots and none of your context, even if a different
+  model is picked. For a same-provider second pass use your native subagent
+  (or review inline if it cannot run — never ask-agent yourself). In a
   council this is a hard rule: your own provider's seat is your native
   subagent, and a missing foreign seat is noted, never backfilled — see
   `council-review`.
