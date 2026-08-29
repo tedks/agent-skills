@@ -268,7 +268,7 @@ Seats: <own provider> (native subagent | inline), <foreign> (ask-agent), <foreig
 
 Fill the `Seats:` line in from *your* host — it is a template, not a Claude
 Code example — and write one `<seat>'s Review` section per seat that answered,
-in `Seats:` order. The `Seats:` line records which seat was native (or inline), which were
+in `Seats:` order. The `Seats:` line records which seats were native (or inline) and which
 foreign, and names any seat that went unfilled. Highlight **consensus issues**
 (flagged by multiple reviewers) as highest priority — these are almost
 certainly real. Different agents may describe the same issue differently, so
