@@ -111,7 +111,8 @@ that builds the prompt.
 
 ### Step 2: Build the review prompt
 
-Construct a review prompt that includes the diff/context gathered in Step 1:
+Construct the review prompt text. The diff/context is **not** pasted here —
+Step 3 appends it, inside the one call that builds the prompt file:
 
 ```
 Review the following code changes. For each issue found, cite the specific file and line.
@@ -122,8 +123,6 @@ Organize your review into these sections:
 - **Nits** (style, naming, minor improvements — nice to fix)
 
 If the code looks good, say so briefly and note any minor suggestions.
-
-<diff/context here>
 ```
 
 The prompt should cover: correctness, security, design, edge cases, and concrete suggestions.
@@ -148,12 +147,14 @@ the same prompt behind a "do not run commands" opener for the foreign seats:
 # prints are what every launch uses. rm them after Step 4.
 PROMPT_FILE=$(mktemp /tmp/council-prompt.XXXXXX)
 FOREIGN_FILE=$(mktemp /tmp/council-foreign.XXXXXX)
+fail() { rm -f "$PROMPT_FILE" "$FOREIGN_FILE"; echo "council: $1 — not launching" >&2; exit 1; }
 cat << 'REVIEW_EOF' > "$PROMPT_FILE"
-<the review prompt from step 2, without the context>
+<the review prompt from step 2>
 REVIEW_EOF
-template_bytes=$(wc -c < "$PROMPT_FILE")
-{ gh pr view N; echo; gh pr diff N; } >> "$PROMPT_FILE"   # PR target; otherwise the Step 1 command: git diff HEAD, git diff --cached, cat <file>, ...
-[[ $(wc -c < "$PROMPT_FILE") -gt $template_bytes ]] || { echo "no context landed in the prompt — not launching" >&2; exit 1; }
+{ gh pr view N && echo; } >> "$PROMPT_FILE" || fail "gh pr view failed"   # PR target only: title + description
+before=$(wc -c < "$PROMPT_FILE")
+gh pr diff N >> "$PROMPT_FILE" || fail "diff command failed"              # or the Step 1 command: git diff HEAD, git diff --cached, cat <file>, ...
+[[ $(wc -c < "$PROMPT_FILE") -gt $before ]] || fail "diff is empty"        # measures the diff alone, so a title cannot mask an empty diff
 {
   echo "Everything you need is in this prompt. Do not run any commands and do not fetch anything — review only what is written below."
   echo
