@@ -170,7 +170,7 @@ case "$TARGET" in
             before=$(wc -c < "$PROMPT_FILE")
             git diff "$DEFAULT...HEAD" >> "$PROMPT_FILE" || fail "git diff failed" ;;
   file)     before=$(wc -c < "$PROMPT_FILE")
-            cat -- "$FILE" >> "$PROMPT_FILE" || fail "cannot read $FILE" ;;   # `--`: a name starting with `-` is a file, not an option
+            cat < "$FILE" >> "$PROMPT_FILE" || fail "cannot read $FILE" ;;   # redirection: `-` and `--help` are filenames here, never options or stdin
   worktree) before=$(wc -c < "$PROMPT_FILE")
             git diff HEAD >> "$PROMPT_FILE" || fail "git diff failed" ;;
   *)        fail "unknown target '$TARGET'" ;;
