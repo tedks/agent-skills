@@ -46,14 +46,20 @@ whatever the CLI is called — a Gemini CLI host owns the `agy` seat.
 The same thing as an algorithm, for a host the table does not name:
 
 ```
-me = the provider my model comes from
-for seat in {claude, codex, agy} ∪ {me}:        # a fourth provider adds a seat, never loses one
-    if seat == me:  fill it with my native/internal subagent
-                    (cannot run → review inline yourself, record "(inline)";
-                     NEVER /ask-agent my own provider)
-    else:           fill it with /ask-agent <seat>
-                    (unavailable → leave the seat EMPTY and say so; never backfill)
+me    = the PROVIDER my model comes from          # Anthropic | OpenAI | Google | <other>
+seats = {Anthropic: claude, OpenAI: codex, Google: agy}   # provider → /ask-agent CLI name
+if me not in seats: seats[me] = <no CLI>          # a fourth provider adds a seat, never loses one
+for (provider, cli) in seats:
+    if provider == me:  fill it with my native/internal subagent
+                        (cannot run → review inline yourself, record "(inline)";
+                         NEVER /ask-agent <cli> — that is my own provider)
+    else:               fill it with /ask-agent <cli>
+                        (unavailable → leave the seat EMPTY and say so; never backfill)
 ```
+
+Compare **providers**, never CLI names against a provider: an unlisted
+Anthropic host is `me = Anthropic`, which owns the `claude` seat — it does not
+ask-agent `claude` and then add itself as a fourth seat.
 
 Rules — these are not style preferences, they are what makes the council a council:
 
