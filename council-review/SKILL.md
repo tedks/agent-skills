@@ -1,12 +1,12 @@
 ---
 name: council-review
-description: Multi-agent code review council - gets reviews from Claude, Codex, and Antigravity (agy) simultaneously
+description: Multi-agent code review council - one seat per provider (Claude, Codex, Antigravity/agy), reviewed simultaneously; the host fills its own provider's seat with its native subagent and the foreign seats via ask-agent
 argument-hint: '[target] — e.g. PR #42, staged, branch, or a file path'
 ---
 
 # council-review
 
-Launch a code review "council" — get reviews from all three AI agents (Claude, Codex, agy) simultaneously, then synthesize the results.
+Launch a code review "council" — get one review per AI provider (Claude, Codex, agy) simultaneously, then synthesize the results.
 
 ## Usage
 
@@ -22,6 +22,54 @@ Launch a code review "council" — get reviews from all three AI agents (Claude,
   - `PR #<number>` or `#<number>` — review a pull request
   - `<file-path>` — review a specific file
   - *(no argument)* — review all uncommitted changes (`git diff HEAD`)
+
+## Provider-aware seating
+
+This one SKILL.md is loaded by every host (Claude Code reads it from
+`~/.claude/skills`, Codex from `~/.codex/skills`, which symlinks to the same
+directory). The council has **one seat per provider**, and which seat is
+*yours* depends on which host you are running as — identify yourself from your
+own harness/system prompt, not from anything in the repo.
+
+| Host you are running as | Your own seat — **native subagent** | Foreign seats — **`/ask-agent`** |
+|-------------------------|-------------------------------------|----------------------------------|
+| Claude Code             | Claude, via the `Agent` tool         | `/ask-agent codex` + `/ask-agent agy` |
+| Codex CLI               | Codex, via its built-in subagent facility | `/ask-agent claude` + `/ask-agent agy` |
+| Antigravity (agy)       | agy, via its built-in subagent facility | `/ask-agent claude` + `/ask-agent codex` |
+| any other host          | your own provider's native subagent  | `/ask-agent <p>` for every provider `p` that is not yours |
+
+The same thing as an algorithm, for a host the table does not name:
+
+```
+me = the provider I am running as
+for seat in {claude, codex, agy}:
+    if seat == me:  fill it with my native/internal subagent
+    else:           fill it with /ask-agent <seat>
+                    (unavailable → leave the seat EMPTY and say so; never backfill)
+```
+
+Rules — these are not style preferences, they are what makes the council a council:
+
+1. **Your own provider's seat is always your native subagent.** Never
+   `/ask-agent` your own provider: Claude must not ask-agent `claude`, Codex
+   must not ask-agent `codex`, agy must not ask-agent `agy`. Doing so spawns a
+   second copy of yourself through a CLI — same model, same blind spots, none
+   of your project context — and fills a seat that was supposed to bring a
+   different model to the table.
+2. **Every foreign seat goes through `/ask-agent`.** That is what gives the
+   council provider diversity. Do not make the council internal-only, and do
+   not "save time" by having your native subagent play a foreign seat.
+3. **An unavailable foreign reviewer leaves an empty seat, noted in the
+   summary.** Not installed, usage limit, timeout, the agy permission flake —
+   whatever the cause, report which seat is missing and continue with the
+   rest. Do **not** substitute a second native subagent, or any other reviewer
+   from your own provider, for the missing one: two reviews from one provider
+   are one opinion twice, and a summary that hides the gap overstates the
+   consensus.
+
+The worked examples below are written from a **Claude Code host** (native seat =
+Claude; foreign seats = Codex, agy). A Codex host swaps the roles — native seat
+= Codex, foreign seats = Claude and agy — and so on down the table.
 
 ## Instructions
 
@@ -62,18 +110,25 @@ If the code looks good, say so briefly and note any minor suggestions.
 
 The prompt should cover: correctness, security, design, edge cases, and concrete suggestions.
 
-### Step 3: Launch all three reviews in parallel
+### Step 3: Launch every seat in parallel
 
-There are two modes depending on the target:
+Seat the council per the matrix above: one native subagent for your own
+provider, one `/ask-agent` per foreign provider, all in a **single parallel
+tool invocation**. There are two modes depending on the target:
 
 #### For PR targets
 
-PR targets are simpler — each agent can pull context from the PR itself. Determine `owner/repo` from `gh repo view --json nameWithOwner -q .nameWithOwner`.
+PR targets are simpler for reviewers that can pull context from the PR
+themselves. Determine `owner/repo` from `gh repo view --json nameWithOwner -q .nameWithOwner`.
 
-Launch all three in a single parallel tool invocation:
-1. **Your own review (subagent):** Use the `Agent` tool with the review prompt + PR diff
-2. **Codex:** `/ask-agent codex "Review PR #N in <owner/repo>. <review prompt template from Step 2, without the diff — the agent will pull it>"`
-3. **agy (Antigravity CLI):** **must be given the diff inline** — see below. Do *not* tell agy to pull the PR.
+| Seat | If this is **your own** provider | If this is **foreign** to you |
+|------|----------------------------------|-------------------------------|
+| Claude | native subagent (Claude Code: `Agent` tool) with the review prompt + PR diff | `/ask-agent claude -d /tmp --prompt-file "$PROMPT_FILE"` with the **diff inline** — `claude -p` runs under whatever permission settings the machine has and may not be allowed to run `gh`, so do not tell it to pull the PR |
+| Codex | native subagent (Codex CLI: built-in subagent) with the review prompt + PR diff | `/ask-agent codex "Review PR #N in <owner/repo>. <review prompt template from Step 2, without the diff — the agent will pull it>"` |
+| agy | native subagent (Antigravity: built-in subagent) with the review prompt + PR diff | `/ask-agent agy -d /tmp --prompt-file "$PROMPT_FILE"` — **must be given the diff inline**, see below. Do *not* tell agy to pull the PR |
+
+Whenever a seat needs the diff inline, stage it in a prompt file exactly as in
+the non-PR mode below (`gh pr diff N` produces it).
 
 > **agy cannot fetch anything.** Headless agy has no usable tool access: the
 > `command` permission cannot be prompted for in headless mode and is
@@ -112,10 +167,16 @@ cat > "$PROMPT_FILE" << 'REVIEW_EOF'
 REVIEW_EOF
 ```
 
-Then launch all three in a single parallel tool invocation:
-1. **Your own review (subagent):** Use the `Agent` tool with the review prompt
-2. **Codex:** `/ask-agent codex --prompt-file "$PROMPT_FILE"`
-3. **agy (Antigravity CLI):** `/ask-agent agy -d /tmp --prompt-file "$PROMPT_FILE"`
+Then launch every seat in a single parallel tool invocation. From a Claude
+Code host that is:
+
+1. **Your own seat (native subagent):** Use the `Agent` tool with the review prompt
+2. **Foreign seat — Codex:** `/ask-agent codex --prompt-file "$PROMPT_FILE"`
+3. **Foreign seat — agy:** `/ask-agent agy -d /tmp --prompt-file "$PROMPT_FILE"`
+
+From a Codex host the native seat is Codex's built-in subagent and the foreign
+seats are `/ask-agent claude --prompt-file "$PROMPT_FILE"` and the same agy
+call; from any other host, apply the matrix.
 
 This mode already inlines the diff, which is why it suits agy. Still add the
 "everything you need is in this prompt, do not run commands" line for agy, and
@@ -125,10 +186,12 @@ auto-denied and costs you the whole review.
 
 ### Step 4: Present the council's findings
 
-Once all three reviews are collected, present a unified summary:
+Once every seat has answered (or been recorded as missing), present a unified summary:
 
 ```markdown
 ## Council Review Summary
+
+Seats: Claude (native subagent), Codex (ask-agent), agy (ask-agent — MISSING: <reason>)
 
 ### Consensus (issues flagged by 2+ reviewers)
 - ...
@@ -146,12 +209,20 @@ Once all three reviews are collected, present a unified summary:
 <synthesized action items, prioritized>
 ```
 
-Highlight **consensus issues** (flagged by multiple reviewers) as highest priority — these are almost certainly real. Different agents may describe the same issue differently, so match semantically, not by wording. Note any disagreements between reviewers as discussion points.
+The `Seats:` line records which seat was native and which were foreign, and
+names any seat that went unfilled. Highlight **consensus issues** (flagged by
+multiple reviewers) as highest priority — these are almost certainly real.
+Different agents may describe the same issue differently, so match
+semantically, not by wording. Note any disagreements between reviewers as
+discussion points.
 
-Omit sections for agents that failed to respond.
+Omit the review section for a seat that failed to respond, but keep it in the
+`Seats:` line — a missing seat is a fact about the round, not something to
+tidy away. Consensus is counted over the seats that actually answered.
 
 ## Notes
 
-- All three reviews run in parallel for speed
-- The native agent's review has full project context; external agents only see the diff (or PR)
-- If an external agent fails (not installed, timeout, etc.), note it and continue with whatever reviews succeed
+- All seats run in parallel for speed
+- Your native subagent's review has full project context; foreign reviewers only see the diff (or PR)
+- If a foreign reviewer fails (not installed, usage limit, timeout, etc.), note it and continue with whatever reviews succeed — **do not** fill its seat with another reviewer from your own provider
+- For the PR merge gate (fixpoint, triage, proportionality, PR record), see "Council review to fixpoint" in the global agent instructions (`~/.claude/CLAUDE.md`); this skill is one round of that loop
