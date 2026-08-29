@@ -103,6 +103,13 @@ Report the response back to the user.
 - Response is synchronous - the calling agent waits for the response
 - Useful for getting a second opinion or different perspective
 - Each agent has different training data and reasoning patterns
+- ask-agent is for **foreign** providers. Never ask-agent your own provider
+  (Claude must not ask-agent `claude`, Codex must not ask-agent `codex`, agy
+  must not ask-agent `agy`) — that is a second copy of yourself with none of
+  your context. For a same-provider second pass use your native subagent. In a
+  council this is a hard rule: your own provider's seat is your native
+  subagent, and a missing foreign seat is noted, never backfilled — see
+  `council-review`.
 - Prompts are piped via stdin to `claude` and `codex` (never as CLI args)
 - **`agy` has no stdin mode**, so the script stages the prompt in a private
   0700 temp directory and passes agy a *path* plus `--add-dir`, letting agy
