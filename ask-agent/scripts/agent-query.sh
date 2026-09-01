@@ -10,6 +10,8 @@
 #   -d, --dir <dir>              Set working directory
 #   -m, --model <model>          Specify model (agent-specific)
 #   -f, --prompt-file <file>     Read prompt from file (avoids ARG_MAX)
+#   -r, --resume <id>            Continue an existing session instead of a new one
+#   -S, --session-id-file <file> Write the session id this run YIELDED to <file>
 #
 # For claude and codex the prompt is piped via stdin, never passed as a CLI
 # argument, which avoids ARG_MAX limits on execve(2).
@@ -18,9 +20,26 @@
 # it at 128 KiB and expose it in `ps` -- the script stages it in a private temp
 # directory and passes agy a path plus --add-dir. See the agy branch below.
 #
-# Exit status is the agent's own, with one addition: 3 means agy exited 0 but
-# its reply did not carry the end-of-prompt sentinel, i.e. it may have answered
-# without reading the staged prompt to the end. See the agy branch.
+# --resume maps to each agent's own continuation flag (claude --resume, codex
+# exec resume, agy --conversation). All three APPEND to the existing session
+# rather than forking it, so the yielded id equals the requested one. The
+# non-mutating alternatives -- `codex exec fork`, `claude --fork-session` -- are
+# deliberately not wrapped: a council round wants the seat's history to
+# accumulate. See docs/ask-agent-session-resume.md for the evidence.
+#
+# --session-id-file exists because two of the three agents only reveal the id
+# they generated in output the caller cannot reliably parse. The file gets the
+# bare id and a newline, nothing else; it is truncated at startup so a failed
+# run can never leave a stale id there for the next round to chain onto.
+#
+# Exit status is the agent's own, with two additions:
+#   3  agy exited 0 but its reply did not carry the end-of-prompt sentinel, i.e.
+#      it may have answered without reading the staged prompt to the end.
+#   4  --resume was asked for and the run did not demonstrably land in that
+#      session. Only reachable for agy, which answers an unknown conversation id
+#      by silently starting a NEW conversation and exiting 0 (codex and claude
+#      both exit 1 on an unknown id, so their own status already says so).
+# Both print the reply anyway; both mean "this answer is not what you asked for".
 #
 # Examples:
 #   agent-query.sh claude "Explain this error"
@@ -28,6 +47,8 @@
 #   agent-query.sh codex --model o3 "Optimize this function"
 #   agent-query.sh agy "Summarize this codebase"
 #   agent-query.sh claude --prompt-file /tmp/review-prompt.txt
+#   agent-query.sh codex --session-id-file /tmp/sid "Round 1: review this diff"
+#   agent-query.sh codex --resume "$(cat /tmp/sid)" "Round 2: re-check your findings"
 
 set -e
 
@@ -39,6 +60,8 @@ usage() {
     echo "  -d, --dir <dir>              Set working directory" >&2
     echo "  -m, --model <model>          Specify model" >&2
     echo "  -f, --prompt-file <file>     Read prompt from file" >&2
+    echo "  -r, --resume <id>            Continue an existing session" >&2
+    echo "  -S, --session-id-file <file> Write the yielded session id to <file>" >&2
     exit 1
 }
 
@@ -53,6 +76,9 @@ shift
 dir=""
 model=""
 prompt_file=""
+resume=""
+resume_given=""
+session_id_file=""
 while [[ $# -gt 0 ]]; do
     case "$1" in
         -d|--dir)
@@ -67,6 +93,15 @@ while [[ $# -gt 0 ]]; do
             prompt_file="$2"
             shift 2
             ;;
+        -r|--resume)
+            resume="$2"
+            resume_given=1
+            shift 2
+            ;;
+        -S|--session-id-file)
+            session_id_file="$2"
+            shift 2
+            ;;
         -*)
             echo "Unknown option: $1" >&2
             usage
@@ -77,6 +112,39 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
+# A session id reaches argv of the downstream CLI, so it is checked before it
+# gets there rather than trusted. Nothing here is about shell injection -- every
+# command is built as an array and never eval'd -- it is about the two ways a
+# malformed id turns into a wrong answer rather than an error:
+#
+#   * an id starting with "-" is read by the agent as a FLAG. `--resume -m` would
+#     silently become a model override on a fresh session, i.e. exactly the cold
+#     context this option exists to avoid, with no diagnostic.
+#   * whitespace or a newline breaks the id back out of its own line, which is
+#     the format --session-id-file promises and the agy comparison below relies
+#     on -- an id with a trailing newline would never compare equal to the one
+#     agy logs, turning every resume into a spurious exit 4.
+#
+# UUIDs are what all three actually mint, but codex also accepts a thread NAME
+# where an id goes, so the class is kept a little wider than UUID and no wider.
+#
+# An EMPTY id is rejected rather than quietly meaning "fresh". The intended
+# calling shape is `--resume "$(cat sid)"`, and that sid file is deliberately
+# left EMPTY whenever a previous round could not determine its id -- so treating
+# empty as "no resume requested" would turn the one case that most needs a
+# diagnostic into a silent cold-context run. Which is the whole failure this
+# option exists to prevent, arrived at from the other direction.
+if [[ -n "$resume_given" ]]; then
+    if [[ -z "$resume" ]]; then
+        echo "Error: --resume was given an empty id (an empty --session-id-file from a previous round?)" >&2
+        exit 1
+    fi
+    if [[ "$resume" != [A-Za-z0-9]* || "$resume" =~ [^A-Za-z0-9._-] ]]; then
+        echo "Error: --resume id must start alphanumeric and hold only [A-Za-z0-9._-]: $resume" >&2
+        exit 1
+    fi
+fi
+
 # Normalize: ensure we always have a prompt_file to pipe from.
 # This avoids passing the prompt as a CLI argument to the downstream
 # agent, which would hit ARG_MAX for large prompts.
@@ -86,6 +154,13 @@ _cleanup_prompt_file=""
 # branch). Unlike the claude/codex path it does NOT exec, so this trap is what
 # actually removes it -- on success, failure, and signals alike.
 _cleanup_agy_dir=""
+
+# The codex capture path tees codex's stderr to a file so the session id can be
+# read out of the banner. That stream carries codex's echo of the PROMPT and of
+# the reply, not just the banner, so the file is mode 0600 (mktemp's default)
+# and removed here. A SIGKILL strands it, same residual class as the agy
+# staging directory (ditz ask-agent-sigkill-staging-leak).
+_cleanup_err_file=""
 
 # Trap to clean up temp files on any exit (failure paths).
 # On the claude/codex success path, we manually delete before exec, because
@@ -98,6 +173,7 @@ _cleanup_agy_dir=""
 cleanup() {
     if [[ -n "$_cleanup_prompt_file" ]]; then rm -f "$_cleanup_prompt_file" || true; fi
     if [[ -n "$_cleanup_agy_dir" ]]; then rm -rf -- "$_cleanup_agy_dir" || true; fi
+    if [[ -n "$_cleanup_err_file" ]]; then rm -f -- "$_cleanup_err_file" || true; fi
     return 0
 }
 trap cleanup EXIT
@@ -126,6 +202,113 @@ fi
 # cd (via --dir) doesn't break a relative path.
 prompt_file="$(cd -- "$(dirname -- "$prompt_file")" && pwd)/$(basename -- "$prompt_file")"
 
+# Same treatment, same reason: --dir must not silently relocate the caller's
+# file. The directory has to exist already; the file itself need not.
+if [[ -n "$session_id_file" ]]; then
+    session_id_dir="$(cd -- "$(dirname -- "$session_id_file")" 2>/dev/null && pwd)" || session_id_dir=""
+    if [[ -z "$session_id_dir" ]]; then
+        echo "Error: directory for --session-id-file does not exist: $session_id_file" >&2
+        exit 1
+    fi
+    session_id_file="$session_id_dir/$(basename -- "$session_id_file")"
+
+    # Truncate NOW, for two reasons. It proves the path is writable before an
+    # API call is spent rather than after; and it guarantees that a run which
+    # fails to determine an id leaves the file EMPTY rather than holding the
+    # previous round's id. A stale id here is the worst outcome available: the
+    # caller would chain onto a session that answered a different question and
+    # never learn it did.
+    if ! : > "$session_id_file"; then
+        echo "Error: cannot write --session-id-file: $session_id_file" >&2
+        exit 1
+    fi
+fi
+
+# Records the session id this run yielded, in both places a caller might look:
+# the file it asked for (bare id + newline, the whole contents) and stderr, for
+# whoever is reading the transcript. stdout is deliberately untouched -- it
+# carries the reply and nothing else.
+emit_session_id() {
+    if [[ -n "$session_id_file" ]]; then
+        printf '%s\n' "$1" > "$session_id_file"
+    fi
+    echo "ask-agent: session id: $1" >&2
+}
+
+# Shared by the minting path and by every id read back out of an agent, because
+# an id is only useful if the NEXT round can pass it back in -- and --resume
+# above will reject anything that is not shaped like this.
+uuid_re='^[0-9a-fA-F]{8}(-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}$'
+
+# claude is the one agent that lets the CALLER choose the session id, which is
+# strictly better than parsing one back out: the id is known before the run
+# starts, so nothing has to survive the exec to report it.
+# /proc first -- always present on Linux, no fork, no dependency on util-linux
+# being installed -- with uuidgen as the fallback. The result is validated
+# because a silently empty id would become `--session-id ''`.
+new_uuid() {
+    local u=""
+    if [[ -r /proc/sys/kernel/random/uuid ]]; then
+        read -r u < /proc/sys/kernel/random/uuid || u=""
+    fi
+    if [[ ! "$u" =~ $uuid_re ]]; then
+        u="$(uuidgen 2>/dev/null || true)"
+    fi
+    [[ "$u" =~ $uuid_re ]] || return 1
+    printf '%s' "$u"
+}
+
+# Wait for background child $1, forwarding signals to it, and set `status` to
+# its exit status. Extracted from the agy path, which has always needed it, so
+# that the codex capture path below does not carry a second copy of logic this
+# subtle. Both use it for the same reason: neither can `exec`, so neither gets
+# exec's signal transparency for free, and callers DO run this under `timeout`.
+# Without forwarding, a timeout kills only the wrapper and leaves the agent
+# orphaned -- still running, still billing, and in agy's case still holding the
+# staging directory the EXIT trap is about to delete underneath it.
+#
+# Forward the actual signal, not a translated TERM. HUP matters: these run from
+# tmux, where a hangup delivers HUP. (INT/QUIT are inert in background --
+# SIG_IGN on entry -- and redundant in a terminal.)
+_fwd_pid=""
+_fwd_signalled=""
+_forward_signal() { _fwd_signalled=1; kill -"$1" "$_fwd_pid" 2>/dev/null || true; }
+wait_forwarding_signals() {
+    _fwd_pid="$1"
+    for _fwd_sig in HUP INT TERM QUIT; do
+        # shellcheck disable=SC2064  # expand _fwd_sig now, at trap definition
+        trap "_forward_signal $_fwd_sig" "$_fwd_sig"
+    done
+    unset _fwd_sig
+
+    # A trapped signal makes `wait` return >128 WITHOUT reaping, so we must
+    # wait again or the EXIT trap deletes the staging dir under a live agent.
+    # Tell that from a real signal death by the trap's flag, never `kill -0`:
+    # a reaped PID can be recycled, and probing it spins forever on the
+    # remembered status.
+    # Re-waiting relies on bash remembering a reaped child's status and
+    # returning it again rather than failing "not a child" (bash >= 5.1 --
+    # verified on 5.2.21: three successive waits on the same reaped PID all
+    # returned 143). An earlier version carried a 127 fallback for shells
+    # that discard it; on this fleet that branch was unreachable except in
+    # the one case where it did harm -- a child that ignored our signal and
+    # then genuinely exited 127 was reported as 143.
+    status=0
+    _fwd_signalled=""
+    wait "$_fwd_pid" || status=$?
+    while (( status > 128 )) && [[ -n "$_fwd_signalled" ]]; do
+        _fwd_signalled=""
+        status=0
+        wait "$_fwd_pid" || status=$?
+    done
+
+    # Disarm before the caller touches the reply: from here on $_fwd_pid is
+    # reaped, so a late signal would fire `kill` at a PID that may already
+    # belong to someone else -- the same reuse hazard the loop above avoids on
+    # the `kill -0` side. The window is however long the caller's handling takes.
+    trap - HUP INT TERM QUIT
+}
+
 # Change directory if specified (must happen after canonicalization)
 if [[ -n "$dir" ]]; then
     cd "$dir"
@@ -136,13 +319,49 @@ fi
 # the agy branch -- so it is handled separately below.
 prompt_via_file=""
 
+# Set when the id is known WITHOUT having to read anything back out of the
+# agent, which is every case but two (codex starting fresh, and agy always).
+known_sid=""
+# Set when the only way to learn the id is to capture the agent's own output.
+capture_sid=""
+
 case "$agent" in
     claude)
         cmd=(claude -p)
+        if [[ -n "$resume" ]]; then
+            # Appends to the existing session and keeps its id -- verified: the
+            # project directory still held exactly one jsonl afterwards.
+            cmd+=(--resume "$resume")
+            known_sid="$resume"
+        elif [[ -n "$session_id_file" ]]; then
+            known_sid="$(new_uuid)" || {
+                echo "Error: could not generate a session id for --session-id-file" >&2
+                exit 1
+            }
+            cmd+=(--session-id "$known_sid")
+        fi
         [[ -n "$model" ]] && cmd+=(--model "$model")
         ;;
     codex)
-        cmd=(codex exec -)
+        if [[ -n "$resume" ]]; then
+            # `codex exec resume` is NOT `codex exec` plus an id: it rejects
+            # -s/--sandbox, -C/--cd, --add-dir, --approve-for-me and -p/--profile.
+            # -m is accepted by both, which is the only option this script adds,
+            # so the two paths stay interchangeable -- but anything added below
+            # has to be checked against `codex exec resume --help` as well.
+            # Resume appends to the original rollout in place (14 -> 26 lines of
+            # the same file, no new one) and reports the same id back, so there
+            # is nothing to capture.
+            cmd=(codex exec resume "$resume" -)
+            known_sid="$resume"
+        else
+            cmd=(codex exec -)
+            # A fresh codex session mints an id we can only learn from codex's
+            # own banner, so this is the one path that has to give up `exec`.
+            # Only when the caller actually asked for the id: the cost is real
+            # and nobody else should pay it.
+            [[ -n "$session_id_file" ]] && capture_sid=1
+        fi
         [[ -n "$model" ]] && cmd+=(-m "$model")
         ;;
     agy)
@@ -155,6 +374,17 @@ case "$agent" in
         cmd=(agy)
         prompt_via_file=1
         [[ -n "$model" ]] && cmd+=(--model "$model")
+        # agy never reveals a conversation id on stdout or stderr, only in its
+        # CLI log -- so unlike codex there is no "fresh vs resume" split here:
+        # BOTH need the log. Resume needs it even when the caller did not ask
+        # for an id, because agy answers an unknown conversation id by silently
+        # starting a new one and exiting 0 (see the check after the run).
+        if [[ -n "$resume" ]]; then
+            cmd+=(--conversation "$resume")
+        fi
+        if [[ -n "$resume" || -n "$session_id_file" ]]; then
+            capture_sid=1
+        fi
         ;;
     *)
         echo "Unknown agent: $agent" >&2
@@ -168,9 +398,36 @@ if [[ -n "$prompt_via_file" ]]; then
     # one holding nothing else rather than granting wherever a caller's
     # --prompt-file lives. Fixed /tmp, not $TMPDIR: it is interpolated into the
     # instruction below, and a relative value resolves after the `cd` above.
-    agy_dir="$(mktemp -d /tmp/ask-agent-agy.XXXXXX)"   # mktemp -d is already 0700
-    _cleanup_agy_dir="$agy_dir"
+    # The prompt lives one level DOWN from the private root, so that the root
+    # can also hold the CLI log without widening the --add-dir grant: agy is
+    # granted $agy_dir, which contains the prompt and nothing else, exactly as
+    # before. Only the root is 0700-by-mktemp, which is what actually bounds
+    # access -- the inner mode is belt-and-braces against a future refactor
+    # moving it out from under the private root.
+    agy_priv="$(mktemp -d /tmp/ask-agent-agy.XXXXXX)"   # mktemp -d is already 0700
+    _cleanup_agy_dir="$agy_priv"                        # one rm -rf covers both
+    agy_dir="$agy_priv/prompt"
+    mkdir -m 700 -- "$agy_dir"
     agy_prompt="$agy_dir/prompt.txt"
+
+    # agy prints no id anywhere the caller can see it, but --log-file redirects
+    # the CLI log, and print mode logs the conversation id there on both fresh
+    # and resumed runs. Verified to be a COMPLETE redirect: nothing is left in
+    # ~/.gemini/antigravity-cli/log/ and the cli.log symlink is not repointed.
+    #
+    # That completeness is why this is conditional. Redirecting a log the user
+    # would otherwise still have after a failure is a real (if small) cost, and
+    # a plain one-shot query has no use for the id, so it does not pay it.
+    #
+    # The log is created 0644 by agy and we cannot change that, so it goes
+    # inside the 0700 root rather than anywhere a mode matters. It records
+    # promptLength but not the prompt itself -- checked by grepping a real log
+    # for three separate strings from the prompt it had just been given.
+    agy_log=""
+    if [[ -n "$capture_sid" ]]; then
+        agy_log="$agy_priv/cli.log"
+        cmd+=(--log-file "$agy_log")
+    fi
 
     # Nothing forces agy to read the file to its end, and a partial read answers
     # plausibly and exits 0. So the file ends with a marker agy must echo back
@@ -242,43 +499,7 @@ if [[ -n "$prompt_via_file" ]]; then
         agy_pid=$!
         exec {agy_w}>&-   # only the child needs the write end now
 
-        # Forward the actual signal, not a translated TERM. HUP matters: these
-        # run from tmux, where a hangup delivers HUP. (INT/QUIT are inert in
-        # background -- SIG_IGN on entry -- and redundant in a terminal.)
-        _agy_signalled=""
-        _forward_to_agy() { _agy_signalled=1; kill -"$1" "$agy_pid" 2>/dev/null || true; }
-        for _sig in HUP INT TERM QUIT; do
-            # shellcheck disable=SC2064  # expand _sig now, at trap definition
-            trap "_forward_to_agy $_sig" "$_sig"
-        done
-        unset _sig
-
-        # A trapped signal makes `wait` return >128 WITHOUT reaping, so we must
-        # wait again or the EXIT trap deletes the staging dir under a live agy.
-        # Tell that from a real signal death by the trap's flag, never `kill -0`:
-        # a reaped PID can be recycled, and probing it spins forever on the
-        # remembered status.
-        # Re-waiting relies on bash remembering a reaped child's status and
-        # returning it again rather than failing "not a child" (bash >= 5.1 --
-        # verified on 5.2.21: three successive waits on the same reaped PID all
-        # returned 143). An earlier version carried a 127 fallback for shells
-        # that discard it; on this fleet that branch was unreachable except in
-        # the one case where it did harm -- a child that ignored our signal and
-        # then genuinely exited 127 was reported as 143.
-        status=0
-        _agy_signalled=""
-        wait "$agy_pid" || status=$?
-        while (( status > 128 )) && [[ -n "$_agy_signalled" ]]; do
-            _agy_signalled=""
-            status=0
-            wait "$agy_pid" || status=$?
-        done
-
-        # Disarm before the reply handling below: from here on $agy_pid is
-        # reaped, so a late signal would fire `kill` at a PID that may already
-        # belong to someone else -- the same reuse hazard the loop above avoids
-        # on the `kill -0` side. The window is however long the strip takes.
-        trap - HUP INT TERM QUIT
+        wait_forwarding_signals "$agy_pid"   # sets `status`; see the definition
 
         response="$(cat <&"$agy_r")"   # command substitution drops trailing \n
         exec {agy_r}<&-                # not into the next attempt
@@ -438,6 +659,57 @@ if [[ -n "$prompt_via_file" ]]; then
         status=3
     fi
 
+    # Which conversation did this run actually use? Parse the `printmode.go`
+    # line rather than `Created conversation`: the former is logged on fresh AND
+    # resumed runs, so one pattern covers both, while the latter only appears
+    # when a new conversation is made.
+    #
+    # LAST match, not first: the retry above can put two agy runs into this same
+    # log, and whether agy appends or truncates --log-file is not documented.
+    # Taking the last is correct either way, and the last run is the one whose
+    # reply we are holding.
+    agy_conv=""
+    if [[ -n "$agy_log" && -f "$agy_log" ]]; then
+        agy_conv="$(grep -oE 'Print mode: conversation=[0-9a-fA-F-]+' "$agy_log" 2>/dev/null | tail -n 1)"
+        agy_conv="${agy_conv#Print mode: conversation=}"
+        # A log-format change in a future agy would leave a partial match here.
+        # Better to report no id than a wrong one, since the whole point is to
+        # hand this to the next round.
+        [[ "$agy_conv" =~ $uuid_re ]] || agy_conv=""
+    fi
+
+    if [[ -n "$agy_conv" ]]; then
+        emit_session_id "$agy_conv"
+    elif [[ -n "$session_id_file" ]]; then
+        echo "Error: could not read a conversation id out of agy's log; --session-id-file left empty" >&2
+    fi
+
+    # THE guard this whole option needs. agy answers an unknown conversation id
+    # by silently starting a NEW conversation and exiting 0 -- verified: a
+    # bogus id produced a clean answer, exit 0, empty stderr, and a brand-new
+    # .db file. codex and claude both exit 1 in the same situation, so only agy
+    # can lie about it.
+    #
+    # For a fixpoint council that is the worst failure available: round 3 thinks
+    # it is talking to the reviewer that already settled rounds 1-2, and gets a
+    # stranger who re-litigates them, with nothing to indicate why. So an
+    # unverified resume is treated as a failed one.
+    #
+    # Not being able to determine the id counts as a mismatch on purpose. The
+    # alternative -- proceeding on the assumption that a resume we cannot
+    # confirm probably worked -- is exactly the silent failure above, just with
+    # an extra step. The reply is still printed and status 3 still wins if the
+    # sentinel was also missing: a partial read is the more fundamental problem.
+    if [[ -n "$resume" ]]; then
+        if [[ -z "$agy_conv" ]]; then
+            echo "Error: cannot confirm agy resumed $resume (no conversation id in its log); treat this reply as cold context" >&2
+            if (( status == 0 )); then status=4; fi
+        elif [[ "$agy_conv" != "$resume" ]]; then
+            echo "Error: agy did NOT resume $resume -- it started $agy_conv instead, so this reply has no memory of the earlier rounds" >&2
+            if (( status == 0 )); then status=4; fi
+        fi
+    fi
+
     if [[ -n "$response" ]]; then
         printf '%s\n' "$response"
     fi
@@ -451,4 +723,67 @@ fi
 # through the open fd until the process exits.
 exec 3< "$prompt_file"
 [[ -n "$_cleanup_prompt_file" ]] && rm -f "$_cleanup_prompt_file"
-exec "${cmd[@]}" <&3
+
+# Ids we already know are reported BEFORE the run, because for the claude fresh
+# case there is no later moment: the id exists only because we minted it and put
+# it in argv, and the exec below never returns.
+#
+# The consequence to be honest about: for these cases the file records the
+# session the run was ASKED to use, so a run that dies before the agent creates
+# the session leaves an id for a session that never existed. That is survivable
+# precisely because claude and codex both exit 1 on an unknown id -- the next
+# round fails loudly instead of quietly going cold. (agy, which does not, is
+# handled the other way round: its id is read back out and verified.)
+if [[ -n "$known_sid" ]]; then
+    emit_session_id "$known_sid"
+fi
+
+if [[ -z "$capture_sid" ]]; then
+    exec "${cmd[@]}" <&3
+fi
+
+# --- codex, starting fresh, with the id requested ---
+# The only path here that cannot exec: codex mints the id and announces it in
+# its banner, so something has to outlive the run to read it. Everything else
+# above keeps exec. See docs/ask-agent-session-resume.md for the case analysis.
+#
+# The banner goes to STDERR -- verified: stdout carried the reply and nothing
+# else -- so capturing it cannot contaminate the reply. stdout is not touched
+# at all here; it stays inherited and streams exactly as it did before.
+codex_err="$(mktemp /tmp/ask-agent-codex-err.XXXXXX)"   # mktemp is 0600
+_cleanup_err_file="$codex_err"
+
+# tee rather than a plain `2>file`: codex's stderr is the run's only progress
+# output, callers watch it live, and a plain redirect would swallow all of it
+# and then lose it outright if `timeout` killed the run.
+exec {tee_fd}> >(tee -- "$codex_err" >&2)
+tee_pid=$!                       # must be read here: the `&` below overwrites $!
+
+"${cmd[@]}" <&3 2>&"$tee_fd" &
+codex_pid=$!
+exec {tee_fd}>&-                 # leave the child holding the only write end,
+                                 # so tee sees EOF when codex exits, not later
+
+wait_forwarding_signals "$codex_pid"   # sets `status`
+
+# bash sets $! to the pid of a process substitution and `wait` accepts it
+# (checked on 5.2.21), which is what makes the read below ordered rather than a
+# race against tee's last flush. Deliberately not load-bearing: a bash that left
+# $! unset would skip the wait and at worst miss the id -- there is no path here
+# that corrupts or withholds the reply, which never went through tee at all.
+if [[ -n "$tee_pid" ]]; then
+    wait "$tee_pid" 2>/dev/null || true
+fi
+
+codex_sid="$(grep -m1 -oE 'session id: [0-9a-fA-F-]+' "$codex_err" 2>/dev/null || true)"
+codex_sid="${codex_sid#session id: }"
+# Validated, not trusted: a banner change should yield "no id" rather than a
+# truncated one that the next round would pass to --resume.
+[[ "$codex_sid" =~ $uuid_re ]] || codex_sid=""
+if [[ -n "$codex_sid" ]]; then
+    emit_session_id "$codex_sid"
+else
+    echo "Error: could not read a session id out of codex's banner; --session-id-file left empty" >&2
+fi
+
+exit "$status"
