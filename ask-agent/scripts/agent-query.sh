@@ -41,7 +41,11 @@
 #      session. Only reachable for agy, which answers an unknown conversation id
 #      by silently starting a NEW conversation and exiting 0 (codex and claude
 #      both exit 1 on an unknown id, so their own status already says so).
-# Both print the reply anyway; both mean "this answer is not what you asked for".
+#   5  the run was fine but the id could not be written where --session-id-file
+#      asked. Distinct because a caller that only checks the status would
+#      otherwise read the PREVIOUS round's id back out and chain onto it.
+# All three print the reply anyway. 3 outranks 4 outranks 5; the agent's own
+# non-zero status outranks all of them.
 #
 # Examples:
 #   agent-query.sh claude "Explain this error"
@@ -193,6 +197,14 @@ _cleanup_err_file=""
 # destination) -- record_session_id blanks it on success.
 sid_tmp=""
 
+# Set when the id could not be recorded where the caller asked. Reported --
+# see record_session_id -- rather than left to a caller that would otherwise
+# read a stale id back out and never know.
+sid_record_failed=""
+
+# `mv -T` if this mv has it; probed once, only when an id file was requested.
+mv_no_target_dir=()
+
 # Trap to clean up temp files on any exit (failure paths).
 # On the claude/codex success path, we manually delete before exec, because
 # exec replaces this process and the trap would never fire.
@@ -270,6 +282,14 @@ if [[ -n "$session_id_file" ]]; then
     # It still proves writability before an API call is spent, which was the
     # good half of truncating early: if the directory is not writable, mktemp
     # fails here rather than after a fifteen-minute round.
+    # `-T` makes mv refuse to treat the destination as a directory to move
+    # INTO, which closes the window between the -d check below and the rename
+    # at the end. GNU-only, so it is probed rather than assumed -- without it
+    # the -d check still covers everything but a same-instant race.
+    if mv --help 2>/dev/null | grep -q -- '-T,'; then
+        mv_no_target_dir=(-T)
+    fi
+
     sid_tmp="$(mktemp "$session_id_dir/.ask-agent-sid.XXXXXX")" || {
         echo "Error: cannot write --session-id-file: $session_id_file" >&2
         exit 1
@@ -309,9 +329,15 @@ record_session_id() {
         else
             : > "$sid_tmp" || wrote=""
         fi
-        if [[ -n "$wrote" ]] && mv -f -- "$sid_tmp" "$session_id_file"; then
+        if [[ -n "$wrote" ]] && mv -f "${mv_no_target_dir[@]}" -- "$sid_tmp" "$session_id_file"; then
             sid_tmp=""     # renamed away; nothing left for cleanup to remove
         else
+            # Recorded, not just warned about. If this fails and the
+            # destination already held an id, that OLD id survives -- and a
+            # caller that checks only the exit status would chain onto it,
+            # which is the stale-id failure this option exists to prevent.
+            # Callers cannot be asked to distinguish "no file" from "old file".
+            sid_record_failed=1
             echo "ask-agent: warning: could not write --session-id-file $session_id_file" >&2 || true
         fi
     fi
@@ -837,6 +863,7 @@ if [[ -n "$prompt_via_file" ]]; then
     if [[ -z "$agy_conv" && -n "$session_id_file" ]]; then
         echo "Error: could not read a conversation id out of agy's log; --session-id-file left empty" >&2
     fi
+    if [[ -n "$sid_record_failed" ]] && (( status == 0 )); then status=5; fi
 
     if [[ -n "$response" ]]; then
         printf '%s\n' "$response"
@@ -864,6 +891,14 @@ exec 3< "$prompt_file"
 # handled the other way round: its id is read back out and verified.)
 if [[ -n "$known_sid" ]]; then
     record_session_id "$known_sid"
+    # Fatal here, unlike on the wrapped paths, and only because nothing has been
+    # spent yet: the exec below never returns, so this is the last chance to say
+    # anything. Running anyway would burn a round and then leave the caller
+    # reading whatever the file held before it -- a stale id that looks fresh.
+    if [[ -n "$sid_record_failed" ]]; then
+        echo "Error: could not record the session id; not starting a run whose id cannot be reported" >&2
+        exit 1
+    fi
 fi
 
 if [[ -z "$capture_sid" ]]; then
@@ -919,9 +954,15 @@ wait_forwarding_signals "$codex_pid"   # sets `status`
 # docs contains literal "session id: <uuid>" lines -- exactly what a council
 # review of this PR sends. Matching those would resume a session the prompt
 # chose.
+# The block BETWEEN the banner's two delimiter lines, which is where codex puts
+# the id and is structurally before its echo of the prompt. A line cutoff would
+# have to trade a false negative (a long preamble pushes the banner past it)
+# against a false positive (a short adversarial prompt lands inside it); the
+# delimiters have neither problem.
 codex_sid=""
-for _ in $(seq 1 30); do
-    codex_sid="$(head -n 40 "$codex_err" 2>/dev/null | grep -m1 -oE '^session id: [0-9a-fA-F-]+' || true)"
+for _ in $(seq 1 50); do
+    codex_sid="$(awk '/^-{4,}$/{n++; next} n==1' "$codex_err" 2>/dev/null |
+                 grep -m1 -oE '^session id: [0-9a-fA-F-]+' || true)"
     codex_sid="${codex_sid#session id: }"
     # Validated, not trusted: a banner change should yield "no id" rather than a
     # truncated one that the next round would pass to --resume.
@@ -934,5 +975,6 @@ record_session_id "$codex_sid"
 if [[ -z "$codex_sid" ]]; then
     echo "Error: could not read a session id out of codex's banner; --session-id-file left empty" >&2
 fi
+if [[ -n "$sid_record_failed" ]] && (( status == 0 )); then status=5; fi
 
 exit "$status"

@@ -106,6 +106,16 @@ M="$(tail -1 "$dir/prompt.txt")"
 # remount, a quota): the startup writability proof has already passed, so only
 # the final rename fails.
 [[ -n "${STUB_LOCKDIR:-}" ]] && chmod 0500 "$STUB_LOCKDIR"
+# Replace the scratch file with a directory, so the printf into it fails while
+# the destination stays perfectly writable.
+if [[ -n "${STUB_DIRIFY_TMP:-}" ]]; then
+    for f in "$STUB_DIRIFY_TMP"/.ask-agent-sid.*; do
+        [[ -f "$f" ]] || continue
+        rm -f "$f" && mkdir -p "$f"
+    done
+fi
+# Turn the DESTINATION into a directory after the -d check has already passed.
+[[ -n "${STUB_MKDIR_SID:-}" ]] && mkdir -p "$STUB_MKDIR_SID"
 if [[ -n "${STUB_NO_MARKER:-}" ]]; then printf 'agy reply\n'; else printf 'agy reply\n\n%s\n' "$M"; fi
 exit "${STUB_RC:-0}"
 STUB
@@ -286,8 +296,53 @@ PATH="$BIN:$PATH" STUB_ARGV="$T/argv" \
 rc=$?
 chmod 0700 "$lockdir"
 is  "unwritable destination: reply survives" "$(cat "$T/out")" "agy reply"
-is  "unwritable destination: exit 0"         "$rc" "0"
 has "unwritable destination: warns"          "$(cat "$T/err")" "could not write --session-id-file"
+# Exit 5, not 0. A caller that only checks the status would otherwise read the
+# destination and get whatever was there before -- see the stale case next.
+is  "unwritable destination: exit 5"         "$rc" "5"
+
+# The stale-id case that makes 5 necessary: the destination already holds the
+# PREVIOUS round's id, and it survives a failed write. The status is the only
+# thing that distinguishes it from a fresh one.
+lock2="$T/lock2"; mkdir -p "$lock2"
+printf 'STALE-PREVIOUS-ROUND\n' > "$lock2/sid"
+: > "$T/argv"
+STUB_LOCKDIR="$lock2" \
+PATH="$BIN:$PATH" STUB_ARGV="$T/argv" \
+    "$SRC" agy --session-id-file "$lock2/sid" -f "$T/prompt.txt" > "$T/out" 2>/dev/null
+rc=$?
+chmod 0700 "$lock2"
+is "stale id survives a failed write..."  "$(cat "$lock2/sid")" "STALE-PREVIOUS-ROUND"
+is "...so the status must say so (5)"     "$rc" "5"
+
+# The scratch file replaced by a directory: the printf fails, the destination
+# is fine. Different branch, same contract.
+# In its own directory: this sabotage leaves a DIRECTORY named like a scratch
+# file, which cleanup's `rm -f` cannot remove, and the leak assertion further
+# down is about the ordinary paths rather than about this.
+dirify="$T/dirify"; mkdir -p "$dirify"
+: > "$T/argv"
+STUB_DIRIFY_TMP="$dirify" \
+PATH="$BIN:$PATH" STUB_ARGV="$T/argv" \
+    "$SRC" agy --session-id-file "$dirify/sid2" -f "$T/prompt.txt" > "$T/out" 2>/dev/null
+rc=$?
+is "unwritable scratch file: reply survives" "$(cat "$T/out")" "agy reply"
+is "unwritable scratch file: exit 5"         "$rc" "5"
+
+# The -d check happens at startup; the destination can still become a directory
+# before the rename. `mv -T` must refuse rather than move the file inside it.
+: > "$T/argv"
+STUB_MKDIR_SID="$T/sid3" \
+PATH="$BIN:$PATH" STUB_ARGV="$T/argv" \
+    "$SRC" agy --session-id-file "$T/sid3" -f "$T/prompt.txt" > "$T/out" 2>/dev/null
+rc=$?
+is "destination turned into a dir: reply survives" "$(cat "$T/out")" "agy reply"
+if [[ -d "$T/sid3" ]] && [[ -z "$(find "$T/sid3" -type f)" ]] && (( rc == 5 )); then
+    ok "destination turned into a dir: refused, not moved inside"
+else
+    bad "destination turned into a dir: refused, not moved inside" \
+        "rc=$rc contents=[$(find "$T/sid3" -type f 2>/dev/null)]"
+fi
 
 echo "  a run that never reached an agent must not clobber the id:"
 printf '1e5a4dcb-0000-4000-8000-00000000000a\n' > "$T/sid"

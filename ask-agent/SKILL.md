@@ -195,6 +195,7 @@ rc=$?
 case $rc in
     0) ;;                                     # warm seat, real answer
     4) echo "seat went cold — redo this round, do not count it" >&2 ;;
+    5) echo "answer is good but the id was not recorded — do not trust the file" >&2 ;;
     *) echo "seat failed with $rc" >&2 ;;
 esac
 rm -r -f "$council"
@@ -221,11 +222,14 @@ Points that matter in a council:
 - Response is synchronous - the calling agent waits for the response
 - Useful for getting a second opinion or different perspective
 - Each agent has different training data and reasoning patterns
-- Exit status is the agent's own, plus two of the script's: **3** = agy's reply
-  did not carry the end-of-prompt sentinel (it may have answered on a partial
-  prompt); **4** = `--resume` did not demonstrably land in the requested
-  session. Both still print the reply; both mean "this is not the answer you
-  asked for". 3 outranks 4 when both apply.
+- Exit status is the agent's own, plus three of the script's: **3** = agy's
+  reply did not carry the end-of-prompt sentinel (it may have answered on a
+  partial prompt); **4** = `--resume` did not demonstrably land in the
+  requested session; **5** = the run was fine but the id could not be written
+  where `--session-id-file` asked — which matters because the destination may
+  still hold the *previous* round's id, and the status is the only thing that
+  tells you not to chain onto it. All three still print the reply. 3 outranks
+  4 outranks 5, and the agent's own non-zero status outranks all of them.
 - ask-agent is for **foreign** providers. Never ask-agent your own provider
   (Claude must not ask-agent `claude`, Codex must not ask-agent `codex`, agy
   must not ask-agent `agy`) — that is another instance of your own model
@@ -356,6 +360,15 @@ What it pins, and why each one is there:
   path that can drop any of them or orphan an agent under `timeout`.
 
 ### Known residuals
+
+- **If the `--session-id-file` destination directory becomes unwritable *during*
+  a run**, the 0600 scratch file created beside it at startup cannot be removed
+  and is left behind. Same residual class as the agy staging directory. The run
+  itself is unaffected: the reply is printed and the status is 5.
+- **A signal arriving between arming the traps and learning the child's pid** is
+  remembered and forwarded once the pid is known, but only the *last* such
+  signal is kept if several distinct ones land in that window. Forwarding one
+  signal is what matters here; the window is microseconds wide.
 
 - **Replies above ~500KB with no newline at all** hit a quadratic parameter
   expansion when the last line is located: ~0.36s at 200KB, ~3.4s at 500KB,
