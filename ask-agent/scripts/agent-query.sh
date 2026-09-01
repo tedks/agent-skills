@@ -29,8 +29,10 @@
 #
 # --session-id-file exists because two of the three agents only reveal the id
 # they generated in output the caller cannot reliably parse. The file gets the
-# bare id and a newline, nothing else; it is truncated at startup so a failed
-# run can never leave a stale id there for the next round to chain onto.
+# bare id and a newline, nothing else -- or is left EMPTY when the run produced
+# nothing safe to chain, so a failed round can never leave the PREVIOUS round's
+# id there for the next one to pick up. It is written by atomic rename at the
+# end, so a run that dies before reaching an agent leaves it untouched.
 #
 # Exit status is the agent's own, with two additions:
 #   3  agy exited 0 but its reply did not carry the end-of-prompt sentinel, i.e.
@@ -79,6 +81,7 @@ prompt_file=""
 resume=""
 resume_given=""
 session_id_file=""
+session_id_file_given=""
 while [[ $# -gt 0 ]]; do
     case "$1" in
         -d|--dir)
@@ -93,13 +96,20 @@ while [[ $# -gt 0 ]]; do
             prompt_file="$2"
             shift 2
             ;;
+        # These two check for an operand. Without it a missing value hits
+        # `shift 2` with one argument left, which fails, and `set -e` then kills
+        # the script with status 1 and NO message at all -- the pre-existing
+        # behaviour of -d/-m/-f, not worth propagating to new options.
         -r|--resume)
+            [[ $# -ge 2 ]] || { echo "Error: $1 requires a session id" >&2; usage; }
             resume="$2"
             resume_given=1
             shift 2
             ;;
         -S|--session-id-file)
+            [[ $# -ge 2 ]] || { echo "Error: $1 requires a path" >&2; usage; }
             session_id_file="$2"
+            session_id_file_given=1
             shift 2
             ;;
         -*)
@@ -139,10 +149,26 @@ if [[ -n "$resume_given" ]]; then
         echo "Error: --resume was given an empty id (an empty --session-id-file from a previous round?)" >&2
         exit 1
     fi
-    if [[ "$resume" != [A-Za-z0-9]* || "$resume" =~ [^A-Za-z0-9._-] ]]; then
+    # GLOB, not a regex, and that is the point: a bracket RANGE inside `=~` is
+    # matched by glibc COLLATION, so under en_US.UTF-8 -- the interactive
+    # default on this fleet -- "abécd" satisfies a negated [^A-Za-z0-9._-] and
+    # an undecodable byte makes regexec refuse to match at all. Neither leak is
+    # exploitable today (a leading "-" and every whitespace form are rejected in
+    # every locale), but a validator whose accepted set moves with $LANG is the
+    # same class of bug _agy_rtrim pins LC_ALL for, and callers reach this from
+    # cron, systemd and ssh where the locale is whatever it is. Glob ranges are
+    # held to ASCII by bash's globasciiranges, which is on by default.
+    if [[ "$resume" != [A-Za-z0-9]* || "$resume" == *[!A-Za-z0-9._-]* ]]; then
         echo "Error: --resume id must start alphanumeric and hold only [A-Za-z0-9._-]: $resume" >&2
         exit 1
     fi
+fi
+
+# Same reasoning as the empty --resume id above: an option that was GIVEN and
+# left empty is a caller bug, not a request for the default.
+if [[ -n "$session_id_file_given" && -z "$session_id_file" ]]; then
+    echo "Error: --session-id-file was given an empty path" >&2
+    exit 1
 fi
 
 # Normalize: ensure we always have a prompt_file to pipe from.
@@ -162,6 +188,11 @@ _cleanup_agy_dir=""
 # staging directory (ditz ask-agent-sigkill-staging-leak).
 _cleanup_err_file=""
 
+# Scratch file for --session-id-file, renamed into place at the end. Removed
+# here only if that rename never happened (early exit, signal, unwritable
+# destination) -- record_session_id blanks it on success.
+sid_tmp=""
+
 # Trap to clean up temp files on any exit (failure paths).
 # On the claude/codex success path, we manually delete before exec, because
 # exec replaces this process and the trap would never fire.
@@ -174,6 +205,7 @@ cleanup() {
     if [[ -n "$_cleanup_prompt_file" ]]; then rm -f "$_cleanup_prompt_file" || true; fi
     if [[ -n "$_cleanup_agy_dir" ]]; then rm -rf -- "$_cleanup_agy_dir" || true; fi
     if [[ -n "$_cleanup_err_file" ]]; then rm -f -- "$_cleanup_err_file" || true; fi
+    if [[ -n "$sid_tmp" ]]; then rm -f -- "$sid_tmp" || true; fi
     return 0
 }
 trap cleanup EXIT
@@ -212,27 +244,81 @@ if [[ -n "$session_id_file" ]]; then
     fi
     session_id_file="$session_id_dir/$(basename -- "$session_id_file")"
 
-    # Truncate NOW, for two reasons. It proves the path is writable before an
-    # API call is spent rather than after; and it guarantees that a run which
-    # fails to determine an id leaves the file EMPTY rather than holding the
-    # previous round's id. A stale id here is the worst outcome available: the
-    # caller would chain onto a session that answered a different question and
-    # never learn it did.
-    if ! : > "$session_id_file"; then
+    # An existing DIRECTORY has to be caught explicitly. `mv file dir` succeeds
+    # by moving the file INTO it, so the rename below would quietly deposit a
+    # randomly-named temp file inside and the caller would read nothing back.
+    if [[ -d "$session_id_file" ]]; then
+        echo "Error: --session-id-file is a directory: $session_id_file" >&2
+        exit 1
+    fi
+
+    # The caller's file is NOT touched here. Instead a private scratch file is
+    # created beside it and the result is renamed into place at the very end.
+    # Three things fall out of that, all of which were bugs in the truncating
+    # version:
+    #
+    #   * a run that dies before reaching an agent -- a typo'd agent name, a
+    #     --dir that does not exist, a signal -- leaves the caller's id intact.
+    #     Truncating first destroyed a warm session id for a run that never
+    #     spent anything.
+    #   * the write is atomic, so a reader never sees a half-written id, and
+    #     rename replaces a SYMLINK rather than following it. `> "$path"`
+    #     follows one, which on a shared box means a predictable path in /tmp
+    #     could be aimed at any file the user can write.
+    #   * mktemp creates it 0600 regardless of the caller's umask.
+    #
+    # It still proves writability before an API call is spent, which was the
+    # good half of truncating early: if the directory is not writable, mktemp
+    # fails here rather than after a fifteen-minute round.
+    sid_tmp="$(mktemp "$session_id_dir/.ask-agent-sid.XXXXXX")" || {
         echo "Error: cannot write --session-id-file: $session_id_file" >&2
+        exit 1
+    }
+
+    # Truncating the prompt out from under the run is the other way this used
+    # to go wrong: the emptiness check happens earlier, so aliasing the two
+    # options produced a confident answer to an empty prompt. -ef catches the
+    # hard link and symlink spellings, not just the identical path.
+    if [[ "$session_id_file" == "$prompt_file" ]] || [[ "$session_id_file" -ef "$prompt_file" ]]; then
+        echo "Error: --session-id-file and the prompt file are the same file: $session_id_file" >&2
         exit 1
     fi
 fi
 
-# Records the session id this run yielded, in both places a caller might look:
-# the file it asked for (bare id + newline, the whole contents) and stderr, for
-# whoever is reading the transcript. stdout is deliberately untouched -- it
-# carries the reply and nothing else.
-emit_session_id() {
-    if [[ -n "$session_id_file" ]]; then
-        printf '%s\n' "$1" > "$session_id_file"
+# Records the session id, in both places a caller might look: the file it asked
+# for (bare id + newline, the whole contents) and stderr, for whoever is reading
+# the transcript. stdout is deliberately untouched -- it carries the reply and
+# nothing else.
+#
+# An EMPTY id is a meaningful value, not a no-op: it records "nothing came out
+# of this round that is safe to chain", which is what the next round must see
+# rather than the id of the round before.
+#
+# THIS FUNCTION MUST NOT BE ABLE TO FAIL. It runs on the success path, in front
+# of the reply, under `set -e` -- and on the agy path the reply is held in a
+# variable whose capture file is already unlinked. An unguarded write that hit
+# ENOSPC, a read-only remount, a quota, or simply a caller that closed stderr
+# would abort the script before the reply was ever printed, and there would be
+# nothing left to recover it from. Same reasoning as cleanup() above: the reply
+# outranks the bookkeeping.
+record_session_id() {
+    local id="$1" wrote=1
+    if [[ -n "$sid_tmp" ]]; then
+        if [[ -n "$id" ]]; then
+            printf '%s\n' "$id" > "$sid_tmp" || wrote=""
+        else
+            : > "$sid_tmp" || wrote=""
+        fi
+        if [[ -n "$wrote" ]] && mv -f -- "$sid_tmp" "$session_id_file"; then
+            sid_tmp=""     # renamed away; nothing left for cleanup to remove
+        else
+            echo "ask-agent: warning: could not write --session-id-file $session_id_file" >&2 || true
+        fi
     fi
-    echo "ask-agent: session id: $1" >&2
+    if [[ -n "$id" ]]; then
+        echo "ask-agent: session id: $id" >&2 || true
+    fi
+    return 0
 }
 
 # Shared by the minting path and by every id read back out of an agent, because
@@ -270,16 +356,41 @@ new_uuid() {
 # Forward the actual signal, not a translated TERM. HUP matters: these run from
 # tmux, where a hangup delivers HUP. (INT/QUIT are inert in background --
 # SIG_IGN on entry -- and redundant in a terminal.)
+# Arming is SEPARATE from waiting, and has to happen BEFORE the child is
+# spawned. Arming afterwards -- which is what this code did while it lived
+# inline in the agy path -- leaves a window between `&` and the first `trap`
+# where the wrapper still has the default disposition: a TERM landing there
+# kills the wrapper outright and orphans the agent it had just started, which
+# is precisely the failure the forwarding exists to prevent. `timeout` firing
+# at that instant is unlikely but it is not impossible, and the cost of being
+# wrong is a runaway agent that nothing is left to kill.
+#
+# A signal that arrives before there is a pid to forward to is REMEMBERED
+# rather than dropped, and delivered as soon as the pid is known.
 _fwd_pid=""
 _fwd_signalled=""
-_forward_signal() { _fwd_signalled=1; kill -"$1" "$_fwd_pid" 2>/dev/null || true; }
-wait_forwarding_signals() {
-    _fwd_pid="$1"
+_fwd_pending=""
+_forward_signal() {
+    _fwd_signalled=1
+    if [[ -z "$_fwd_pid" ]]; then _fwd_pending="$1"; return; fi
+    kill -"$1" "$_fwd_pid" 2>/dev/null || true
+}
+arm_signal_forwarding() {
+    _fwd_pid=""
+    _fwd_signalled=""
+    _fwd_pending=""
     for _fwd_sig in HUP INT TERM QUIT; do
         # shellcheck disable=SC2064  # expand _fwd_sig now, at trap definition
         trap "_forward_signal $_fwd_sig" "$_fwd_sig"
     done
     unset _fwd_sig
+}
+wait_forwarding_signals() {
+    _fwd_pid="$1"
+    if [[ -n "$_fwd_pending" ]]; then
+        kill -"$_fwd_pending" "$_fwd_pid" 2>/dev/null || true
+        _fwd_pending=""
+    fi
 
     # A trapped signal makes `wait` return >128 WITHOUT reaping, so we must
     # wait again or the EXIT trap deletes the staging dir under a live agent.
@@ -495,6 +606,7 @@ if [[ -n "$prompt_via_file" ]]; then
         exec {agy_w}> "$agy_out" {agy_r}< "$agy_out"
         rm -f -- "$agy_out"
 
+        arm_signal_forwarding             # BEFORE the spawn -- see the definition
         "${cmd[@]}" >&"$agy_w" &
         agy_pid=$!
         exec {agy_w}>&-   # only the child needs the write end now
@@ -668,21 +780,26 @@ if [[ -n "$prompt_via_file" ]]; then
     # log, and whether agy appends or truncates --log-file is not documented.
     # Taking the last is correct either way, and the last run is the one whose
     # reply we are holding.
+    #
+    # Anchored to the EMITTING COMPONENT, not just to the message text. This
+    # log is written while agy is processing a prompt the caller supplied, and
+    # a prompt quoting this script -- every council review of ask-agent itself,
+    # including the one that found this -- contains the very string being
+    # searched for. `tail -n 1` would hand the last match to the next round, so
+    # the pattern has to be one only agy's own logger can produce.
     agy_conv=""
     if [[ -n "$agy_log" && -f "$agy_log" ]]; then
-        agy_conv="$(grep -oE 'Print mode: conversation=[0-9a-fA-F-]+' "$agy_log" 2>/dev/null | tail -n 1)"
-        agy_conv="${agy_conv#Print mode: conversation=}"
+        agy_conv="$(grep -oE 'printmode\.go:[0-9]+\] Print mode: conversation=[0-9a-fA-F-]+' "$agy_log" 2>/dev/null | tail -n 1)"
+        agy_conv="${agy_conv##*conversation=}"
         # A log-format change in a future agy would leave a partial match here.
         # Better to report no id than a wrong one, since the whole point is to
         # hand this to the next round.
         [[ "$agy_conv" =~ $uuid_re ]] || agy_conv=""
     fi
 
-    if [[ -n "$agy_conv" ]]; then
-        emit_session_id "$agy_conv"
-    elif [[ -n "$session_id_file" ]]; then
-        echo "Error: could not read a conversation id out of agy's log; --session-id-file left empty" >&2
-    fi
+    # Whether the id is CHAINABLE is decided before it is recorded, because a
+    # mismatch means it is not.
+    agy_chainable="$agy_conv"
 
     # THE guard this whole option needs. agy answers an unknown conversation id
     # by silently starting a NEW conversation and exiting 0 -- verified: a
@@ -706,8 +823,19 @@ if [[ -n "$prompt_via_file" ]]; then
             if (( status == 0 )); then status=4; fi
         elif [[ "$agy_conv" != "$resume" ]]; then
             echo "Error: agy did NOT resume $resume -- it started $agy_conv instead, so this reply has no memory of the earlier rounds" >&2
+            # Deliberately NOT recorded as the id to chain. Exit 4 means the
+            # round is void, and the conversation agy actually made has no
+            # history in it -- handing that id to the next round would quietly
+            # promote the stranger to being the seat. The id is on stderr for
+            # anyone who wants it; the file says "nothing chainable here".
+            agy_chainable=""
             if (( status == 0 )); then status=4; fi
         fi
+    fi
+
+    record_session_id "$agy_chainable"
+    if [[ -z "$agy_conv" && -n "$session_id_file" ]]; then
+        echo "Error: could not read a conversation id out of agy's log; --session-id-file left empty" >&2
     fi
 
     if [[ -n "$response" ]]; then
@@ -735,7 +863,7 @@ exec 3< "$prompt_file"
 # round fails loudly instead of quietly going cold. (agy, which does not, is
 # handled the other way round: its id is read back out and verified.)
 if [[ -n "$known_sid" ]]; then
-    emit_session_id "$known_sid"
+    record_session_id "$known_sid"
 fi
 
 if [[ -z "$capture_sid" ]]; then
@@ -756,33 +884,54 @@ _cleanup_err_file="$codex_err"
 # tee rather than a plain `2>file`: codex's stderr is the run's only progress
 # output, callers watch it live, and a plain redirect would swallow all of it
 # and then lose it outright if `timeout` killed the run.
-exec {tee_fd}> >(tee -- "$codex_err" >&2)
-tee_pid=$!                       # must be read here: the `&` below overwrites $!
+# `3<&-` inside the substitution keeps tee from inheriting the prompt fd and
+# pinning the already-unlinked prompt file for as long as it lives.
+exec {tee_fd}> >(tee -- "$codex_err" >&2 3<&-)
 
-"${cmd[@]}" <&3 2>&"$tee_fd" &
+# `{tee_fd}>&-` closes the fd IN THE CHILD ONLY. Without it the child holds two
+# write ends of tee's pipe, because bash does not set close-on-exec on fds it
+# allocates for `{var}>` -- verified: a child's /proc/self/fd showed both fd 2
+# and the raw fd 10 on the same pipe. The raw one is invisible to the child's
+# own redirections, so it propagates to every descendant even one that points
+# its stdio elsewhere, and tee then waits on the longest-lived grandchild
+# rather than on codex.
+# Backgrounding also means bash sets INT and QUIT to SIG_IGN in the child, so
+# an interactive Ctrl-C no longer reaches codex directly the way it did through
+# `exec`. wait_forwarding_signals forwards TERM and HUP, which is what
+# `timeout` and tmux actually send; the capture path accepts the difference.
+arm_signal_forwarding            # BEFORE the spawn -- see the definition
+"${cmd[@]}" <&3 2>&"$tee_fd" {tee_fd}>&- &
 codex_pid=$!
-exec {tee_fd}>&-                 # leave the child holding the only write end,
-                                 # so tee sees EOF when codex exits, not later
+exec {tee_fd}>&-                 # and in the parent
 
 wait_forwarding_signals "$codex_pid"   # sets `status`
 
-# bash sets $! to the pid of a process substitution and `wait` accepts it
-# (checked on 5.2.21), which is what makes the read below ordered rather than a
-# race against tee's last flush. Deliberately not load-bearing: a bash that left
-# $! unset would skip the wait and at worst miss the id -- there is no path here
-# that corrupts or withholds the reply, which never went through tee at all.
-if [[ -n "$tee_pid" ]]; then
-    wait "$tee_pid" 2>/dev/null || true
-fi
+# POLL for the banner rather than `wait`ing on tee. Even with the fd closed
+# above, any descendant of codex that inherited stderr -- an MCP server, a
+# sandbox helper, a command the model backgrounded -- keeps the pipe open, so
+# tee may never see EOF at all. An unbounded wait there parks the wrapper until
+# `timeout` kills it, which reports a round codex answered perfectly well as a
+# timeout AND loses the id that was already sitting in the file. The banner is
+# written in the first moments of the run, so it is there or it is not.
+#
+# Anchored at the start of a line, and only within the banner block. codex
+# echoes the PROMPT to stderr as well, and a prompt quoting this repo's own
+# docs contains literal "session id: <uuid>" lines -- exactly what a council
+# review of this PR sends. Matching those would resume a session the prompt
+# chose.
+codex_sid=""
+for _ in $(seq 1 30); do
+    codex_sid="$(head -n 40 "$codex_err" 2>/dev/null | grep -m1 -oE '^session id: [0-9a-fA-F-]+' || true)"
+    codex_sid="${codex_sid#session id: }"
+    # Validated, not trusted: a banner change should yield "no id" rather than a
+    # truncated one that the next round would pass to --resume.
+    [[ "$codex_sid" =~ $uuid_re ]] || codex_sid=""
+    [[ -n "$codex_sid" ]] && break
+    sleep 0.1
+done
 
-codex_sid="$(grep -m1 -oE 'session id: [0-9a-fA-F-]+' "$codex_err" 2>/dev/null || true)"
-codex_sid="${codex_sid#session id: }"
-# Validated, not trusted: a banner change should yield "no id" rather than a
-# truncated one that the next round would pass to --resume.
-[[ "$codex_sid" =~ $uuid_re ]] || codex_sid=""
-if [[ -n "$codex_sid" ]]; then
-    emit_session_id "$codex_sid"
-else
+record_session_id "$codex_sid"
+if [[ -z "$codex_sid" ]]; then
     echo "Error: could not read a session id out of codex's banner; --session-id-file left empty" >&2
 fi
 

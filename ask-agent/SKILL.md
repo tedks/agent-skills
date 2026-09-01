@@ -35,8 +35,11 @@ when you want a second opinion from a different agent (Claude, Codex, Antigravit
   one. Mapped to each agent's own flag — see the mapping table below.
 - `-S, --session-id-file <file>`: Write the session id this run **yielded** to
   `<file>`, so the next round can pass it back via `--resume`. The file holds
-  the bare id and a newline, nothing else, and is **truncated at startup** — an
-  empty file means "this run could not determine its id", never a stale one.
+  the bare id and a newline, nothing else — or is left **empty**, which means
+  "nothing came out of this round that is safe to chain", never a stale id from
+  the round before. It is written by atomic rename at the end, so a run that
+  fails before reaching an agent (a typo'd agent name, a bad `--dir`, a
+  rejected id) leaves whatever was there **untouched**.
 
 ## Instructions
 
@@ -150,8 +153,10 @@ Error: agy did NOT resume 00000000-… -- it started d74dd188-… instead,
 Being unable to determine the id counts as a mismatch too — it fails closed on
 purpose, since "assume the resume we cannot confirm probably worked" is the
 silent failure again with an extra step. **Exit 4 always still prints the
-reply** (it is a real answer, just a cold one) and still records the id of the
-conversation that actually answered, so a caller can chain from it if it wants.
+reply** — it is a real answer, just a cold one — and reports the id of the
+conversation agy actually used on stderr. It does **not** record that id in
+`--session-id-file`: the stranger has no history in it, and writing it would
+promote the cold conversation to being the seat. The file is left empty.
 
 `--resume ""` is a hard error rather than quietly meaning "fresh": the intended
 call is `--resume "$(cat sid)"` and that file is empty exactly when a previous
@@ -163,15 +168,20 @@ Round 1 asks for the id; every later round passes it back. Two files per seat �
 one for the prompt, one for the id:
 
 ```bash
-sid=/tmp/council-codex.sid
-prompt=$(mktemp /tmp/ask-agent-prompt.XXXXXX)
+# A private directory, not a predictable /tmp path: on a shared machine anyone
+# can pre-create /tmp/council-codex.sid, and it is the seat of the whole round.
+council=$(mktemp -d /tmp/council.XXXXXX)
+prompt="$council/prompt.txt"
 
 # Round 1: full context, fresh seat.
 cat > "$prompt" <<'P'
 Review this diff for correctness bugs. <full diff here>
 P
 timeout 900 ~/.claude/skills/ask-agent/scripts/agent-query.sh codex \
-    --session-id-file "$sid" --prompt-file "$prompt"
+    --session-id-file "$council/codex.sid" --prompt-file "$prompt"
+
+seat=$(cat "$council/codex.sid")      # keep it in a variable, not only a file
+[[ -n "$seat" ]] || { echo "round 1 yielded no session id; cannot chain" >&2; }
 
 # Round 2..n: the fix delta ONLY. The seat still remembers round 1, so there is
 # no need to re-feed the diff, the findings, or what was already agreed.
@@ -180,9 +190,14 @@ Here is the delta that fixes your findings. Did any fix introduce a new bug?
 <git diff <last-reviewed-sha>..HEAD>
 P
 timeout 900 ~/.claude/skills/ask-agent/scripts/agent-query.sh codex \
-    --resume "$(cat "$sid")" --prompt-file "$prompt"
+    --resume "$seat" --prompt-file "$prompt"
 rc=$?
-rm -f "$prompt"
+case $rc in
+    0) ;;                                     # warm seat, real answer
+    4) echo "seat went cold — redo this round, do not count it" >&2 ;;
+    *) echo "seat failed with $rc" >&2 ;;
+esac
+rm -r -f "$council"
 ```
 
 Points that matter in a council:
@@ -195,8 +210,11 @@ Points that matter in a council:
 - **Keep the id for the whole fixpoint loop, not just one round.** The point is
   that round 4 still remembers round 1, which is what makes "re-run the council
   on the fix delta only" cheap enough to run to convergence.
-- Passing `--session-id-file` on later rounds is optional — resume yields the id
-  it was given — but harmless, and it keeps every round symmetrical.
+- **On a resume round `--session-id-file` tells you nothing new** — resume
+  yields the id you passed it. Skip it. In particular do not aim it at the same
+  file you read the id *from*: that file is the seat, and a round that comes
+  back 4 (or cannot determine an id) would empty it, leaving you nothing to
+  retry with. Keep the warm id in a shell variable as well as a file.
 
 ## Notes
 
@@ -322,9 +340,15 @@ What it pins, and why each one is there:
 
 - the agy id comparison actually firing — a silent fork must be exit 4, not 0,
   and that check is the entire reason `--resume` is safe to point at agy;
-- `--session-id-file` being truncated at startup, so a round that cannot
-  determine its id leaves it empty rather than holding the *previous* round's,
-  which would chain the next round onto the wrong thread while looking healthy;
+- `--session-id-file` getting the right thing in *both* directions: a round
+  that cannot determine an id leaves it empty rather than holding the
+  *previous* round's (which would chain the next round onto the wrong thread
+  while looking perfectly healthy), while a run that never reached an agent at
+  all — a typo'd agent name, a bad `--dir` — leaves it untouched rather than
+  throwing away a warm seat;
+- the reply outranking the bookkeeping: the id is recorded in front of the
+  reply on the agy path, under `set -e`, with the reply's capture file already
+  unlinked, so a failing write there must not be able to abort the script;
 - the **negative** argv assertions — a plain query must not grow `--log-file`
   or `--session-id`, or every existing caller changes behaviour at once;
 - the codex capture path keeping the reply, the exit status and live stderr, and

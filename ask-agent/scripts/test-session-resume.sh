@@ -11,16 +11,22 @@
 #      script compares the id agy logged against the one it asked for. If that
 #      comparison ever stops firing, a fixpoint council goes cold with no
 #      signal at all -- the reviewer just quietly forgets rounds 1..n-1.
-#   2. A stale id in --session-id-file. The file is truncated at startup so a
-#      round that cannot determine its id leaves it EMPTY. If it ever stopped
-#      being truncated, the next round would chain onto the PREVIOUS round's
-#      session and look perfectly healthy while answering into the wrong thread.
+#   2. The wrong id in --session-id-file, in either direction. A round that
+#      cannot determine an id must leave the file EMPTY -- otherwise the next
+#      round chains onto the PREVIOUS round's session and looks perfectly
+#      healthy while answering into the wrong thread. But a run that never
+#      reached an agent at all must leave the file ALONE, or a typo throws away
+#      a warm seat that cost real money to build.
 #   3. Argv mapping per agent, including the negative: a plain query must not
 #      grow --log-file / --session-id, or every existing caller changes
 #      behaviour at once.
 #   4. The codex capture path, which is the only path that gave up `exec`, so
 #      it is the only one that can drop the reply, lose the exit status, or
 #      orphan a child under `timeout`.
+#   5. Bookkeeping never outranking the reply. The id is recorded in front of
+#      the reply on the agy path, under `set -e`, with the reply's capture file
+#      already unlinked -- so a failure there must not be able to abort the
+#      script, or the answer is gone for good.
 #
 # Run after touching option parsing, the per-agent command build, the agy log
 # handling, or the tail of the script:
@@ -68,6 +74,12 @@ if [[ -n "${STUB_SLEEP:-}" ]]; then
     echo "$$" > "$STUB_PIDFILE"
     sleep "$STUB_SLEEP"
 fi
+# A descendant that outlives codex and keeps stderr -- an MCP server, a sandbox
+# helper, a command the model backgrounded. It pins tee's pipe open.
+if [[ -n "${STUB_ORPHAN:-}" ]]; then
+    sleep "$STUB_ORPHAN" &
+    echo "$!" > "$STUB_ORPHAN_PIDFILE"
+fi
 printf 'codex reply\n'
 exit "${STUB_RC:-0}"
 STUB
@@ -90,6 +102,10 @@ if [[ -n "$log" ]]; then
       echo "I0101 00:00:00.000001 1 printmode.go:209] Print mode: conversation=${STUB_CONV:-aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee}, sending message" >> "$log"
 fi
 M="$(tail -1 "$dir/prompt.txt")"
+# Simulates the sid destination going read-only DURING the run (a full /tmp, a
+# remount, a quota): the startup writability proof has already passed, so only
+# the final rename fails.
+[[ -n "${STUB_LOCKDIR:-}" ]] && chmod 0500 "$STUB_LOCKDIR"
 if [[ -n "${STUB_NO_MARKER:-}" ]]; then printf 'agy reply\n'; else printf 'agy reply\n\n%s\n' "$M"; fi
 exit "${STUB_RC:-0}"
 STUB
@@ -113,8 +129,15 @@ run() {
     rc=$?
     out="$(cat "$T/out")"; err="$(cat "$T/err")"; argv="$(cat "$T/argv")"
 }
-# adjacent <flag> <value> -- true only if they appear as consecutive argv entries
-adjacent() { grep -A1 -x -F -e "$1" "$T/argv" 2>/dev/null | grep -q -x -F -e "$2"; }
+# adjacent <flag> <value> -- true only if <value> is the line immediately after
+# the FIRST <flag> line. Not `grep -A1 | grep`: that searches both lines of the
+# window, so a value equal to the flag would match itself.
+adjacent() {
+    local n
+    n="$(grep -n -x -F -e "$1" "$T/argv" 2>/dev/null | head -1 | cut -d: -f1)"
+    [[ -n "$n" ]] || return 1
+    [[ "$(sed -n "$((n + 1))p" "$T/argv")" == "$2" ]]
+}
 
 echo "  option validation (nothing should reach an agent):"
 for badid in "-m" "a b" "" "x;y" "../etc"; do
@@ -205,8 +228,13 @@ is  "silent fork => exit 4"                  "$rc" "4"
 has "silent fork => names both ids"          "$err" "did NOT resume 1e5a4dcb-0000-4000-8000-00000000000a"
 has "silent fork => names the one it got"    "$err" "99999999-9999-4999-8999-999999999999"
 is  "silent fork => reply still printed"     "$out" "agy reply"
-is  "silent fork => sid file holds the REAL conversation" \
-    "$(cat "$T/sid")" "99999999-9999-4999-8999-999999999999"
+# The stranger's conversation has no history in it, and on the symmetric call
+# shape (--resume "$(cat $sid)" --session-id-file "$sid") recording it would
+# overwrite the warm id with a cold one -- destroying the only thing needed to
+# retry the round the exit-4 warning is telling you to retry.
+is  "silent fork => sid file is EMPTY, not the stranger" \
+    "$(cat "$T/sid")" ""
+has "silent fork => stranger's id still on stderr"  "$err" "99999999-9999-4999-8999-999999999999"
 
 STUB_NO_CONV=1 run agy --resume 1e5a4dcb-0000-4000-8000-00000000000a
 is  "unverifiable => exit 4 (fails closed)" "$rc" "4"
@@ -229,6 +257,97 @@ if [[ -n "$granted" && "$logpath" != "$granted"/* ]]; then
 else
     bad "CLI log lives OUTSIDE the --add-dir grant" "granted=$granted log=$logpath"
 fi
+
+echo "  the reply outranks the bookkeeping:"
+# Under set -e an unguarded write in record_session_id would abort the script
+# before the reply is printed -- and on the agy path the capture file is already
+# unlinked, so the answer would be unrecoverable. Closed stderr is the cheapest
+# way to make every write in that function fail at once.
+: > "$T/argv"
+PATH="$BIN:$PATH" STUB_ARGV="$T/argv" \
+    "$SRC" agy --session-id-file "$T/sid" -f "$T/prompt.txt" > "$T/out" 2>&-
+rc=$?
+is "closed stderr + sid file: reply survives" "$(cat "$T/out")" "agy reply"
+is "closed stderr + sid file: exit 0"         "$rc" "0"
+
+: > "$T/argv"
+STUB_CONV=1e5a4dcb-0000-4000-8000-00000000000a \
+PATH="$BIN:$PATH" STUB_ARGV="$T/argv" \
+    "$SRC" agy --resume 1e5a4dcb-0000-4000-8000-00000000000a -f "$T/prompt.txt" > "$T/out" 2>&-
+is "closed stderr + resume: reply survives" "$(cat "$T/out")" "agy reply"
+
+# The destination going read-only mid-run (full disk, remount, quota): startup
+# proved it writable, the final rename is what fails.
+lockdir="$T/lockme"; mkdir -p "$lockdir"
+: > "$T/argv"
+STUB_LOCKDIR="$lockdir" \
+PATH="$BIN:$PATH" STUB_ARGV="$T/argv" \
+    "$SRC" agy --session-id-file "$lockdir/sid" -f "$T/prompt.txt" > "$T/out" 2> "$T/err"
+rc=$?
+chmod 0700 "$lockdir"
+is  "unwritable destination: reply survives" "$(cat "$T/out")" "agy reply"
+is  "unwritable destination: exit 0"         "$rc" "0"
+has "unwritable destination: warns"          "$(cat "$T/err")" "could not write --session-id-file"
+
+echo "  a run that never reached an agent must not clobber the id:"
+printf '1e5a4dcb-0000-4000-8000-00000000000a\n' > "$T/sid"
+: > "$T/argv"
+PATH="$BIN:$PATH" STUB_ARGV="$T/argv" "$SRC" cldaue --session-id-file "$T/sid" \
+    -f "$T/prompt.txt" >/dev/null 2>&1
+is "typo'd agent name leaves the id intact" \
+   "$(cat "$T/sid")" "1e5a4dcb-0000-4000-8000-00000000000a"
+PATH="$BIN:$PATH" STUB_ARGV="$T/argv" "$SRC" claude -d "$T/nope" --session-id-file "$T/sid" \
+    -f "$T/prompt.txt" >/dev/null 2>&1
+is "nonexistent --dir leaves the id intact" \
+   "$(cat "$T/sid")" "1e5a4dcb-0000-4000-8000-00000000000a"
+run codex --resume "not a valid id" --session-id-file "$T/sid"
+is "rejected --resume leaves the id intact" \
+   "$(cat "$T/sid")" "1e5a4dcb-0000-4000-8000-00000000000a"
+# No stray scratch files left beside it either.
+leftovers="$(find "$T" -maxdepth 1 -name '.ask-agent-sid.*' | wc -l)"
+is "no scratch files left behind" "$leftovers" "0"
+
+echo "  destinations that are not a plain writable file:"
+mkdir -p "$T/sid-as-dir"
+run codex --session-id-file "$T/sid-as-dir"
+if (( rc == 1 )) && [[ -z "$argv" ]]; then ok "rejects a directory as --session-id-file"
+else bad "rejects a directory as --session-id-file" "rc=$rc"; fi
+run codex --session-id-file "$T/prompt.txt"
+if (( rc == 1 )) && [[ -z "$argv" ]]; then ok "rejects sid file == prompt file"
+else bad "rejects sid file == prompt file" "rc=$rc"; fi
+is "...and the prompt file is not truncated" "$(cat "$T/prompt.txt")" "probe prompt"
+for opt in --resume --session-id-file; do
+    : > "$T/argv"
+    PATH="$BIN:$PATH" STUB_ARGV="$T/argv" "$SRC" codex "$opt" > "$T/out" 2> "$T/err"
+    rc=$?
+    if (( rc == 1 )) && [[ "$(cat "$T/err")" == *"requires a"* ]]; then
+        ok "missing operand for $opt is reported"
+    else bad "missing operand for $opt is reported" "rc=$rc err=$(cat "$T/err")"; fi
+done
+
+echo "  a descendant holding stderr must not park the wrapper:"
+# codex exits immediately but leaves a child on the tee pipe. An unbounded wait
+# on tee would block until that child died -- reporting a good round as a
+# timeout, and losing an id that was already parsed and ready.
+: > "$T/argv"; : > "$T/orphanpid"
+start=$SECONDS
+STUB_ORPHAN=25 STUB_ORPHAN_PIDFILE="$T/orphanpid" STUB_SID=1e5a4dcb-0000-4000-8000-00000000000f \
+    run codex --session-id-file "$T/sid"
+elapsed=$(( SECONDS - start ))
+orphan="$(cat "$T/orphanpid" 2>/dev/null || true)"
+[[ -n "$orphan" ]] && kill -KILL "$orphan" 2>/dev/null
+if (( elapsed < 10 )); then ok "returns promptly (${elapsed}s), does not wait on tee"
+else bad "returns promptly, does not wait on tee" "took ${elapsed}s"; fi
+is "...and still captured the id" "$(cat "$T/sid")" "1e5a4dcb-0000-4000-8000-00000000000f"
+is "...and still delivered the reply" "$out" "codex reply"
+
+# A prompt that quotes this repo's own docs contains literal "session id: <uuid>"
+# lines, and codex echoes the prompt to stderr. The parser must not take one.
+printf 'see docs\nsession id: 12345678-1234-4234-8234-123456789abc\nend\n' > "$T/evil.txt"
+: > "$T/argv"
+PATH="$BIN:$PATH" STUB_ARGV="$T/argv" STUB_NO_BANNER=1 \
+    "$SRC" codex --session-id-file "$T/sid" -f "$T/evil.txt" >/dev/null 2>&1
+is "a prompt cannot supply its own session id" "$(cat "$T/sid")" ""
 
 echo
 if (( fails == 0 )); then
