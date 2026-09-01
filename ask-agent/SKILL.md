@@ -31,6 +31,12 @@ when you want a second opinion from a different agent (Claude, Codex, Antigravit
 - `-m, --model <model>`: Specify model (agent-specific)
 - `-f, --prompt-file <file>`: Read prompt from a file instead of inline (use for
   large prompts to avoid ARG_MAX limits at the caller-to-script boundary)
+- `-r, --resume <id>`: Continue an existing session instead of starting a new
+  one. Mapped to each agent's own flag — see the mapping table below.
+- `-S, --session-id-file <file>`: Write the session id this run **yielded** to
+  `<file>`, so the next round can pass it back via `--resume`. The file holds
+  the bare id and a newline, nothing else, and is **truncated at startup** — an
+  empty file means "this run could not determine its id", never a stale one.
 
 ## Instructions
 
@@ -92,6 +98,12 @@ Report the response back to the user.
 
 # Use a prompt file for large prompts (avoids ARG_MAX)
 /ask-agent codex --prompt-file /tmp/review-prompt.txt
+
+# Round 1 of a council: keep the seat warm by capturing its session id
+/ask-agent codex --session-id-file /tmp/codex.sid --prompt-file /tmp/round1.txt
+
+# Round 2: same seat, so the prompt can be the fix delta alone
+/ask-agent codex --resume "$(cat /tmp/codex.sid)" --prompt-file /tmp/round2.txt
 ```
 
 ## Agent CLI Mappings
@@ -102,11 +114,100 @@ Report the response back to the user.
 | codex  | `codex exec -` | Yes - `-` reads from stdin |
 | agy | `agy --add-dir <dir> -p "Read <file>..."` | **No** - no stdin mode; the script stages the prompt in a private dir and passes the path |
 
+### Session resume, per agent
+
+| Agent | `--resume <id>` becomes | Fork or append? | How the yielded id is obtained |
+|-------|------------------------|-----------------|-------------------------------|
+| claude | `--resume <id>` | **Append.** Same id, one jsonl in the project dir before and after | The caller **mints** it: the script generates a UUID and passes `--session-id <uuid>` |
+| codex | `codex exec resume <id> -` | **Append, in place.** Same rollout file (14 → 26 lines), same id, no new `*.jsonl` | Parsed from codex's stderr banner (`session id: <uuid>`) |
+| agy | `--conversation <id>` | **Append.** Same id, no new `.db` | Parsed from a per-run `--log-file` (`Print mode: conversation=<uuid>`) |
+
+All three **append**, so `--resume` mutates the session's history rather than
+branching it — which is what a council round wants, but worth knowing before
+pointing it at a session you care about. The non-mutating halves exist
+(`codex exec fork <id>`, `claude --fork-session`) and are deliberately **not**
+wrapped here.
+
+Every claim above was checked rather than inferred; commands, byte counts and
+file counts are in [docs/ask-agent-session-resume.md](../../../docs/ask-agent-session-resume.md).
+
+### agy will not tell you a resume failed — the script does
+
+Give codex or claude an unknown session id and they exit 1 with a clear message.
+Give **agy** one and it **silently starts a brand-new conversation and exits 0**,
+answering from a cold context with nothing on stderr to say so.
+
+For a fixpoint council that is the worst failure available: round 3 believes it
+is talking to the reviewer that settled rounds 1–2 and instead gets a stranger
+who re-litigates them. So on `--resume` the script compares the conversation id
+agy *logged* against the one it was *asked* for, and **exits 4** on a mismatch:
+
+```
+Error: agy did NOT resume 00000000-… -- it started d74dd188-… instead,
+       so this reply has no memory of the earlier rounds
+```
+
+Being unable to determine the id counts as a mismatch too — it fails closed on
+purpose, since "assume the resume we cannot confirm probably worked" is the
+silent failure again with an extra step. **Exit 4 always still prints the
+reply** (it is a real answer, just a cold one) and still records the id of the
+conversation that actually answered, so a caller can chain from it if it wants.
+
+`--resume ""` is a hard error rather than quietly meaning "fresh": the intended
+call is `--resume "$(cat sid)"` and that file is empty exactly when a previous
+round failed to determine its id.
+
+### Chaining rounds (council use)
+
+Round 1 asks for the id; every later round passes it back. Two files per seat —
+one for the prompt, one for the id:
+
+```bash
+sid=/tmp/council-codex.sid
+prompt=$(mktemp /tmp/ask-agent-prompt.XXXXXX)
+
+# Round 1: full context, fresh seat.
+cat > "$prompt" <<'P'
+Review this diff for correctness bugs. <full diff here>
+P
+timeout 900 ~/.claude/skills/ask-agent/scripts/agent-query.sh codex \
+    --session-id-file "$sid" --prompt-file "$prompt"
+
+# Round 2..n: the fix delta ONLY. The seat still remembers round 1, so there is
+# no need to re-feed the diff, the findings, or what was already agreed.
+cat > "$prompt" <<'P'
+Here is the delta that fixes your findings. Did any fix introduce a new bug?
+<git diff <last-reviewed-sha>..HEAD>
+P
+timeout 900 ~/.claude/skills/ask-agent/scripts/agent-query.sh codex \
+    --resume "$(cat "$sid")" --prompt-file "$prompt"
+rc=$?
+rm -f "$prompt"
+```
+
+Points that matter in a council:
+
+- **Check the exit status, and 4 specifically.** 4 means the seat answered
+  without the earlier rounds; its "no new findings" is not a convergence signal
+  and the round should be redone (or restarted fresh, with context re-fed).
+- **One sid file per seat.** Seats run in parallel; a shared file is a race.
+- **Fresh seats need no `--resume`.** Round 1 just asks for the id.
+- **Keep the id for the whole fixpoint loop, not just one round.** The point is
+  that round 4 still remembers round 1, which is what makes "re-run the council
+  on the fix delta only" cheap enough to run to convergence.
+- Passing `--session-id-file` on later rounds is optional — resume yields the id
+  it was given — but harmless, and it keeps every round symmetrical.
+
 ## Notes
 
 - Response is synchronous - the calling agent waits for the response
 - Useful for getting a second opinion or different perspective
 - Each agent has different training data and reasoning patterns
+- Exit status is the agent's own, plus two of the script's: **3** = agy's reply
+  did not carry the end-of-prompt sentinel (it may have answered on a partial
+  prompt); **4** = `--resume` did not demonstrably land in the requested
+  session. Both still print the reply; both mean "this is not the answer you
+  asked for". 3 outranks 4 when both apply.
 - ask-agent is for **foreign** providers. Never ask-agent your own provider
   (Claude must not ask-agent `claude`, Codex must not ask-agent `codex`, agy
   must not ask-agent `agy`) — that is another instance of your own model
@@ -205,6 +306,30 @@ unset under cron, systemd units, `ssh host cmd`, `docker exec` and `sudo` with
 `env_reset`, and a `LANG` naming an ungenerated locale degrades to `C` silently.
 The test extracts the function from `agent-query.sh` rather than copying it, so
 it cannot drift.
+
+### Session resume has its own tripwire
+
+`scripts/test-session-resume.sh` covers `--resume` / `--session-id-file` the
+same way — the real script against stub `claude`, `codex` and `agy` binaries,
+no network and no agent state touched. **Run it after touching option parsing,
+the per-agent command build, the agy log handling, or the tail of the script.**
+
+```bash
+.claude/skills/ask-agent/scripts/test-session-resume.sh
+```
+
+What it pins, and why each one is there:
+
+- the agy id comparison actually firing — a silent fork must be exit 4, not 0,
+  and that check is the entire reason `--resume` is safe to point at agy;
+- `--session-id-file` being truncated at startup, so a round that cannot
+  determine its id leaves it empty rather than holding the *previous* round's,
+  which would chain the next round onto the wrong thread while looking healthy;
+- the **negative** argv assertions — a plain query must not grow `--log-file`
+  or `--session-id`, or every existing caller changes behaviour at once;
+- the codex capture path keeping the reply, the exit status and live stderr, and
+  forwarding TERM, since it is the one path that gave up `exec` and so the one
+  path that can drop any of them or orphan an agent under `timeout`.
 
 ### Known residuals
 
