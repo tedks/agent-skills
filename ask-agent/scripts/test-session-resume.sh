@@ -46,6 +46,7 @@ printf 'probe prompt\n' > "$T/prompt.txt"
 
 checked=0
 fails=0
+skipped=0
 
 # Every stub records its full argv, one arg per line, so assertions can look for
 # exact adjacent pairs rather than substring-matching a flattened string.
@@ -61,6 +62,20 @@ cat > "$BIN/codex" <<'STUB'
 #!/bin/bash
 printf '%s\n' "$@" > "$STUB_ARGV"
 stub_prompt="$(cat)"
+if [[ -n "${STUB_SLOW_BANNER:-}" ]]; then
+    # codex exits NOW; the banner reaches tee a second later from a child that
+    # kept stderr. Deterministic, no reliance on machine load.
+    { sleep 1
+      echo "OpenAI Codex v0.0.0-stub"
+      echo "--------"
+      echo "session id: ${STUB_SID:-11111111-2222-4333-8444-555555555555}"
+      echo "--------"
+      sleep 2
+    } >&2 &
+    echo "$!" > "$STUB_ORPHAN_PIDFILE"
+    printf 'codex reply\n'
+    exit "${STUB_RC:-0}"
+fi
 # The real codex puts its banner -- AND its echo of the prompt and reply -- on
 # stderr, and ONLY the reply on stdout. The stub reproduces both halves of that,
 # because the capture path depends on the split AND on the ordering: the banner
@@ -209,13 +224,27 @@ STUB_SID=1e5a4dcb-0000-4000-8000-00000000000c run codex --session-id-file "$T/si
 is  "captures the id from the banner"  "$(cat "$T/sid")" "1e5a4dcb-0000-4000-8000-00000000000c"
 is  "stdout is the reply and only that" "$out" "codex reply"
 has "stderr still passes through live"  "$err" "OpenAI Codex v0.0.0-stub"
-# Banner printed, THEN a non-zero exit -- an auth error, an unknown model, a
-# refused sandbox. The id is real and must survive the failure: shortening the
-# poll on a non-zero status would race tee's flush and lose it.
-STUB_RC=7 STUB_SID=1e5a4dcb-0000-4000-8000-000000000007 run codex --session-id-file "$T/sid"
+STUB_RC=7 run codex --session-id-file "$T/sid"
 is "propagates the agent's exit status" "$rc" "7"
-is "...and still captures an id from a FAILED run" \
+
+# Banner printed, THEN a non-zero exit -- an auth error, an unknown model, a
+# refused sandbox. The id is real and must survive the failure, so the poll must
+# NOT be shortened on a non-zero status: what it waits for is tee's flush, which
+# has nothing to do with the agent's exit code.
+#
+# The banner deliberately arrives LATE, from a descendant that outlives codex.
+# The obvious version of this test -- ordinary stub, exit 7 -- cannot fail: the
+# stub emits and exits in the same instant, so tee always wins on an idle
+# machine and the assertion passes with the guard broken. Measured on this
+# shape: a one-shot poll loses the id 4 times out of 4.
+: > "$T/orphanpid"
+STUB_SLOW_BANNER=1 STUB_RC=7 STUB_SID=1e5a4dcb-0000-4000-8000-000000000007 \
+  STUB_ORPHAN_PIDFILE="$T/orphanpid" run codex --session-id-file "$T/sid"
+orphan="$(cat "$T/orphanpid" 2>/dev/null || true)"
+[[ -n "$orphan" ]] && kill -KILL "$orphan" 2>/dev/null
+is "late banner + agent exited 7: id still captured" \
    "$(cat "$T/sid")" "1e5a4dcb-0000-4000-8000-000000000007"
+is "late banner + agent exited 7: status still 7" "$rc" "7"
 
 # `timeout` is how every real caller runs this. Without signal forwarding the
 # wrapper would die and leave codex orphaned -- still running, still billing.
@@ -451,6 +480,7 @@ if locale -a 2>/dev/null | grep -qix 'en_US\.utf-*8'; then
     if (( rc == 1 )) && [[ -z "$argv" ]]; then ok "non-ASCII id rejected under en_US.UTF-8"
     else bad "non-ASCII id rejected under en_US.UTF-8" "rc=$rc argv=[$argv]"; fi
 else
+    skipped=$(( skipped + 1 ))
     printf '    %-42s SKIP  (en_US.UTF-8 not generated)\n' "non-ASCII id rejected under en_US.UTF-8"
 fi
 run codex --session-id-file ""
@@ -473,7 +503,9 @@ done
 
 echo
 if (( fails == 0 )); then
-    echo "PASS  $checked assertions"
+    note=""
+    (( skipped > 0 )) && note=" ($skipped skipped)"
+    echo "PASS  $checked assertions$note"
     exit 0
 fi
 echo "FAIL  $fails of $checked assertions" >&2

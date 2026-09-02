@@ -219,7 +219,10 @@ mv_no_target_dir=()
 # variable whose capture file is already unlinked, so it would be gone. Same
 # reasoning as cleanup() and record_session_id: nothing about bookkeeping,
 # diagnostics included, may cost the caller the reply.
-warn() { echo "$*" >&2 || true; return 0; }
+# printf rather than echo: a message that happens to be exactly "-n"/"-e"/"-E"
+# would be eaten as a flag. No current caller is at risk; the next one should
+# not have to know that.
+warn() { printf '%s\n' "$*" >&2 || true; return 0; }
 
 cleanup() {
     if [[ -n "$_cleanup_prompt_file" ]]; then rm -f "$_cleanup_prompt_file" || true; fi
