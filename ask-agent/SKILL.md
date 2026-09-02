@@ -180,7 +180,10 @@ P
 timeout 900 ~/.claude/skills/ask-agent/scripts/agent-query.sh codex \
     --session-id-file "$council/codex.sid" --prompt-file "$prompt"
 
-seat=$(cat "$council/codex.sid")      # keep it in a variable, not only a file
+# 2>/dev/null: on a run that failed before reaching the agent the file is left
+# untouched, which can mean it does not exist. Unguarded, that aborts a caller
+# running under `set -e`.
+seat=$(cat "$council/codex.sid" 2>/dev/null || true)   # keep it in a variable too
 [[ -n "$seat" ]] || { echo "round 1 yielded no session id; cannot chain" >&2; }
 
 # Round 2..n: the fix delta ONLY. The seat still remembers round 1, so there is
@@ -365,6 +368,10 @@ What it pins, and why each one is there:
   a run**, the 0600 scratch file created beside it at startup cannot be removed
   and is left behind. Same residual class as the agy staging directory. The run
   itself is unaffected: the reply is printed and the status is 5.
+- **The id file is written by rename, so it gets a fresh inode each round.** A
+  destination deliberately made group-readable (a sid file shared between two
+  processes) reverts to 0600 on the first write. One file per seat, which is
+  the advice anyway, makes this moot.
 - **A signal arriving between arming the traps and learning the child's pid** is
   remembered and forwarded once the pid is known, but only the *last* such
   signal is kept if several distinct ones land in that window. Forwarding one

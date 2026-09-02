@@ -213,6 +213,14 @@ mv_no_target_dir=()
 # would rewrite the sentinel's 3 -- and 143/129/137 -- to a meaningless 1.
 # Both halves are needed. `|| true` keeps `set -e` from killing the trap at the
 # failing rm, and `return 0` covers the guards themselves being false.
+# Every diagnostic printed BEFORE the reply goes through this. Under `set -e` a
+# caller that closed stderr would otherwise abort the script in between having
+# the answer and printing it -- and on the agy path the reply is held in a
+# variable whose capture file is already unlinked, so it would be gone. Same
+# reasoning as cleanup() and record_session_id: nothing about bookkeeping,
+# diagnostics included, may cost the caller the reply.
+warn() { echo "$*" >&2 || true; return 0; }
+
 cleanup() {
     if [[ -n "$_cleanup_prompt_file" ]]; then rm -f "$_cleanup_prompt_file" || true; fi
     if [[ -n "$_cleanup_agy_dir" ]]; then rm -rf -- "$_cleanup_agy_dir" || true; fi
@@ -327,7 +335,15 @@ record_session_id() {
         if [[ -n "$id" ]]; then
             printf '%s\n' "$id" > "$sid_tmp" || wrote=""
         else
-            : > "$sid_tmp" || wrote=""
+            # `printf ''`, NOT `: >`. `:` is a POSIX *special builtin*, and a
+            # redirection error on a special builtin exits the shell outright --
+            # before the `||` can run. Bash takes that path whenever
+            # POSIXLY_CORRECT is in the environment, even set to empty.
+            # Measured: `: > /nonexistent` with POSIXLY_CORRECT killed the shell
+            # and the guard never fired, while `printf ''` and `true` survived.
+            # It was the one statement in a function whose header promises it
+            # cannot fail that actually could.
+            printf '' > "$sid_tmp" || wrote=""
         fi
         if [[ -n "$wrote" ]] && mv -f "${mv_no_target_dir[@]}" -- "$sid_tmp" "$session_id_file"; then
             sid_tmp=""     # renamed away; nothing left for cleanup to remove
@@ -662,10 +678,10 @@ if [[ -n "$prompt_via_file" ]]; then
         if (( agy_attempt == 1 && status == 0 )) &&
            [[ "$response" != *"$agy_sentinel"* ]]; then
             if [[ -z "$response" ]]; then
-                echo "Note: agy produced no output and exited 0 (headless tool permission auto-denied); retrying once" >&2
+                warn "Note: agy produced no output and exited 0 (headless tool permission auto-denied); retrying once"
                 continue
             elif [[ "$response" == *"a tool required the"* && "$response" == *permission* ]]; then
-                echo "Note: agy reported an auto-denied tool permission in its output (it tried to run a command rather than read the file); retrying once" >&2
+                warn "Note: agy reported an auto-denied tool permission in its output (it tried to run a command rather than read the file); retrying once"
                 continue
             fi
         fi
@@ -789,11 +805,11 @@ if [[ -n "$prompt_via_file" ]]; then
         # possible answer wearing the proof-of-reading. Without this it would
         # be the only reply that returns 0 with no output at all.
         if [[ -z "$response" ]] && (( status == 0 )); then
-            echo "Error: response was the completion sentinel and nothing else" >&2
+            warn "Error: response was the completion sentinel and nothing else"
             status=3
         fi
     elif (( status == 0 )); then
-        echo "Error: response missing prompt-completion sentinel; prompt may have been read partially" >&2
+        warn "Error: response missing prompt-completion sentinel; prompt may have been read partially"
         status=3
     fi
 
@@ -845,10 +861,10 @@ if [[ -n "$prompt_via_file" ]]; then
     # sentinel was also missing: a partial read is the more fundamental problem.
     if [[ -n "$resume" ]]; then
         if [[ -z "$agy_conv" ]]; then
-            echo "Error: cannot confirm agy resumed $resume (no conversation id in its log); treat this reply as cold context" >&2
+            warn "Error: cannot confirm agy resumed $resume (no conversation id in its log); treat this reply as cold context"
             if (( status == 0 )); then status=4; fi
         elif [[ "$agy_conv" != "$resume" ]]; then
-            echo "Error: agy did NOT resume $resume -- it started $agy_conv instead, so this reply has no memory of the earlier rounds" >&2
+            warn "Error: agy did NOT resume $resume -- it started $agy_conv instead, so this reply has no memory of the earlier rounds"
             # Deliberately NOT recorded as the id to chain. Exit 4 means the
             # round is void, and the conversation agy actually made has no
             # history in it -- handing that id to the next round would quietly
@@ -861,7 +877,7 @@ if [[ -n "$prompt_via_file" ]]; then
 
     record_session_id "$agy_chainable"
     if [[ -z "$agy_conv" && -n "$session_id_file" ]]; then
-        echo "Error: could not read a conversation id out of agy's log; --session-id-file left empty" >&2
+        warn "Error: could not read a conversation id out of agy's log; --session-id-file left empty"
     fi
     if [[ -n "$sid_record_failed" ]] && (( status == 0 )); then status=5; fi
 
@@ -959,8 +975,13 @@ wait_forwarding_signals "$codex_pid"   # sets `status`
 # have to trade a false negative (a long preamble pushes the banner past it)
 # against a false positive (a short adversarial prompt lands inside it); the
 # delimiters have neither problem.
+# One check rather than the full window when codex already failed (a missing
+# binary exits 127 instantly): nothing further is coming, so waiting for it only
+# delays the caller's own error by five seconds.
+codex_poll=50
+(( status == 0 )) || codex_poll=1
 codex_sid=""
-for _ in $(seq 1 50); do
+for _ in $(seq 1 "$codex_poll"); do
     codex_sid="$(awk '/^-{4,}$/{n++; next} n==1' "$codex_err" 2>/dev/null |
                  grep -m1 -oE '^session id: [0-9a-fA-F-]+' || true)"
     codex_sid="${codex_sid#session id: }"
@@ -973,7 +994,7 @@ done
 
 record_session_id "$codex_sid"
 if [[ -z "$codex_sid" ]]; then
-    echo "Error: could not read a session id out of codex's banner; --session-id-file left empty" >&2
+    warn "Error: could not read a session id out of codex's banner; --session-id-file left empty"
 fi
 if [[ -n "$sid_record_failed" ]] && (( status == 0 )); then status=5; fi
 

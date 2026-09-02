@@ -60,15 +60,21 @@ STUB
 cat > "$BIN/codex" <<'STUB'
 #!/bin/bash
 printf '%s\n' "$@" > "$STUB_ARGV"
-cat > /dev/null
-# The real codex puts its banner -- and its echo of the prompt and reply -- on
-# stderr, and ONLY the reply on stdout. The stub reproduces that split, because
-# the capture path depends on it.
+stub_prompt="$(cat)"
+# The real codex puts its banner -- AND its echo of the prompt and reply -- on
+# stderr, and ONLY the reply on stdout. The stub reproduces both halves of that,
+# because the capture path depends on the split AND on the ordering: the banner
+# sits between two delimiter lines, the prompt echo comes after the second one.
+# Echoing the prompt is not decoration -- without it the "a prompt cannot supply
+# its own session id" case below is vacuous.
 {
   echo "OpenAI Codex v0.0.0-stub"
   echo "--------"
   [[ -n "${STUB_NO_BANNER:-}" ]] || echo "session id: ${STUB_SID:-11111111-2222-4333-8444-555555555555}"
   echo "--------"
+  echo "user"
+  printf '%s\n' "$stub_prompt"
+  echo "codex"
 } >&2
 if [[ -n "${STUB_SLEEP:-}" ]]; then
     echo "$$" > "$STUB_PIDFILE"
@@ -344,6 +350,21 @@ else
         "rc=$rc contents=[$(find "$T/sid3" -type f 2>/dev/null)]"
 fi
 
+# The empty-id write specifically, under POSIX mode. `:` is a POSIX special
+# builtin, so `: > file` with a failing redirect exits the shell BEFORE its `||`
+# guard -- and bash takes that path whenever POSIXLY_CORRECT is in the
+# environment, even empty. That branch is reached exactly on the agy rounds that
+# already have a real reply in hand.
+dirify2="$T/dirify2"; mkdir -p "$dirify2"
+: > "$T/argv"
+POSIXLY_CORRECT=1 STUB_DIRIFY_TMP="$dirify2" STUB_NO_CONV=1 \
+PATH="$BIN:$PATH" STUB_ARGV="$T/argv" \
+    "$SRC" agy --resume 1e5a4dcb-0000-4000-8000-00000000000a \
+    --session-id-file "$dirify2/sid" -f "$T/prompt.txt" > "$T/out" 2>/dev/null
+rc=$?
+is "POSIX mode + failed empty write: reply survives" "$(cat "$T/out")" "agy reply"
+is "POSIX mode + failed empty write: exit 4"         "$rc" "4"
+
 echo "  a run that never reached an agent must not clobber the id:"
 printf '1e5a4dcb-0000-4000-8000-00000000000a\n' > "$T/sid"
 : > "$T/argv"
@@ -396,13 +417,46 @@ else bad "returns promptly, does not wait on tee" "took ${elapsed}s"; fi
 is "...and still captured the id" "$(cat "$T/sid")" "1e5a4dcb-0000-4000-8000-00000000000f"
 is "...and still delivered the reply" "$out" "codex reply"
 
-# A prompt that quotes this repo's own docs contains literal "session id: <uuid>"
-# lines, and codex echoes the prompt to stderr. The parser must not take one.
+echo "  a prompt must not be able to choose the session id:"
+# codex echoes the PROMPT to its stderr, and a prompt quoting this repo's own
+# docs carries literal "session id: <uuid>" lines at column 0 -- the council
+# review of this very PR sent some. The parser reads the block between the
+# banner's two delimiters, and the echo lands after the second one.
 printf 'see docs\nsession id: 12345678-1234-4234-8234-123456789abc\nend\n' > "$T/evil.txt"
 : > "$T/argv"
 PATH="$BIN:$PATH" STUB_ARGV="$T/argv" STUB_NO_BANNER=1 \
     "$SRC" codex --session-id-file "$T/sid" -f "$T/evil.txt" >/dev/null 2>&1
-is "a prompt cannot supply its own session id" "$(cat "$T/sid")" ""
+is "no banner: the prompt's id is NOT taken" "$(cat "$T/sid")" ""
+# And with a real banner present, the banner wins over the prompt's decoy.
+: > "$T/argv"
+STUB_SID=1e5a4dcb-0000-4000-8000-00000000000b \
+PATH="$BIN:$PATH" STUB_ARGV="$T/argv" \
+    "$SRC" codex --session-id-file "$T/sid" -f "$T/evil.txt" >/dev/null 2>&1
+is "banner beats the prompt's decoy id" "$(cat "$T/sid")" "1e5a4dcb-0000-4000-8000-00000000000b"
+
+echo "  guards that were previously unpinned:"
+# The locale hardening: a non-ASCII id must be rejected under a UTF-8 locale,
+# where an `=~` bracket RANGE would have accepted it by collation.
+LC_ALL=en_US.UTF-8 run codex --resume "ab$(printf '\xc3\xa9')cd"
+if (( rc == 1 )) && [[ -z "$argv" ]]; then ok "non-ASCII id rejected under en_US.UTF-8"
+else bad "non-ASCII id rejected under en_US.UTF-8" "rc=$rc argv=[$argv]"; fi
+run codex --session-id-file ""
+if (( rc == 1 )) && [[ -z "$argv" ]]; then ok "rejects an empty --session-id-file path"
+else bad "rejects an empty --session-id-file path" "rc=$rc"; fi
+
+echo "  a closed stderr must not cost the reply on ANY agy branch:"
+# record_session_id is guarded, but so must be every diagnostic printed before
+# the reply -- these are the branches that print one and then still owe an answer.
+for case in no_conv:STUB_NO_CONV=1 mismatch:STUB_CONV=99999999-9999-4999-8999-999999999999; do
+    name="${case%%:*}"; envset="${case#*:}"
+    : > "$T/argv"
+    env "$envset" PATH="$BIN:$PATH" STUB_ARGV="$T/argv" \
+        "$SRC" agy --resume 1e5a4dcb-0000-4000-8000-00000000000a --session-id-file "$T/sid" \
+        -f "$T/prompt.txt" > "$T/out" 2>&-
+    rc=$?
+    is "closed stderr, $name branch: reply survives" "$(cat "$T/out")" "agy reply"
+    is "closed stderr, $name branch: still exit 4"   "$rc" "4"
+done
 
 echo
 if (( fails == 0 )); then
