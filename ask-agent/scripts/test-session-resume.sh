@@ -209,8 +209,13 @@ STUB_SID=1e5a4dcb-0000-4000-8000-00000000000c run codex --session-id-file "$T/si
 is  "captures the id from the banner"  "$(cat "$T/sid")" "1e5a4dcb-0000-4000-8000-00000000000c"
 is  "stdout is the reply and only that" "$out" "codex reply"
 has "stderr still passes through live"  "$err" "OpenAI Codex v0.0.0-stub"
-STUB_RC=7 run codex --session-id-file "$T/sid"
+# Banner printed, THEN a non-zero exit -- an auth error, an unknown model, a
+# refused sandbox. The id is real and must survive the failure: shortening the
+# poll on a non-zero status would race tee's flush and lose it.
+STUB_RC=7 STUB_SID=1e5a4dcb-0000-4000-8000-000000000007 run codex --session-id-file "$T/sid"
 is "propagates the agent's exit status" "$rc" "7"
+is "...and still captures an id from a FAILED run" \
+   "$(cat "$T/sid")" "1e5a4dcb-0000-4000-8000-000000000007"
 
 # `timeout` is how every real caller runs this. Without signal forwarding the
 # wrapper would die and leave codex orphaned -- still running, still billing.
@@ -437,9 +442,17 @@ is "banner beats the prompt's decoy id" "$(cat "$T/sid")" "1e5a4dcb-0000-4000-80
 echo "  guards that were previously unpinned:"
 # The locale hardening: a non-ASCII id must be rejected under a UTF-8 locale,
 # where an `=~` bracket RANGE would have accepted it by collation.
-LC_ALL=en_US.UTF-8 run codex --resume "ab$(printf '\xc3\xa9')cd"
-if (( rc == 1 )) && [[ -z "$argv" ]]; then ok "non-ASCII id rejected under en_US.UTF-8"
-else bad "non-ASCII id rejected under en_US.UTF-8" "rc=$rc argv=[$argv]"; fi
+# Only en_US.UTF-8 discriminates here: it is the collation that makes an accented
+# letter fall INSIDE an `=~` [A-Za-z] range. Under C/C.UTF-8 the old code
+# rejected it too, so running there would pass vacuously -- reported as skipped
+# rather than counted as a pass.
+if locale -a 2>/dev/null | grep -qix 'en_US\.utf-*8'; then
+    LC_ALL=en_US.UTF-8 run codex --resume "ab$(printf '\xc3\xa9')cd"
+    if (( rc == 1 )) && [[ -z "$argv" ]]; then ok "non-ASCII id rejected under en_US.UTF-8"
+    else bad "non-ASCII id rejected under en_US.UTF-8" "rc=$rc argv=[$argv]"; fi
+else
+    printf '    %-42s SKIP  (en_US.UTF-8 not generated)\n' "non-ASCII id rejected under en_US.UTF-8"
+fi
 run codex --session-id-file ""
 if (( rc == 1 )) && [[ -z "$argv" ]]; then ok "rejects an empty --session-id-file path"
 else bad "rejects an empty --session-id-file path" "rc=$rc"; fi

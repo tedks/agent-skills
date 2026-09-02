@@ -975,13 +975,15 @@ wait_forwarding_signals "$codex_pid"   # sets `status`
 # have to trade a false negative (a long preamble pushes the banner past it)
 # against a false positive (a short adversarial prompt lands inside it); the
 # delimiters have neither problem.
-# One check rather than the full window when codex already failed (a missing
-# binary exits 127 instantly): nothing further is coming, so waiting for it only
-# delays the caller's own error by five seconds.
-codex_poll=50
-(( status == 0 )) || codex_poll=1
+# The window is NOT shortened when codex exited non-zero, tempting as that is
+# (a missing binary exits 127 instantly and then costs five seconds of polling
+# for a banner that will never come). A run can print a perfectly good banner
+# and THEN fail fast -- an auth error, an unknown model, a refused sandbox --
+# and tee has had microseconds to flush it. Keying the poll on the exit status
+# reintroduces exactly the tee race the poll exists to survive, and trades a
+# five-second delay on an error path for a lost session id on a real one.
 codex_sid=""
-for _ in $(seq 1 "$codex_poll"); do
+for _ in $(seq 1 50); do
     codex_sid="$(awk '/^-{4,}$/{n++; next} n==1' "$codex_err" 2>/dev/null |
                  grep -m1 -oE '^session id: [0-9a-fA-F-]+' || true)"
     codex_sid="${codex_sid#session id: }"
