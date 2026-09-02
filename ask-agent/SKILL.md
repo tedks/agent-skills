@@ -129,7 +129,8 @@ All three **append**, so `--resume` mutates the session's history rather than
 branching it — which is what a council round wants, but worth knowing before
 pointing it at a session you care about. The non-mutating halves exist
 (`codex exec fork <id>`, `claude --fork-session`) and are deliberately **not**
-wrapped here.
+wrapped here. Note `codex exec fork` — the `exec` one — runs headless and needs
+no terminal; the bare `codex fork` is the interactive picker.
 
 Every claim above was checked rather than inferred; commands, byte counts and
 file counts are in [docs/ask-agent-session-resume.md](../../../docs/ask-agent-session-resume.md).
@@ -210,6 +211,12 @@ Points that matter in a council:
   without the earlier rounds; its "no new findings" is not a convergence signal
   and the round should be redone (or restarted fresh, with context re-fed).
 - **One sid file per seat.** Seats run in parallel; a shared file is a race.
+- **One round at a time per seat.** A codex thread has a single active writer:
+  a second `resume` of the same seat while the first is still running — or while
+  that thread's interactive TUI is open — fails with `thread-store conflict:
+  thread <id> already has an active writer` and exit 1. Different seats in
+  parallel is fine and is what a council does; the same seat twice at once is
+  not. It fails loudly, so it needs no guard, but it will stop a round.
 - **Fresh seats need no `--resume`.** Round 1 just asks for the id.
 - **Keep the id for the whole fixpoint loop, not just one round.** The point is
   that round 4 still remembers round 1, which is what makes "re-run the council
