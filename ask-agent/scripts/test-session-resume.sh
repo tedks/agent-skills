@@ -70,7 +70,9 @@ if [[ -n "${STUB_SLOW_BANNER:-}" ]]; then
       echo "--------"
       echo "session id: ${STUB_SID:-11111111-2222-4333-8444-555555555555}"
       echo "--------"
-      sleep 2
+      # exec: so the recorded $! IS the sleep, and killing it cannot leave a
+      # foreground child of the subshell running on past the suite.
+      exec sleep 2
     } >&2 &
     echo "$!" > "$STUB_ORPHAN_PIDFILE"
     printf 'codex reply\n'
@@ -93,7 +95,10 @@ fi
 } >&2
 if [[ -n "${STUB_SLEEP:-}" ]]; then
     echo "$$" > "$STUB_PIDFILE"
-    sleep "$STUB_SLEEP"
+    # exec, so the pid the test watches IS the sleep. Without it the stub's
+    # death leaves the sleep orphaned for its full 30s on every suite run, and
+    # the "did the child die?" assertion watches the wrong process.
+    exec sleep "$STUB_SLEEP"
 fi
 # A descendant that outlives codex and keeps stderr -- an MCP server, a sandbox
 # helper, a command the model backgrounded. It pins tee's pipe open.
@@ -502,11 +507,11 @@ for case in no_conv:STUB_NO_CONV=1 mismatch:STUB_CONV=99999999-9999-4999-8999-99
 done
 
 echo
+note=""
+(( skipped > 0 )) && note=" ($skipped skipped)"
 if (( fails == 0 )); then
-    note=""
-    (( skipped > 0 )) && note=" ($skipped skipped)"
     echo "PASS  $checked assertions$note"
     exit 0
 fi
-echo "FAIL  $fails of $checked assertions" >&2
+echo "FAIL  $fails of $checked assertions$note" >&2
 exit 1
