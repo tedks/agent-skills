@@ -56,6 +56,34 @@ codex_trust_modal_active() {
        "$last_nonempty" == *"enter Confirm"* ]]
 }
 
+# Claude Code's workspace trust dialog. Unlike agy's, its default button is
+# "No, exit", so a blind Enter does not wrongly grant trust -- it exits, tmux
+# reaps the window, and the spawn reports success having launched nothing.
+# Worse, that answer is persisted as hasTrustDialogAccepted=false in
+# ~/.claude.json, and because trust is inherited by descendants from the
+# nearest ancestor that has an entry, one stray Enter silently declines an
+# entire subtree on every future run. See claude-trust-dir.sh to inspect or
+# repair that state.
+claude_trust_modal_active() {
+    local active_tail last_nonempty
+    active_tail=$(printf '%s\n' "$1" | tail -n 20)
+    last_nonempty=$(printf '%s\n' "$active_tail" | awk 'NF { line = $0 } END { print line }')
+    [[ "$active_tail" == *"Is this a project you created or one you trust?"* && \
+       "$last_nonempty" == *"Enter to confirm"* ]]
+}
+
+# Claude's composer. The trust dialog draws its selection cursor with the same
+# glyph, so this must only ever be consulted after the modal check above.
+# Requiring that the bottom line is not a modal footer means a reworded dialog
+# still fails this test rather than being mistaken for a live composer.
+claude_composer_ready() {
+    local active_tail last_nonempty
+    active_tail=$(printf '%s\n' "$1" | tail -n 20)
+    last_nonempty=$(printf '%s\n' "$active_tail" | awk 'NF { line = $0 } END { print line }')
+    [[ "$last_nonempty" != *"Enter to confirm"* ]] && \
+        printf '%s\n' "$active_tail" | grep -q '❯'
+}
+
 usage() {
     echo "Usage: agent-spawn.sh <session:window> <agent> [directory] [prompt]" >&2
     echo "       agent-spawn.sh <session:window> <agent> [directory] --prompt-file <file>" >&2
@@ -64,6 +92,7 @@ usage() {
     echo "  directory: working directory (default: current)" >&2
     echo "  prompt: initial prompt for the agent" >&2
     echo "  --prompt-file: read prompt from file (avoids ARG_MAX)" >&2
+    echo "  --trust: pre-grant Claude Code workspace trust for <directory> (claude only)" >&2
     echo "  --fork-session: interactively fork a Codex session UUID" >&2
     echo "  --compact-prompt-file: compact inherited history with this prompt before the task" >&2
     echo "  --compact-timeout: seconds to wait for structured compaction completion" >&2
@@ -85,6 +114,7 @@ shift 2
 prompt_file=""
 prompt=""
 directory="."
+trust_directory=0
 fork_session=""
 compact_prompt_file=""
 compact_timeout=600
@@ -114,6 +144,10 @@ trap cleanup EXIT
 positional=()
 while [[ $# -gt 0 ]]; do
     case "$1" in
+        --trust)
+            trust_directory=1
+            shift
+            ;;
         --prompt-file|-f)
             if [[ $# -lt 2 || -z "$2" ]]; then
                 echo "Error: --prompt-file requires a file path" >&2
@@ -325,6 +359,19 @@ if [[ -n "$fork_session" ]]; then
 fi
 printf -v agent_shell_command '%q ' "${agent_command[@]}"
 
+# Granting workspace trust happens here, before launch, and only because the
+# caller asked for it -- never by answering a modal after the fact.
+if [[ "$trust_directory" -eq 1 ]]; then
+    if [[ "$agent" != "claude" ]]; then
+        echo "Error: --trust applies to claude only; agy and codex keep their own trust stores." >&2
+        exit 1
+    fi
+    if ! "$SCRIPT_DIR/claude-trust-dir.sh" "$directory"; then
+        echo "Error: could not grant workspace trust for $directory; not launching." >&2
+        exit 1
+    fi
+fi
+
 # Start the agent in a new tmux window, then deliver the prompt via
 # load-buffer/paste-buffer. This avoids ARG_MAX at every boundary:
 # the tmux command, the shell inside tmux, and the agent's execve.
@@ -334,7 +381,10 @@ if [[ -n "$prompt_file" ]]; then
     # Wait for the actual composer before sending anything. In particular,
     # Codex may show an update chooser first; the old fixed sleep pasted the
     # task into that chooser and its Enter selected "Update now".
-    if [[ "$agent" == "agy" || "$agent" == "codex" ]]; then
+    # Every supported agent has a readiness probe below. The else branch
+    # survives as a fallback so a future agent added to the validator above
+    # degrades to the old fixed sleep instead of hanging here.
+    if [[ "$agent" == "agy" || "$agent" == "codex" || "$agent" == "claude" ]]; then
         # agy paints a full-screen TUI and discards anything delivered before it
         # is listening, so a flat `sleep 2` races it -- on a cold start the
         # prompt vanishes and the spawn still reports success.
@@ -387,6 +437,20 @@ if [[ -n "$prompt_file" ]]; then
                 # line. This distinguishes it from a stale composer in restored
                 # history when a modal is actually on top.
                 if codex_composer_ready "$pane_tail"; then
+                    agent_ready=1
+                    break
+                fi
+            elif [[ "$agent" == "claude" ]]; then
+                if claude_trust_modal_active "$pane_tail"; then
+                    echo "Error: Claude Code is asking whether to trust this directory before it will run:" >&2
+                    echo "    $directory" >&2
+                    echo "  Nothing was pasted, and no key was sent. Its default button is" >&2
+                    echo "  \"No, exit\", so an automated Enter would not merely fail to launch --" >&2
+                    echo "  it would record a durable decline for this whole directory tree." >&2
+                    echo "  Answer it yourself, or re-run with --trust to grant it explicitly." >&2
+                    exit 1
+                fi
+                if claude_composer_ready "$pane_tail"; then
                     agent_ready=1
                     break
                 fi

@@ -25,6 +25,8 @@ fan-out workflows where you want multiple agents working simultaneously.
 - `<agent>`: The agent to spawn (`claude`, `codex`, `agy`)
 - `[directory]`: Working directory (default: current)
 - `[prompt]`: Initial prompt for the agent
+- `--trust`: Grant Claude Code workspace trust for `[directory]` before
+  launching, instead of leaving a modal for someone to answer; `claude` only
 - `--fork-session <uuid>`: Interactively fork this Codex session while
   preserving its transcript; valid only with `codex`
 - `--compact-prompt-file <file>`: Before delivering the task, run a manual
@@ -242,8 +244,8 @@ Spawn any supported agent:
 ~/.claude/skills/spawn-agent/scripts/agent-spawn.sh <session:window> codex [directory] --fork-session <uuid> --compact-prompt-file <file> --rollout-path-file <file> --recap-cursor-file <file> --prompt-file <file>
 ```
 
-For Codex and agy, the script identifies the live composer before sending any
-input. If an update, trust, or other startup dialog is present, it fails without
+For every supported agent, the script identifies the live composer before sending
+any input. If an update, trust, or other startup dialog is present, it fails without
 pasting or pressing Enter. Resolve the operator decision in that window, then
 send the prompt explicitly or start again.
 
@@ -321,6 +323,20 @@ Send a message to a running Claude instance:
 Uses tmux load-buffer/paste-buffer for the message body (avoids ARG_MAX),
 then sends Enter with a 1.5 second delay to avoid the swallowed-Enter issue.
 
+### claude-trust-dir.sh
+
+Inspect or set Claude Code's workspace trust (see the trust section below):
+```bash
+~/.claude/skills/spawn-agent/scripts/claude-trust-dir.sh --list
+~/.claude/skills/spawn-agent/scripts/claude-trust-dir.sh --check <dir>...
+~/.claude/skills/spawn-agent/scripts/claude-trust-dir.sh [--dry-run] <dir>...
+```
+
+`--check` reports effective trust and names the ancestor that supplied it.
+Setting is idempotent, takes a lock, and replaces `~/.claude.json` by atomic
+rename. It warns when Claude sessions are live, because each one holds that
+file in memory and may flush its own copy over the change.
+
 ## Detecting Idle State
 
 Claude Code has an `idle_prompt` notification hook that fires after 60+ seconds
@@ -359,6 +375,38 @@ of waiting for user input. To detect when agents are ready:
 - Use claude-send.sh to send messages to running agents
 - Socket detection is automatic -- you don't need to think about `-L` or `-S`
 - Prompts are passed via temp files to avoid ARG_MAX limits
+
+## Claude Code and the workspace trust prompt
+
+Claude Code has its own dialog, shown the first time it starts somewhere whose
+trust it cannot resolve:
+
+```
+Quick safety check: Is this a project you created or one you trust?
+Claude Code'll be able to read, edit, and execute files here.
+
+❯ No, exit
+  Yes, I trust this folder
+
+Enter to confirm · Esc to cancel
+```
+
+The default button is **"No, exit"** — the opposite of agy's. A blind Enter
+therefore cannot grant trust by accident. What it does instead is worse in a
+quieter way: the window exits, tmux reaps it, an unguarded spawner reports
+success having launched nothing, and the refusal is written to disk as
+`hasTrustDialogAccepted: false`.
+
+**Trust is inherited, and the nearest ancestor wins.** A directory with no
+entry of its own takes the value of the closest ancestor that has one. So
+`~/Projects: true` blanket-trusts everything beneath it — but one stray decline
+on an intermediate directory overrides that for its entire subtree, on every
+future run, until somebody repairs it. There is no CLI flag and no
+settings.json key for any of this: `~/.claude.json` is the only store, and it
+is Claude Code's own state file rather than a supported configuration surface.
+
+Use `claude-trust-dir.sh --check <dir>` to see what a directory actually
+resolves to and why, and `--trust` to grant it deliberately before launch.
 
 ## agy and the workspace trust prompt
 
