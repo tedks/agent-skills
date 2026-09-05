@@ -76,7 +76,9 @@ def complete_record_offset(path: Path) -> int:
         return 0
 
 
-def follow_records(path: Path, offset: int, timeout: float) -> Iterator[dict[str, Any]]:
+def follow_records(
+    path: Path, offset: int, timeout: float, *, restart_on_shrink: bool = False
+) -> Iterator[dict[str, Any]]:
     """Yield complete JSON objects appended at or after offset."""
     deadline = time.monotonic() + timeout
     pending = b""
@@ -85,6 +87,8 @@ def follow_records(path: Path, offset: int, timeout: float) -> Iterator[dict[str
         try:
             size = path.stat().st_size
             if size < offset:
+                if not restart_on_shrink:
+                    raise WatchError(f"rollout was truncated while being watched: {path}")
                 # A manual compaction can replace the inherited rollout with a
                 # smaller compacted transcript as the next turn begins. Any
                 # partial bytes belong to the old file image, so discard them
@@ -211,7 +215,9 @@ def main() -> int:
             raise WatchError("recap marker must be one non-empty line")
 
         offset = args.after_byte
-        for record in follow_records(path, offset, args.timeout):
+        for record in follow_records(
+            path, offset, args.timeout, restart_on_shrink=args.command == "recap"
+        ):
             if args.command == "recap":
                 message = final_message(record, args.marker)
                 if message is not None:

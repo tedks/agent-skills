@@ -396,4 +396,20 @@ printf '%s\n' "$matching" >> "$TRUNCATED_JSONL"
 wait "$truncated_pid"
 [[ "$(<"$TRUNCATED_OUT")" == "$EXPECTED" ]]
 
+# Compaction events have no unique marker, so a shrink must fail closed rather
+# than rescan and accidentally accept an inherited context_compacted event.
+printf '%04096d\n' 0 > "$TRUNCATED_JSONL"
+truncated_cursor=$(wc -c < "$TRUNCATED_JSONL")
+"$WATCH" compaction "$TRUNCATED_JSONL" "$truncated_cursor" 5 \
+    > /dev/null 2> "$STDERR" &
+truncated_pid=$!
+/bin/sleep 0.3
+printf '%s\n' '{"type":"event_msg","payload":{"type":"context_compacted"}}' \
+    > "$TRUNCATED_JSONL"
+if wait "$truncated_pid"; then
+    echo 'FAIL: compaction watcher accepted an event after rollout truncation' >&2
+    exit 1
+fi
+grep -Fq 'rollout was truncated' "$STDERR"
+
 echo 'PASS: Codex fork spawning, launch compaction, and JSONL recap watching'
