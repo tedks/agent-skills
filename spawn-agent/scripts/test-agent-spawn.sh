@@ -96,6 +96,24 @@ case "${1:-}" in
             agy-ready)
                 printf '%s\n' '────────────────' 'Type your message' '? for shortcuts'
                 ;;
+            claude-ready)
+                printf '%s\n' '──────────────────────' '❯ ' '──────────────────────' '  bypass permissions on'
+                ;;
+            # Claude's trust dialog at a comfortable width.
+            claude-trust)
+                printf '%s\n' 'Quick safety check: Is this a project you created or one you trust?' \
+                    "Claude Code'll be able to read, edit, and execute files here." \
+                    '❯ No, exit' '  Yes, I trust this folder' 'Enter to confirm · Esc to cancel'
+                ;;
+            # The same dialog re-flowed to 33 columns, which is what tmux gives
+            # when a small client attaches to a shared session. The footer wraps,
+            # so "Enter to confirm" is no longer the last line and the long body
+            # sentence is split -- the two conditions that together let a wrapped
+            # dialog read as a ready composer and get an Enter sent into it.
+            claude-trust-wrapped)
+                printf '%s\n' 'Quick safety check: Is this a' 'project you created or one' 'you trust?' \
+                    '❯ No, exit' '  Yes, I trust this folder' '' 'Enter to confirm · Esc to' 'cancel'
+                ;;
             agy-trust-over-composer)
                 printf '%s\n' '────────────────' '? for shortcuts' 'Do you trust the contents of this project?' '> Yes, I trust this folder' 'enter Confirm'
                 ;;
@@ -148,6 +166,20 @@ run_agy() {
         FAKE_PANE_MODE="$1" \
         FAKE_ROLLOUT="$ROLLOUT" \
         "$SPAWN" test:department agy "$TEST_DIR/repo with spaces" \
+        --prompt-file "$PROMPT"
+}
+
+run_claude() {
+    : > "$COMPOSER"
+    env -u TMUX \
+        PATH="$TEST_DIR/bin:$PATH" \
+        FAKE_TMUX_LOG="$LOG" \
+        FAKE_LAUNCH_FILE="$LAUNCH" \
+        FAKE_LAST_BUFFER="$LAST_BUFFER" \
+        FAKE_COMPOSER="$COMPOSER" \
+        FAKE_PANE_MODE="$1" \
+        FAKE_ROLLOUT="$ROLLOUT" \
+        "$SPAWN" test:department claude "$TEST_DIR/repo with spaces" \
         --prompt-file "$PROMPT"
 }
 
@@ -412,4 +444,47 @@ if wait "$truncated_pid"; then
 fi
 grep -Fq 'rollout was truncated' "$STDERR"
 
-echo 'PASS: Codex fork spawning, launch compaction, and JSONL recap watching'
+# Claude: a live composer accepts the prompt.
+: > "$LOG"
+run_claude claude-ready >/dev/null
+grep -q '^paste-buffer ' "$LOG"
+
+# Claude: the trust dialog is refused without sending anything. Its default
+# button is "No, exit", so an Enter here would not merely fail to launch -- it
+# would persist a decline that suppresses trust well beyond this directory.
+: > "$LOG"
+if run_claude claude-trust >/dev/null 2>"$STDERR"; then
+    echo 'FAIL: Claude trust dialog was treated as a composer' >&2
+    exit 1
+fi
+grep -Fq 'asking whether to trust' "$STDERR"
+assert_no_input
+
+# The regression that shipped in the first cut of this feature: at 33 columns
+# the dialog's footer wraps, so a detector anchored on the last line missed it
+# while the composer check matched on the shared "❯" glyph alone. tmux sizes a
+# session to its SMALLEST attached client, so a phone on the shared session is
+# enough to reach this. Must behave identically to the unwrapped case.
+: > "$LOG"
+if run_claude claude-trust-wrapped >/dev/null 2>"$STDERR"; then
+    echo 'FAIL: a wrapped Claude trust dialog was treated as a composer' >&2
+    exit 1
+fi
+grep -Fq 'asking whether to trust' "$STDERR"
+assert_no_input
+
+# --trust is rejected for a non-claude agent BEFORE any session is created.
+: > "$LOG"
+if env -u TMUX PATH="$TEST_DIR/bin:$PATH" FAKE_TMUX_LOG="$LOG" FAKE_LAUNCH_FILE="$LAUNCH" \
+    "$SPAWN" test:department codex "$TEST_DIR/repo with spaces" --trust \
+    --prompt-file "$PROMPT" >/dev/null 2>"$STDERR"; then
+    echo 'FAIL: --trust was accepted for codex' >&2
+    exit 1
+fi
+grep -Fq 'applies to claude only' "$STDERR"
+if grep -q '^new-session' "$LOG"; then
+    echo 'FAIL: --trust rejection happened after the session was created' >&2
+    exit 1
+fi
+
+echo 'PASS: Codex fork spawning, Claude trust-dialog refusal (incl. wrapped), and JSONL recap watching'

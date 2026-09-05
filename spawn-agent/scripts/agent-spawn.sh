@@ -59,28 +59,36 @@ codex_trust_modal_active() {
 # Claude Code's workspace trust dialog. Unlike agy's, its default button is
 # "No, exit", so a blind Enter does not wrongly grant trust -- it exits, tmux
 # reaps the window, and the spawn reports success having launched nothing.
-# Worse, that answer is persisted as hasTrustDialogAccepted=false in
-# ~/.claude.json, and because trust is inherited by descendants from the
-# nearest ancestor that has an entry, one stray Enter silently declines an
-# entire subtree on every future run. See claude-trust-dir.sh to inspect or
-# repair that state.
+# Worse, that answer is persisted to ~/.claude.json and suppresses trust for
+# more than just the directory it was asked about. See claude-trust-dir.sh.
+#
+# Matching is deliberately on SHORT fragments. Claude re-flows the dialog to
+# the pane width, and tmux sizes a session to its smallest attached client, so
+# a long literal silently stops matching on a narrow terminal -- which is
+# exactly when the paste would be most damaging. "No, exit" survives any width
+# a terminal can plausibly have. A false positive here only refuses to spawn;
+# a false negative pastes into the dialog. Fail closed.
 claude_trust_modal_active() {
-    local active_tail last_nonempty
-    active_tail=$(printf '%s\n' "$1" | tail -n 20)
-    last_nonempty=$(printf '%s\n' "$active_tail" | awk 'NF { line = $0 } END { print line }')
-    [[ "$active_tail" == *"Is this a project you created or one you trust?"* && \
-       "$last_nonempty" == *"Enter to confirm"* ]]
+    local active_tail
+    active_tail=$(printf '%s\n' "$1" | tail -n 25)
+    [[ "$active_tail" == *"Quick safety check"* || \
+       "$active_tail" == *"Yes, I trust this folder"* || \
+       "$active_tail" == *"No, exit"* ]]
 }
 
-# Claude's composer. The trust dialog draws its selection cursor with the same
-# glyph, so this must only ever be consulted after the modal check above.
-# Requiring that the bottom line is not a modal footer means a reworded dialog
-# still fails this test rather than being mistaken for a live composer.
+# Claude's composer, established from positive evidence the dialog cannot
+# supply -- the same three-signal discipline codex_composer_ready uses. The
+# "❯" glyph alone is NOT evidence: the dialog draws it as its selection
+# cursor, so requiring only that (plus the absence of a footer that wraps out
+# of view) let a wrapped dialog read as a live composer.
 claude_composer_ready() {
-    local active_tail last_nonempty
-    active_tail=$(printf '%s\n' "$1" | tail -n 20)
-    last_nonempty=$(printf '%s\n' "$active_tail" | awk 'NF { line = $0 } END { print line }')
-    [[ "$last_nonempty" != *"Enter to confirm"* ]] && \
+    local active_tail
+    active_tail=$(printf '%s\n' "$1" | tail -n 25)
+    # A dialog on screen is never a ready composer, at any width.
+    if claude_trust_modal_active "$1"; then
+        return 1
+    fi
+    printf '%s\n' "$active_tail" | grep -q '─' && \
         printf '%s\n' "$active_tail" | grep -q '❯'
 }
 
@@ -244,6 +252,11 @@ case "$agent" in
         ;;
 esac
 
+if [[ "$trust_directory" -eq 1 && "$agent" != "claude" ]]; then
+    echo "Error: --trust applies to claude only; agy and codex keep their own trust stores." >&2
+    exit 1
+fi
+
 if [[ -n "$fork_session" ]]; then
     if [[ "$agent" != "codex" ]]; then
         echo "Error: --fork-session is currently supported only for codex" >&2
@@ -362,10 +375,6 @@ printf -v agent_shell_command '%q ' "${agent_command[@]}"
 # Granting workspace trust happens here, before launch, and only because the
 # caller asked for it -- never by answering a modal after the fact.
 if [[ "$trust_directory" -eq 1 ]]; then
-    if [[ "$agent" != "claude" ]]; then
-        echo "Error: --trust applies to claude only; agy and codex keep their own trust stores." >&2
-        exit 1
-    fi
     if ! "$SCRIPT_DIR/claude-trust-dir.sh" "$directory"; then
         echo "Error: could not grant workspace trust for $directory; not launching." >&2
         exit 1

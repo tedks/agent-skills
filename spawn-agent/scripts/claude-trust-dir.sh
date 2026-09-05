@@ -12,11 +12,14 @@
 # in ~/.claude.json, which is Claude Code's own state file rather than a
 # documented config surface. Treat the shape as version-dependent.
 #
-# TRUST IS INHERITED, NEAREST ANCESTOR WINS. A directory with no entry of its
-# own takes the value of the closest ancestor that has one. So
-# ~/Projects=true blanket-trusts everything beneath it -- but a nearer
-# ancestor set to false overrides that for its own subtree, which is the
-# failure this script exists to inspect and repair.
+# !! DISPUTED -- DO NOT RELY ON --check UNTIL THIS IS SETTLED !!
+# This file was written against an inferred rule: "trust is inherited, nearest
+# ancestor wins". Council review of PR #111 disproved it by extracting the real
+# resolver from the installed binary: a `false` entry does NOT veto (it is
+# skipped and the walk continues up), and the walk is bounded by the git root,
+# so a `true` above that boundary never applies. `effective()` below therefore
+# disagrees with Claude in both directions. Awaiting an operator decision on
+# whether to replicate the real algorithm or stop predicting; see PR #111.
 #
 # Usage:
 #   claude-trust-dir.sh --list                     show every stored entry
@@ -26,16 +29,24 @@
 # Granting trust is an operator decision. Nothing here runs automatically:
 # agent-spawn.sh calls it only behind an explicit --trust flag.
 #
-# CONCURRENCY: every running Claude Code instance writes ~/.claude.json. This
-# script serialises its own writers with flock and replaces the file by
-# atomic rename, so it can never leave a truncated or half-written file. It
-# cannot stop a live session from later flushing its own in-memory copy over
-# the result. Prefer running it when few sessions are live, and confirm with
-# --list afterwards.
+# CONCURRENCY: every running Claude Code instance writes this file, using its
+# own lockfile protocol (<config>.lock) that flock does not participate in.
+# So the risk runs in BOTH directions: a live session can flush its copy over
+# our change, and we could clobber a setting it wrote after we read.
+#
+# Atomic rename prevents a torn file; it does not prevent a lost update. To
+# stop the second direction being SILENT, the write re-stats the file
+# immediately beforehand and refuses to replace it if it changed since we read
+# it -- turning data loss into a loud retry. A microsecond-wide window remains
+# between that check and the rename. Prefer running with few sessions live.
 
 set -euo pipefail
 
-CONFIG="${CLAUDE_CONFIG_FILE:-$HOME/.claude.json}"
+# Claude resolves its config as $CLAUDE_CONFIG_DIR/.claude.json, falling back
+# to $HOME. Honouring the same override matters: with an alternate profile in
+# play, defaulting to $HOME writes a store the launched process never reads, so
+# --trust would report success and the child would still prompt.
+CONFIG="${CLAUDE_CONFIG_FILE:-${CLAUDE_CONFIG_DIR:-$HOME}/.claude.json}"
 LOCKFILE="${CONFIG}.trust-lock"
 
 usage() {
@@ -159,6 +170,14 @@ config_path = sys.argv[1]
 targets = sys.argv[2:]
 dry_run = os.environ.get("DRY_RUN") == "1"
 
+# Fingerprint the file we are about to base our edit on, so a concurrent
+# writer between here and the rename is detected rather than silently undone.
+def fingerprint(path):
+    st = os.stat(path)
+    return (st.st_mtime_ns, st.st_size)
+
+before = fingerprint(config_path)
+
 with open(config_path) as fh:
     cfg = json.load(fh)
 
@@ -202,9 +221,20 @@ try:
         fh.flush()
         os.fsync(fh.fileno())
     os.chmod(tmp, mode)
+    # Refuse rather than clobber. Everything a live Claude wrote since we read
+    # is in the file and absent from our copy; replacing it would revert it
+    # silently while we report success.
+    if fingerprint(config_path) != before:
+        os.unlink(tmp)
+        sys.exit(
+            "\nAborted: %s changed while this ran (a live Claude Code session "
+            "wrote to it).\n  Nothing was written -- replacing it would have "
+            "silently reverted that change.\n  Re-run; it is idempotent." % config_path
+        )
     os.replace(tmp, config_path)
 except BaseException:
-    os.unlink(tmp)
+    if os.path.exists(tmp):
+        os.unlink(tmp)
     raise
 
 print(f"\nWrote {len(changed)} entr{'y' if len(changed)==1 else 'ies'} to {config_path}.")
