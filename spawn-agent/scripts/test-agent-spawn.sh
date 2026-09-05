@@ -17,6 +17,7 @@ LOG="$TEST_DIR/tmux.log"
 LAUNCH="$TEST_DIR/launch"
 STDERR="$TEST_DIR/stderr"
 LAST_BUFFER="$TEST_DIR/last-buffer"
+COMPOSER="$TEST_DIR/composer"
 ROLLOUT="$TEST_DIR/.codex/sessions/2026/09/05/rollout-2026-09-05T03-00-00-01a07050-1111-7222-8333-444444444444.jsonl"
 PARENT_ROLLOUT="$TEST_DIR/.codex/sessions/2026/09/05/rollout-2026-09-05T02-00-00-01a0702a-7b5e-71e0-bb62-287d55a7f9ba.jsonl"
 PROC_ROOT="$TEST_DIR/proc"
@@ -54,18 +55,24 @@ case "${1:-}" in
     load-buffer)
         printf '%s' "$(<"${!#}")" > "$FAKE_LAST_BUFFER"
         ;;
+    paste-buffer)
+        if [[ "${FAKE_PASTE_MODE:-normal}" != swallow ]]; then
+            printf '%s' "$(<"$FAKE_LAST_BUFFER")" > "$FAKE_COMPOSER"
+        fi
+        ;;
     send-keys)
-        if [[ "$(<"$FAKE_LAST_BUFFER")" == '/compact' && \
+        if [[ "$(<"$FAKE_COMPOSER")" == '/compact' && \
               "${FAKE_COMPACTION_MODE:-complete}" == complete ]]; then
             printf '%s\n' '{"type":"event_msg","payload":{"type":"context_compacted"}}' >> "$FAKE_ROLLOUT"
         fi
+        : > "$FAKE_COMPOSER"
         ;;
-    has-session|new-session|paste-buffer|delete-buffer)
+    has-session|new-session|delete-buffer)
         ;;
     capture-pane)
         composer='Ask Codex to do anything'
-        if [[ -f "$FAKE_LAST_BUFFER" && "$(<"$FAKE_LAST_BUFFER")" == '/compact' ]]; then
-            composer='/compact'
+        if [[ -s "$FAKE_COMPOSER" ]]; then
+            composer="$(<"$FAKE_COMPOSER")"
         fi
         case "${FAKE_PANE_MODE:-codex-ready}" in
             codex-ready)
@@ -73,6 +80,9 @@ case "${1:-}" in
                 ;;
             codex-ready-with-old-dialog)
                 printf '%s\n' '1. Update now' 'Press enter to continue' "› $composer" 'gpt-5.6-sol · Context 82% left'
+                ;;
+            codex-working-with-composer)
+                printf '%s\n' "› $composer" 'Working (12s • esc to interrupt)' 'gpt-5.6-sol · Context 82% left'
                 ;;
             update-over-old-composer)
                 printf '%s\n' '› Ask Codex to do anything' 'gpt-5.6-sol · Context 82% left' '✨ Update available!' '› 1. Update now' 'Press enter to continue'
@@ -110,14 +120,17 @@ chmod +x "$TEST_DIR/bin/tmux" "$TEST_DIR/bin/sleep" "$TEST_DIR/bin/codex"
 run_spawn() {
     local mode="$1"
     shift
+    : > "$COMPOSER"
     env -u TMUX \
         PATH="$TEST_DIR/bin:$PATH" \
         FAKE_TMUX_LOG="$LOG" \
         FAKE_LAUNCH_FILE="$LAUNCH" \
         FAKE_LAST_BUFFER="$LAST_BUFFER" \
+        FAKE_COMPOSER="$COMPOSER" \
         FAKE_PANE_MODE="$mode" \
         FAKE_ROLLOUT="$ROLLOUT" \
         FAKE_COMPACTION_MODE="${FAKE_COMPACTION_MODE:-complete}" \
+        FAKE_PASTE_MODE="${FAKE_PASTE_MODE:-normal}" \
         SPAWN_PROC_ROOT="$PROC_ROOT" \
         "$SPAWN" "test:department" codex "$TEST_DIR/repo with spaces" \
         --fork-session 01a0702a-7b5e-71e0-bb62-287d55a7f9ba \
@@ -125,11 +138,13 @@ run_spawn() {
 }
 
 run_agy() {
+    : > "$COMPOSER"
     env -u TMUX \
         PATH="$TEST_DIR/bin:$PATH" \
         FAKE_TMUX_LOG="$LOG" \
         FAKE_LAUNCH_FILE="$LAUNCH" \
         FAKE_LAST_BUFFER="$LAST_BUFFER" \
+        FAKE_COMPOSER="$COMPOSER" \
         FAKE_PANE_MODE="$1" \
         FAKE_ROLLOUT="$ROLLOUT" \
         "$SPAWN" test:department agy "$TEST_DIR/repo with spaces" \
@@ -167,6 +182,7 @@ grep -q '^paste-buffer ' "$LOG"
 : > "$LOG"
 env -u TMUX PATH="$TEST_DIR/bin:$PATH" FAKE_TMUX_LOG="$LOG" \
     FAKE_LAUNCH_FILE="$LAUNCH" FAKE_LAST_BUFFER="$LAST_BUFFER" \
+    FAKE_COMPOSER="$COMPOSER" \
     FAKE_PANE_MODE=codex-ready FAKE_ROLLOUT="$ROLLOUT" \
     "$SPAWN" test:ordinary codex "$TEST_DIR/repo with spaces" \
     --prompt-file "$PROMPT" >/dev/null
@@ -182,6 +198,16 @@ for mode in update update-over-old-composer trust; do
     grep -Fq 'Nothing was pasted, and no key was sent' "$STDERR"
     assert_no_input
 done
+
+# A pinned composer/footer is not ready while Codex still reports an active
+# turn. This prevents prompt delivery into the TUI before the turn settles.
+: > "$LOG"
+if run_spawn codex-working-with-composer >/dev/null 2>"$STDERR"; then
+    echo 'FAIL: an actively working Codex pane was treated as ready' >&2
+    exit 1
+fi
+grep -Fq 'input box did not appear' "$STDERR"
+assert_no_input
 
 # agy trust is checked before its live-frame composer hints, because the modal
 # can be painted over an already-rendered frame.
@@ -232,6 +258,7 @@ resolved=$(env -u TMUX PATH="$TEST_DIR/bin:$PATH" FAKE_TMUX_LOG="$LOG" \
     cd "$TEST_DIR"
     env -u TMUX PATH="$TEST_DIR/bin:$PATH" FAKE_TMUX_LOG="$LOG" \
         FAKE_LAUNCH_FILE="$LAUNCH" FAKE_LAST_BUFFER="$LAST_BUFFER" \
+        FAKE_COMPOSER="$COMPOSER" \
         FAKE_PANE_MODE=codex-ready FAKE_ROLLOUT="$ROLLOUT" \
         "$SPAWN" test:relative codex 'repo with spaces' \
         --fork-session 01a0702a-7b5e-71e0-bb62-287d55a7f9ba \
@@ -266,7 +293,7 @@ for index in "${!codex_args[@]}"; do
     fi
 done
 [[ "$(<"$ROLLOUT_OUT")" == "$ROLLOUT" ]]
-[[ "$(<"$CURSOR_OUT")" =~ ^[0-9]+$ ]]
+[[ "$(<"$CURSOR_OUT")" -eq $(wc -c < "$ROLLOUT") ]]
 mapfile -t loaded_buffers < <(awk '$1 == "load-buffer" { print $3 }' "$LOG")
 [[ ${#loaded_buffers[@]} -eq 2 ]]
 [[ "${loaded_buffers[0]}" == spawn-agent-compact-* ]]
@@ -287,6 +314,23 @@ grep -Fq 'task prompt not sent' "$STDERR"
 [[ $(grep -c '^load-buffer ' "$LOG") -eq 1 ]]
 if grep -Fq "$PROMPT" "$LOG"; then
     echo 'FAIL: task was loaded before compaction completed' >&2
+    exit 1
+fi
+
+# Loading the tmux buffer is not proof that paste reached the composer. A
+# swallowed paste must never cause the later Enter to submit stale text.
+: > "$LOG"
+printf '%s\n' '{"type":"session_meta","payload":{"id":"01a07050-1111-7222-8333-444444444444"}}' > "$ROLLOUT"
+if FAKE_PASTE_MODE=swallow run_spawn codex-ready \
+    --compact-prompt-file "$COMPACT_PROMPT" \
+    >/dev/null 2>"$STDERR"; then
+    echo 'FAIL: swallowed /compact paste reported success' >&2
+    exit 1
+fi
+grep -Fq 'does not contain exactly /compact' "$STDERR"
+[[ $(grep -c '^load-buffer ' "$LOG") -eq 1 ]]
+if grep -q '^send-keys ' "$LOG"; then
+    echo 'FAIL: Enter was sent after /compact failed to reach the composer' >&2
     exit 1
 fi
 
@@ -332,5 +376,24 @@ if "$WATCH" recap "$JSONL" "$MARKER" nan >/dev/null 2>"$STDERR"; then
     exit 1
 fi
 grep -Fq 'timeout must be a positive number' "$STDERR"
+
+# Codex can rewrite a large rollout to its smaller compacted form when the
+# task begins. The watcher restarts at byte zero, ignores inherited records by
+# shape/marker, and still emits the later matching final response exactly once.
+TRUNCATED_JSONL="$TEST_DIR/truncated-watcher.jsonl"
+TRUNCATED_OUT="$TEST_DIR/truncated-watcher.out"
+printf '%04096d\n' 0 > "$TRUNCATED_JSONL"
+truncated_cursor=$(wc -c < "$TRUNCATED_JSONL")
+"$WATCH" recap "$TRUNCATED_JSONL" "$MARKER" 5 \
+    --after-byte "$truncated_cursor" > "$TRUNCATED_OUT" &
+truncated_pid=$!
+/bin/sleep 0.3
+printf '%s\n' \
+    '{"type":"response_item","payload":{"type":"message","role":"assistant","phase":"final_answer","content":[{"type":"output_text","text":"an inherited final without the marker"}]}}' \
+    > "$TRUNCATED_JSONL"
+/bin/sleep 0.3
+printf '%s\n' "$matching" >> "$TRUNCATED_JSONL"
+wait "$truncated_pid"
+[[ "$(<"$TRUNCATED_OUT")" == "$EXPECTED" ]]
 
 echo 'PASS: Codex fork spawning, launch compaction, and JSONL recap watching'

@@ -3,7 +3,9 @@
 
 The follower consumes only newline-terminated JSONL records.  Bytes after the
 last newline stay buffered across polls, so a record observed halfway through
-an append is neither parsed nor discarded.
+an append is neither parsed nor discarded.  Codex may rewrite a rollout to its
+compacted form when the next turn starts; the follower restarts at byte zero
+after that shrink and lets its structured record predicate reject history.
 """
 
 from __future__ import annotations
@@ -83,7 +85,13 @@ def follow_records(path: Path, offset: int, timeout: float) -> Iterator[dict[str
         try:
             size = path.stat().st_size
             if size < offset:
-                raise WatchError(f"rollout was truncated while being watched: {path}")
+                # A manual compaction can replace the inherited rollout with a
+                # smaller compacted transcript as the next turn begins. Any
+                # partial bytes belong to the old file image, so discard them
+                # and rescan the new image. Recap matching remains safe because
+                # it requires the unique prefix on an assistant final_answer.
+                offset = 0
+                pending = b""
             with path.open("rb") as stream:
                 stream.seek(offset)
                 chunk = stream.read()
@@ -216,6 +224,7 @@ def main() -> int:
                 and record["payload"].get("type") == "context_compacted"
             ):
                 return 0
+        return 1
     except WatchTimeout:
         noun = "recap" if args.command == "recap" else "compaction"
         print(f"Error: timed out after {args.timeout:g}s waiting for {noun} in {path}", file=sys.stderr)

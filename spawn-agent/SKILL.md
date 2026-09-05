@@ -32,7 +32,7 @@ fan-out workflows where you want multiple agents working simultaneously.
 - `--rollout-path-file <file>`: Atomically record the child rollout JSONL path
   so the parent can watch structured completion without reading tmux history
 - `--recap-cursor-file <file>`: Atomically record the byte offset immediately
-  before task delivery, excluding all inherited final answers from the watcher
+  before task delivery, avoiding a normal rescan of inherited history
 - `--compact-timeout <seconds>`: Override the 600-second compaction wait
 
 ## Instructions
@@ -138,8 +138,8 @@ COMPACT_DELIM
   --recap-cursor-file "$cursor_file" \
   --prompt-file "$prompt_file"
 
-read -r rollout < "$rollout_file"
-read -r recap_after < "$cursor_file"
+IFS= read -r rollout < "$rollout_file"
+IFS= read -r recap_after < "$cursor_file"
 ~/.claude/skills/spawn-agent/scripts/codex-jsonl-watch.py recap \
   "$rollout" "$marker" 7200 --after-byte "$recap_after"
 ```
@@ -271,9 +271,12 @@ marker; then it prints that whole message exactly once and exits. Marker text
 in the prompt, commentary, another role, or the middle of a final answer cannot
 match.
 
-The launcher records the cursor immediately before task delivery. Passing it
-mechanically excludes inherited history even if an operator accidentally
-reuses an old marker; the unique-marker contract remains defense in depth.
+The launcher records the cursor immediately before task delivery, normally
+avoiding any inherited-history scan. Codex can shrink-rewrite a large rollout
+to its compacted form when the task begins; if that makes the cursor exceed the
+new file size, the watcher safely restarts at byte zero. The unique marker and
+assistant/`final_answer` predicate are therefore the correctness boundary, not
+the cursor: never reuse a marker that could appear in inherited history.
 
 It accepts either the recorded rollout path or a Codex session UUID. UUIDs are
 resolved below `$CODEX_HOME/sessions` (default `~/.codex/sessions`).

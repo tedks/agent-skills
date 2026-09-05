@@ -35,8 +35,25 @@ codex_composer_ready() {
     local active_tail last_nonempty
     active_tail=$(printf '%s\n' "$1" | tail -n 6)
     last_nonempty=$(printf '%s\n' "$active_tail" | awk 'NF { line = $0 } END { print line }')
-    [[ "$last_nonempty" =~ Context[[:space:]][0-9]+% ]] && \
+    [[ "$active_tail" != *"Working ("* ]] && \
+        [[ "$last_nonempty" =~ Context[[:space:]][0-9]+% ]] && \
         printf '%s\n' "$active_tail" | grep -q '^[[:space:]]*› '
+}
+
+codex_update_modal_active() {
+    local active_tail last_nonempty
+    active_tail=$(printf '%s\n' "$1" | tail -n 8)
+    last_nonempty=$(printf '%s\n' "$active_tail" | awk 'NF { line = $0 } END { print line }')
+    [[ "$active_tail" == *"Update available!"* && \
+       "$last_nonempty" == *"Press enter to continue"* ]]
+}
+
+codex_trust_modal_active() {
+    local active_tail last_nonempty
+    active_tail=$(printf '%s\n' "$1" | tail -n 8)
+    last_nonempty=$(printf '%s\n' "$active_tail" | awk 'NF { line = $0 } END { print line }')
+    [[ "$active_tail" == *"Do you trust the contents of this project?"* && \
+       "$last_nonempty" == *"enter Confirm"* ]]
 }
 
 usage() {
@@ -173,8 +190,9 @@ if [[ ${#positional[@]} -ge 2 ]]; then
     prompt="${positional[1]}"
 fi
 
-if ! directory=$(cd -- "$directory" 2>/dev/null && pwd); then
-    echo "Error: working directory does not exist or is not accessible: $directory" >&2
+requested_directory="$directory"
+if ! directory=$(CDPATH='' cd -- "$requested_directory" 2>/dev/null && pwd); then
+    echo "Error: working directory does not exist or is not accessible: $requested_directory" >&2
     exit 1
 fi
 
@@ -250,11 +268,15 @@ fi
 
 # Canonicalize prompt_file to absolute path
 if [[ -n "$prompt_file" ]]; then
-    prompt_file="$(cd -- "$(dirname -- "$prompt_file")" && pwd)/$(basename -- "$prompt_file")"
+    prompt_file="$(CDPATH='' cd -- "$(dirname -- "$prompt_file")" && pwd)/$(basename -- "$prompt_file")"
 fi
 
 if [[ -n "$compact_prompt_file" ]]; then
-    compact_prompt_file="$(cd -- "$(dirname -- "$compact_prompt_file")" && pwd)/$(basename -- "$compact_prompt_file")"
+    compact_dir=$(CDPATH='' cd -- "$(dirname -- "$compact_prompt_file")" && pwd) || {
+        echo "Error: compaction prompt directory does not exist: $(dirname -- "$compact_prompt_file")" >&2
+        exit 1
+    }
+    compact_prompt_file="$compact_dir/$(basename -- "$compact_prompt_file")"
     if [[ "$compact_prompt_file" =~ [[:cntrl:]] ]]; then
         echo "Error: compaction prompt path cannot contain control characters" >&2
         exit 1
@@ -262,7 +284,7 @@ if [[ -n "$compact_prompt_file" ]]; then
 fi
 
 if [[ -n "$rollout_path_file" ]]; then
-    rollout_dir=$(cd -- "$(dirname -- "$rollout_path_file")" && pwd) || {
+    rollout_dir=$(CDPATH='' cd -- "$(dirname -- "$rollout_path_file")" && pwd) || {
         echo "Error: rollout path directory does not exist: $(dirname -- "$rollout_path_file")" >&2
         exit 1
     }
@@ -270,7 +292,7 @@ if [[ -n "$rollout_path_file" ]]; then
 fi
 
 if [[ -n "$recap_cursor_file" ]]; then
-    cursor_dir=$(cd -- "$(dirname -- "$recap_cursor_file")" && pwd) || {
+    cursor_dir=$(CDPATH='' cd -- "$(dirname -- "$recap_cursor_file")" && pwd) || {
         echo "Error: recap cursor directory does not exist: $(dirname -- "$recap_cursor_file")" >&2
         exit 1
     }
@@ -346,27 +368,27 @@ if [[ -n "$prompt_file" ]]; then
             pane_tail=$(printf '%s\n' "$pane" | tail -n 30)
 
             if [[ "$agent" == "codex" ]]; then
-                # A live composer's Context status is the bottommost non-empty
-                # line. This distinguishes it from a stale composer in restored
-                # history when a modal is actually on top.
-                if codex_composer_ready "$pane_tail"; then
-                    agent_ready=1
-                    break
-                fi
-                if [[ "$pane_tail" == *"Update available!"* && "$pane_tail" == *"Press enter to continue"* ]]; then
+                if codex_update_modal_active "$pane_tail"; then
                     echo "Error: Codex is showing its update chooser in $session:$window." >&2
                     echo "  Nothing was pasted, and no key was sent -- selecting an update is an" >&2
                     echo "  operator decision. Resolve the chooser in that window, then send the" >&2
                     echo "  prompt explicitly or start the fork again." >&2
                     exit 1
                 fi
-                if [[ "$pane_tail" == *"Do you trust the contents of this project?"* ]]; then
+                if codex_trust_modal_active "$pane_tail"; then
                     echo "Error: Codex is asking whether to trust this directory before it will run:" >&2
                     echo "    $directory" >&2
                     echo "  Nothing was pasted, and no key was sent -- answering that prompt is a" >&2
                     echo "  permission decision this tooling will not make for you." >&2
                     echo "  Answer it yourself, then send the prompt explicitly." >&2
                     exit 1
+                fi
+                # A live composer's Context status is the bottommost non-empty
+                # line. This distinguishes it from a stale composer in restored
+                # history when a modal is actually on top.
+                if codex_composer_ready "$pane_tail"; then
+                    agent_ready=1
+                    break
                 fi
             elif [[ "$pane_tail" == *"Do you trust the contents of this project?"* ]]; then
                 echo "Error: agy is asking whether to trust this directory before it will run:" >&2
@@ -411,6 +433,9 @@ if [[ -n "$prompt_file" ]]; then
 
     if [[ -n "$compact_prompt_file" ]]; then
         compact_after=$("$SCRIPT_DIR/codex-jsonl-watch.py" cursor "$rollout_path")
+        compact_before_paste=$("${TMUX_CMD[@]}" capture-pane -p -t "$session:$window")
+        compact_before_count=$(printf '%s\n' "$compact_before_paste" | tail -n 20 | \
+            grep -c '^[[:space:]]*› /compact[[:space:]]*$' || true)
         _cleanup_command_file=$(mktemp /tmp/spawn-agent-command.XXXXXX)
         printf '%s' '/compact' > "$_cleanup_command_file"
         compact_buf="spawn-agent-compact-$$"
@@ -420,16 +445,28 @@ if [[ -n "$prompt_file" ]]; then
             echo "Error: failed to paste /compact to $session:$window; task prompt not sent." >&2
             exit 1
         fi
-        sleep 1
-        if ! pane=$("${TMUX_CMD[@]}" capture-pane -p -t "$session:$window" 2>/dev/null); then
-            echo "Error: $session:$window exited before /compact could be submitted." >&2
-            echo "  No Enter was sent and the task prompt was not sent." >&2
-            exit 1
-        fi
-        compact_tail=$(printf '%s\n' "$pane" | tail -n 12)
-        if [[ "$compact_tail" == *"Update available!"* || \
-              "$compact_tail" == *"Do you trust the contents of this project?"* ]] || \
-           ! printf '%s\n' "$compact_tail" | grep -q '^[[:space:]]*› /compact[[:space:]]*$'; then
+        compact_loaded=""
+        for _ in $(seq 1 20); do
+            if ! pane=$("${TMUX_CMD[@]}" capture-pane -p -t "$session:$window" 2>/dev/null); then
+                echo "Error: $session:$window exited before /compact could be submitted." >&2
+                echo "  No Enter was sent and the task prompt was not sent." >&2
+                exit 1
+            fi
+            compact_tail=$(printf '%s\n' "$pane" | tail -n 20)
+            if codex_update_modal_active "$compact_tail" || \
+               codex_trust_modal_active "$compact_tail"; then
+                break
+            fi
+            compact_after_count=$(printf '%s\n' "$compact_tail" | \
+                grep -c '^[[:space:]]*› /compact[[:space:]]*$' || true)
+            if [[ "$pane" != "$compact_before_paste" ]] && \
+               (( compact_after_count > compact_before_count )); then
+                compact_loaded=1
+                break
+            fi
+            sleep 0.25
+        done
+        if [[ -z "$compact_loaded" ]]; then
             echo "Error: the Codex composer does not contain exactly /compact." >&2
             echo "  No Enter was sent; the child remains running and un-tasked in $target." >&2
             exit 1
@@ -453,6 +490,12 @@ if [[ -n "$prompt_file" ]]; then
                 exit 1
             fi
             pane_tail=$(printf '%s\n' "$pane" | tail -n 30)
+            if codex_update_modal_active "$pane_tail" || \
+               codex_trust_modal_active "$pane_tail"; then
+                echo "Error: Codex opened a startup modal after compaction; task prompt not sent." >&2
+                echo "  No key was sent; resolve it in $target or close the child." >&2
+                exit 1
+            fi
             if codex_composer_ready "$pane_tail"; then
                 compact_ready=1
                 break
