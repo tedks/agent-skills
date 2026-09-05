@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import re
 import sys
@@ -29,6 +30,10 @@ class WatchError(Exception):
     """A user-facing watcher failure."""
 
 
+class WatchTimeout(Exception):
+    """The requested rollout event did not arrive before the deadline."""
+
+
 def resolve_rollout(value: str, codex_home: Path) -> Path:
     """Resolve an explicit rollout path or a Codex session UUID."""
     candidate = Path(value).expanduser()
@@ -39,7 +44,8 @@ def resolve_rollout(value: str, codex_home: Path) -> Path:
         raise WatchError(f"rollout file not found and value is not a session UUID: {value}")
 
     sessions = codex_home / "sessions"
-    matches = list(sessions.glob(f"*/*/*/rollout-*-{value}.jsonl"))
+    session_id = value.lower()
+    matches = list(sessions.glob(f"*/*/*/rollout-*-{session_id}.jsonl"))
     if len(matches) != 1:
         raise WatchError(
             f"expected one rollout for session {value}, found {len(matches)} under {sessions}"
@@ -57,13 +63,12 @@ def complete_record_offset(path: Path) -> int:
 
         block_size = 8192
         position = end
-        suffix = b""
         while position:
             size = min(block_size, position)
             position -= size
             stream.seek(position)
-            suffix = stream.read(size) + suffix
-            newline = suffix.rfind(b"\n")
+            block = stream.read(size)
+            newline = block.rfind(b"\n")
             if newline >= 0:
                 return position + newline + 1
         return 0
@@ -107,7 +112,7 @@ def follow_records(path: Path, offset: int, timeout: float) -> Iterator[dict[str
                     yield record
 
         if time.monotonic() >= deadline:
-            raise TimeoutError
+            raise WatchTimeout
         time.sleep(0.25)
 
 
@@ -139,7 +144,7 @@ def positive_timeout(value: str) -> float:
         timeout = float(value)
     except ValueError as error:
         raise argparse.ArgumentTypeError("timeout must be a positive number") from error
-    if timeout <= 0:
+    if not math.isfinite(timeout) or timeout <= 0:
         raise argparse.ArgumentTypeError("timeout must be a positive number")
     return timeout
 
@@ -159,7 +164,7 @@ def parser() -> argparse.ArgumentParser:
     result.add_argument(
         "--codex-home",
         type=Path,
-        default=Path(os.environ.get("CODEX_HOME", Path.home() / ".codex")),
+        default=Path(os.environ.get("CODEX_HOME") or Path.home() / ".codex"),
         help="Codex state directory used when resolving a session UUID",
     )
     subparsers = result.add_subparsers(dest="command", required=True)
@@ -211,16 +216,13 @@ def main() -> int:
                 and record["payload"].get("type") == "context_compacted"
             ):
                 return 0
-    except TimeoutError:
+    except WatchTimeout:
         noun = "recap" if args.command == "recap" else "compaction"
         print(f"Error: timed out after {args.timeout:g}s waiting for {noun} in {path}", file=sys.stderr)
         return 124
     except (OSError, WatchError) as error:
         print(f"Error: {error}", file=sys.stderr)
         return 1
-
-    return 1
-
 
 if __name__ == "__main__":
     raise SystemExit(main())

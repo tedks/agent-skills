@@ -31,6 +31,9 @@ fan-out workflows where you want multiple agents working simultaneously.
   compaction using this step-specific prompt; valid only with a Codex fork
 - `--rollout-path-file <file>`: Atomically record the child rollout JSONL path
   so the parent can watch structured completion without reading tmux history
+- `--recap-cursor-file <file>`: Atomically record the byte offset immediately
+  before task delivery, excluding all inherited final answers from the watcher
+- `--compact-timeout <seconds>`: Override the 600-second compaction wait
 
 ## Instructions
 
@@ -92,26 +95,33 @@ can steer a context-rich child directly:
    appropriate, `--compact-prompt-file`. This invokes interactive `codex fork`,
    not headless `codex exec fork`.
 5. Report the window and socket immediately so the user can enter it.
-6. Block with `codex-jsonl-watch.py recap`. It follows only complete JSONL
-   records and emits only the whole matching final message. Do not poll or copy
-   tmux scrollback and do not relay routine child messages through the parent.
+6. Block with `codex-jsonl-watch.py recap` from the recorded byte cursor. It
+   follows only complete JSONL records and emits only the whole matching final
+   message. Do not poll or copy tmux scrollback and do not relay routine child
+   messages through the parent.
 
 ```bash
+set -e
 step_dir=$(mktemp -d /tmp/spawn-agent-step.XXXXXX)
 prompt_file="$step_dir/prompt"
 compact_file="$step_dir/compact-prompt"
 rollout_file="$step_dir/rollout-path"
+cursor_file="$step_dir/recap-cursor"
 marker="STEP-1-7f3a DESIGN COMPLETE — EXECUTIVE RECAP"
 
-cat > "$prompt_file" <<PROMPT_DELIM
+{
+cat <<'PROMPT_DELIM'
 Design the requested system. The user may enter this tmux window and steer you.
 
 Your LAST action must be a final response beginning exactly:
-$marker
+PROMPT_DELIM
+printf '%s\n\n' "$marker"
+cat <<'PROMPT_DELIM'
 
 Include decisions, risks, verification, remaining work, and the recommended
 next step. Do not merely point to files or prior messages.
 PROMPT_DELIM
+} > "$prompt_file"
 
 cat > "$compact_file" <<'COMPACT_DELIM'
 Preserve the product gestalt, settled architecture and UX decisions, current
@@ -125,10 +135,13 @@ COMPACT_DELIM
   --fork-session 01a0702a-7b5e-71e0-bb62-287d55a7f9ba \
   --compact-prompt-file "$compact_file" \
   --rollout-path-file "$rollout_file" \
+  --recap-cursor-file "$cursor_file" \
   --prompt-file "$prompt_file"
 
+read -r rollout < "$rollout_file"
+read -r recap_after < "$cursor_file"
 ~/.claude/skills/spawn-agent/scripts/codex-jsonl-watch.py recap \
-  "$(cat "$rollout_file")" "$marker" 7200
+  "$rollout" "$marker" 7200 --after-byte "$recap_after"
 ```
 
 The fork is a snapshot taken when it starts. Later parent messages do not flow
@@ -141,6 +154,10 @@ step-specific policy through the process-local
 and waits for the rollout's `context_compacted` event before it places the task
 in the composer. A missing event, vanished process, or startup modal fails with
 the task unsent. The launcher never edits global Codex configuration.
+
+This config/event sequence was integration-tested with `codex-cli 0.146.0`.
+Re-run the real fork smoke when upgrading across a Codex release that changes
+compaction configuration or rollout schemas.
 
 Keep `compact_file` in place for as long as the child remains open: the Codex
 process retains that file-backed config for any later compaction. After closing
@@ -197,6 +214,7 @@ This prints the current socket, server PID, all sessions, and all windows.
 /spawn-agent chaos:design codex ./project --fork-session <uuid> \
   --compact-prompt-file /tmp/step/compact-prompt \
   --rollout-path-file /tmp/step/rollout-path \
+  --recap-cursor-file /tmp/step/recap-cursor \
   --prompt-file /tmp/step/task-prompt
 
 # Spawn without initial prompt (interactive from start)
@@ -221,7 +239,7 @@ Spawn any supported agent:
 ~/.claude/skills/spawn-agent/scripts/agent-spawn.sh <session:window> <agent> [directory] [prompt]
 ~/.claude/skills/spawn-agent/scripts/agent-spawn.sh <session:window> <agent> [directory] --prompt-file <file>
 ~/.claude/skills/spawn-agent/scripts/agent-spawn.sh <session:window> codex [directory] --fork-session <uuid> --prompt-file <file>
-~/.claude/skills/spawn-agent/scripts/agent-spawn.sh <session:window> codex [directory] --fork-session <uuid> --compact-prompt-file <file> --rollout-path-file <file> --prompt-file <file>
+~/.claude/skills/spawn-agent/scripts/agent-spawn.sh <session:window> codex [directory] --fork-session <uuid> --compact-prompt-file <file> --rollout-path-file <file> --recap-cursor-file <file> --prompt-file <file>
 ```
 
 For Codex and agy, the script identifies the live composer before sending any
@@ -241,7 +259,8 @@ final message:
 
 ```bash
 ~/.claude/skills/spawn-agent/scripts/codex-jsonl-watch.py recap \
-  <rollout-path-or-session-uuid> '<unique recap marker>' [timeout-seconds]
+  <rollout-path-or-session-uuid> '<unique recap marker>' [timeout-seconds] \
+  --after-byte <recorded-cursor>
 ```
 
 Use a short, unique, single-line marker. The one-shot watcher follows only
@@ -251,6 +270,10 @@ message in phase `final_answer` and whose joined `output_text` begins with the
 marker; then it prints that whole message exactly once and exits. Marker text
 in the prompt, commentary, another role, or the middle of a final answer cannot
 match.
+
+The launcher records the cursor immediately before task delivery. Passing it
+mechanically excludes inherited history even if an operator accidentally
+reuses an old marker; the unique-marker contract remains defense in depth.
 
 It accepts either the recorded rollout path or a Codex session UUID. UUIDs are
 resolved below `$CODEX_HOME/sessions` (default `~/.codex/sessions`).
@@ -263,11 +286,13 @@ for startup composer/modal readiness only; it is not a completion protocol.
 Resolve the rollout currently held open by the Codex process below a tmux pane:
 
 ```bash
-~/.claude/skills/spawn-agent/scripts/codex-rollout-path.sh <session:window>
+~/.claude/skills/spawn-agent/scripts/codex-rollout-path.sh \
+  [--exclude-session <parent-uuid>] <session:window>
 ```
 
-Normal fork workflows should use `--rollout-path-file`, which calls this helper
-and records the answer atomically before task delivery.
+Normal fork workflows should use `--rollout-path-file`, which calls this
+Linux `/proc` helper, excludes the parent session, and records the answer
+atomically before task delivery.
 
 ### claude-spawn.sh
 

@@ -12,6 +12,7 @@
 #       --compact-prompt-file <file>  Compact inherited history before the task
 #       --compact-timeout <seconds>   Compaction timeout (default: 600)
 #       --rollout-path-file <file>    Record the child Codex rollout path
+#       --recap-cursor-file <file>    Record where recap watching should begin
 #
 # Automatically targets the correct tmux server socket when run inside tmux.
 # Override with SPAWN_TMUX_SOCKET or SPAWN_TMUX_LABEL env vars.
@@ -30,6 +31,14 @@ set -e
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPT_DIR/tmux-ctx.sh"
 
+codex_composer_ready() {
+    local active_tail last_nonempty
+    active_tail=$(printf '%s\n' "$1" | tail -n 6)
+    last_nonempty=$(printf '%s\n' "$active_tail" | awk 'NF { line = $0 } END { print line }')
+    [[ "$last_nonempty" =~ Context[[:space:]][0-9]+% ]] && \
+        printf '%s\n' "$active_tail" | grep -q '^[[:space:]]*› '
+}
+
 usage() {
     echo "Usage: agent-spawn.sh <session:window> <agent> [directory] [prompt]" >&2
     echo "       agent-spawn.sh <session:window> <agent> [directory] --prompt-file <file>" >&2
@@ -42,6 +51,7 @@ usage() {
     echo "  --compact-prompt-file: compact inherited history with this prompt before the task" >&2
     echo "  --compact-timeout: seconds to wait for structured compaction completion" >&2
     echo "  --rollout-path-file: atomically write the child Codex rollout path" >&2
+    echo "  --recap-cursor-file: atomically write the safe JSONL recap start offset" >&2
     exit 1
 }
 
@@ -61,10 +71,13 @@ directory="."
 fork_session=""
 compact_prompt_file=""
 compact_timeout=600
+compact_timeout_set=""
 rollout_path_file=""
+recap_cursor_file=""
 _cleanup_prompt_file=""
 _cleanup_command_file=""
 _cleanup_rollout_output=""
+_cleanup_cursor_output=""
 
 # Trap to clean up temp files on exit/interrupt (only files we created).
 # Set early so failure paths during parsing don't leak temp files.
@@ -76,6 +89,7 @@ cleanup() {
     if [[ -n "$_cleanup_prompt_file" ]]; then rm -f "$_cleanup_prompt_file" || true; fi
     if [[ -n "$_cleanup_command_file" ]]; then rm -f "$_cleanup_command_file" || true; fi
     if [[ -n "$_cleanup_rollout_output" ]]; then rm -f "$_cleanup_rollout_output" || true; fi
+    if [[ -n "$_cleanup_cursor_output" ]]; then rm -f "$_cleanup_cursor_output" || true; fi
     return 0
 }
 trap cleanup EXIT
@@ -125,6 +139,7 @@ while [[ $# -gt 0 ]]; do
                 exit 1
             fi
             compact_timeout="$2"
+            compact_timeout_set=1
             shift 2
             ;;
         --rollout-path-file)
@@ -133,6 +148,14 @@ while [[ $# -gt 0 ]]; do
                 exit 1
             fi
             rollout_path_file="$2"
+            shift 2
+            ;;
+        --recap-cursor-file)
+            if [[ $# -lt 2 || -z "$2" ]]; then
+                echo "Error: --recap-cursor-file requires a file path" >&2
+                exit 1
+            fi
+            recap_cursor_file="$2"
             shift 2
             ;;
         *)
@@ -148,6 +171,11 @@ if [[ ${#positional[@]} -ge 1 ]]; then
 fi
 if [[ ${#positional[@]} -ge 2 ]]; then
     prompt="${positional[1]}"
+fi
+
+if ! directory=$(cd -- "$directory" 2>/dev/null && pwd); then
+    echo "Error: working directory does not exist or is not accessible: $directory" >&2
+    exit 1
 fi
 
 # Parse session and window from target
@@ -198,7 +226,11 @@ if [[ -n "$rollout_path_file" && -z "$prompt_file" && -z "$prompt" ]]; then
     echo "Error: --rollout-path-file requires a task prompt in the fork workflow" >&2
     exit 1
 fi
-if [[ "$compact_timeout" != 600 && -z "$compact_prompt_file" ]]; then
+if [[ -n "$recap_cursor_file" && -z "$rollout_path_file" ]]; then
+    echo "Error: --recap-cursor-file requires --rollout-path-file" >&2
+    exit 1
+fi
+if [[ -n "$compact_timeout_set" && -z "$compact_prompt_file" ]]; then
     echo "Error: --compact-timeout requires --compact-prompt-file" >&2
     exit 1
 fi
@@ -223,8 +255,8 @@ fi
 
 if [[ -n "$compact_prompt_file" ]]; then
     compact_prompt_file="$(cd -- "$(dirname -- "$compact_prompt_file")" && pwd)/$(basename -- "$compact_prompt_file")"
-    if [[ "$compact_prompt_file" == *$'\n'* || "$compact_prompt_file" == *$'\r'* ]]; then
-        echo "Error: compaction prompt path cannot contain a newline" >&2
+    if [[ "$compact_prompt_file" =~ [[:cntrl:]] ]]; then
+        echo "Error: compaction prompt path cannot contain control characters" >&2
         exit 1
     fi
 fi
@@ -235,6 +267,14 @@ if [[ -n "$rollout_path_file" ]]; then
         exit 1
     }
     rollout_path_file="$rollout_dir/$(basename -- "$rollout_path_file")"
+fi
+
+if [[ -n "$recap_cursor_file" ]]; then
+    cursor_dir=$(cd -- "$(dirname -- "$recap_cursor_file")" && pwd) || {
+        echo "Error: recap cursor directory does not exist: $(dirname -- "$recap_cursor_file")" >&2
+        exit 1
+    }
+    recap_cursor_file="$cursor_dir/$(basename -- "$recap_cursor_file")"
 fi
 
 # Build one shell-escaped command string for tmux. A bare `codex fork` is the
@@ -306,10 +346,10 @@ if [[ -n "$prompt_file" ]]; then
             pane_tail=$(printf '%s\n' "$pane" | tail -n 30)
 
             if [[ "$agent" == "codex" ]]; then
-                # Prefer positive composer identification before examining
-                # dialog text: a fork's recent transcript may quote a dialog.
-                if [[ "$pane_tail" == *"Context "* && "$pane_tail" != *"Working ("* ]] && \
-                   printf '%s\n' "$pane_tail" | grep -q '^[[:space:]]*› '; then
+                # A live composer's Context status is the bottommost non-empty
+                # line. This distinguishes it from a stale composer in restored
+                # history when a modal is actually on top.
+                if codex_composer_ready "$pane_tail"; then
                     agent_ready=1
                     break
                 fi
@@ -328,11 +368,6 @@ if [[ -n "$prompt_file" ]]; then
                     echo "  Answer it yourself, then send the prompt explicitly." >&2
                     exit 1
                 fi
-            # agy's composer specifically: its rule AND shortcuts hint. The
-            # trust modal has neither.
-            elif [[ "$pane_tail" == *"? for shortcuts"* && "$pane_tail" == *"─"* ]]; then
-                agent_ready=1
-                break
             elif [[ "$pane_tail" == *"Do you trust the contents of this project?"* ]]; then
                 echo "Error: agy is asking whether to trust this directory before it will run:" >&2
                 echo "    $directory" >&2
@@ -340,6 +375,11 @@ if [[ -n "$prompt_file" ]]; then
                 echo "  permission decision this tooling will not make for you." >&2
                 echo "  Answer it yourself, then send the prompt explicitly." >&2
                 exit 1
+            # agy's composer specifically: its rule AND shortcuts hint. Check
+            # trust first because a modal may be painted over a live frame.
+            elif [[ "$pane_tail" == *"? for shortcuts"* && "$pane_tail" == *"─"* ]]; then
+                agent_ready=1
+                break
             fi
             sleep 0.25
         done
@@ -354,8 +394,10 @@ if [[ -n "$prompt_file" ]]; then
         sleep 2
     fi
     if [[ "$agent" == "codex" && ( -n "$compact_prompt_file" || -n "$rollout_path_file" ) ]]; then
-        rollout_path=$("$SCRIPT_DIR/codex-rollout-path.sh" "$target") || {
+        rollout_path=$("$SCRIPT_DIR/codex-rollout-path.sh" \
+            --exclude-session "$fork_session" "$target") || {
             echo "Error: could not resolve the child rollout; task prompt not sent." >&2
+            echo "  The child remains running and un-tasked in $target." >&2
             exit 1
         }
         if [[ -n "$rollout_path_file" ]]; then
@@ -379,11 +421,26 @@ if [[ -n "$prompt_file" ]]; then
             exit 1
         fi
         sleep 1
+        if ! pane=$("${TMUX_CMD[@]}" capture-pane -p -t "$session:$window" 2>/dev/null); then
+            echo "Error: $session:$window exited before /compact could be submitted." >&2
+            echo "  No Enter was sent and the task prompt was not sent." >&2
+            exit 1
+        fi
+        compact_tail=$(printf '%s\n' "$pane" | tail -n 12)
+        if [[ "$compact_tail" == *"Update available!"* || \
+              "$compact_tail" == *"Do you trust the contents of this project?"* ]] || \
+           ! printf '%s\n' "$compact_tail" | grep -q '^[[:space:]]*› /compact[[:space:]]*$'; then
+            echo "Error: the Codex composer does not contain exactly /compact." >&2
+            echo "  No Enter was sent; the child remains running and un-tasked in $target." >&2
+            exit 1
+        fi
         "${TMUX_CMD[@]}" send-keys -t "$session:$window" Enter
         echo "Waiting for Codex to finish the requested history compaction..." >&2
         if ! "$SCRIPT_DIR/codex-jsonl-watch.py" compaction \
             "$rollout_path" "$compact_after" "$compact_timeout"; then
             echo "Error: Codex did not report completed compaction; task prompt not sent." >&2
+            echo "  The child remains running and un-tasked in $target; inspect or close it." >&2
+            echo "  If Codex was upgraded, verify its compaction config/event compatibility." >&2
             exit 1
         fi
 
@@ -396,8 +453,7 @@ if [[ -n "$prompt_file" ]]; then
                 exit 1
             fi
             pane_tail=$(printf '%s\n' "$pane" | tail -n 30)
-            if [[ "$pane_tail" == *"Context "* && "$pane_tail" != *"Working ("* ]] && \
-               printf '%s\n' "$pane_tail" | grep -q '^[[:space:]]*› '; then
+            if codex_composer_ready "$pane_tail"; then
                 compact_ready=1
                 break
             fi
@@ -405,9 +461,19 @@ if [[ -n "$prompt_file" ]]; then
         done
         if [[ -z "$compact_ready" ]]; then
             echo "Error: Codex compacted but its composer did not return; task prompt not sent." >&2
+            echo "  The child remains running and un-tasked in $target; inspect or close it." >&2
             exit 1
         fi
         sleep 1
+    fi
+
+    if [[ -n "$recap_cursor_file" ]]; then
+        recap_after=$("$SCRIPT_DIR/codex-jsonl-watch.py" cursor "$rollout_path")
+        _cleanup_cursor_output=$(mktemp "$cursor_dir/.codex-cursor.XXXXXX")
+        chmod 600 "$_cleanup_cursor_output"
+        printf '%s\n' "$recap_after" > "$_cleanup_cursor_output"
+        mv -f -- "$_cleanup_cursor_output" "$recap_cursor_file"
+        _cleanup_cursor_output=""
     fi
 
     # Codex needs time to finish paste-burst handling for large task files.

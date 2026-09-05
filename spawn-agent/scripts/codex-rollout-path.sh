@@ -6,12 +6,17 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPT_DIR/tmux-ctx.sh"
 
-if [[ $# -ne 1 ]]; then
-    echo "Usage: $0 <session:window>" >&2
+exclude_session=""
+if [[ $# -eq 3 && "$1" == "--exclude-session" ]]; then
+    exclude_session="${2,,}"
+    target="$3"
+elif [[ $# -eq 1 ]]; then
+    target="$1"
+else
+    echo "Usage: $0 [--exclude-session <uuid>] <session:window>" >&2
     exit 2
 fi
 
-target="$1"
 proc_root="${SPAWN_PROC_ROOT:-/proc}"
 
 if ! pane_pid=$("${TMUX_CMD[@]}" display-message -p -t "$target" '#{pane_pid}' 2>/dev/null) || \
@@ -22,13 +27,16 @@ fi
 
 for _ in $(seq 1 40); do
     pids=("$pane_pid")
-    for pid in "${pids[@]}"; do
+    pid_index=0
+    while (( pid_index < ${#pids[@]} )); do
+        pid="${pids[pid_index]}"
         children_file="$proc_root/$pid/task/$pid/children"
         if [[ -r "$children_file" ]]; then
             children=()
             read -r -a children < "$children_file" || true
             pids+=("${children[@]}")
         fi
+        pid_index=$((pid_index + 1))
     done
 
     rollouts=()
@@ -37,6 +45,9 @@ for _ in $(seq 1 40); do
             [[ -e "$descriptor" || -L "$descriptor" ]] || continue
             path=$(readlink "$descriptor" 2>/dev/null || true)
             if [[ "$path" == */sessions/*/rollout-*.jsonl ]]; then
+                if [[ -n "$exclude_session" && "$path" == *-"$exclude_session".jsonl ]]; then
+                    continue
+                fi
                 rollouts+=("$path")
             fi
         done
