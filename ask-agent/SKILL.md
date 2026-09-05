@@ -130,7 +130,9 @@ branching it — which is what a council round wants, but worth knowing before
 pointing it at a session you care about. The non-mutating halves exist
 (`codex exec fork <id>`, `claude --fork-session`) and are deliberately **not**
 wrapped here. Note `codex exec fork` — the `exec` one — runs headless and needs
-no terminal; the bare `codex fork` is the interactive picker.
+no terminal. For a steerable, transcript-preserving Codex child that hands a
+final recap back to a high-level parent, use `spawn-agent --fork-session`; it
+wraps the interactive bare `codex fork` and its tmux lifecycle.
 
 Every claim above was checked rather than inferred; commands, byte counts and
 file counts are in [docs/ask-agent-session-resume.md](../../../docs/ask-agent-session-resume.md).

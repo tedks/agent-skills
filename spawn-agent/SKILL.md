@@ -1,7 +1,6 @@
 ---
 name: spawn-agent
-description: Spawn AI agents in tmux windows for parallel/interactive work
-argument-hint: <session:window> <agent> [directory] [prompt]
+description: Spawn AI agents in steerable tmux windows for parallel or long-running work, including transcript-preserving Codex session forks with step-scoped compaction and structured final-recap handoffs. Use when the user wants an interactive agent they can enter directly, asks to fork or clone the current Codex session, or wants a parent session to stay high-level while a child completes a step.
 allowed-tools: Bash(~/.claude/skills/spawn-agent/scripts/*)
 ---
 
@@ -26,6 +25,12 @@ fan-out workflows where you want multiple agents working simultaneously.
 - `<agent>`: The agent to spawn (`claude`, `codex`, `agy`)
 - `[directory]`: Working directory (default: current)
 - `[prompt]`: Initial prompt for the agent
+- `--fork-session <uuid>`: Interactively fork this Codex session while
+  preserving its transcript; valid only with `codex`
+- `--compact-prompt-file <file>`: Before delivering the task, run a manual
+  compaction using this step-specific prompt; valid only with a Codex fork
+- `--rollout-path-file <file>`: Atomically record the child rollout JSONL path
+  so the parent can watch structured completion without reading tmux history
 
 ## Instructions
 
@@ -68,6 +73,78 @@ For short prompts, inline is also fine:
 
 The script automatically detects the tmux socket from `$TMUX` -- no manual
 `-L` or `-S` flags needed.
+
+### Fork one Codex step and hand back a recap
+
+Use this workflow to keep the parent session at executive level while the user
+can steer a context-rich child directly:
+
+1. Choose a **new recap marker that has never appeared in the inherited
+   conversation**.
+2. End the child prompt with a contract requiring its last response to begin
+   with that marker and recap decisions, changes, verification, and remaining
+   work. State that the user may steer the child in tmux.
+3. For a large inherited session, **use step-specific compaction by default**.
+   Write a compact prompt that names the durable product decisions and current
+   step state to preserve, and repetitive logs or obsolete launch attempts to
+   discard. Omit compaction for a short parent or when verbatim history matters.
+4. Spawn `codex` with `--fork-session`, `--rollout-path-file`, and, when
+   appropriate, `--compact-prompt-file`. This invokes interactive `codex fork`,
+   not headless `codex exec fork`.
+5. Report the window and socket immediately so the user can enter it.
+6. Block with `codex-jsonl-watch.py recap`. It follows only complete JSONL
+   records and emits only the whole matching final message. Do not poll or copy
+   tmux scrollback and do not relay routine child messages through the parent.
+
+```bash
+step_dir=$(mktemp -d /tmp/spawn-agent-step.XXXXXX)
+prompt_file="$step_dir/prompt"
+compact_file="$step_dir/compact-prompt"
+rollout_file="$step_dir/rollout-path"
+marker="STEP-1-7f3a DESIGN COMPLETE — EXECUTIVE RECAP"
+
+cat > "$prompt_file" <<PROMPT_DELIM
+Design the requested system. The user may enter this tmux window and steer you.
+
+Your LAST action must be a final response beginning exactly:
+$marker
+
+Include decisions, risks, verification, remaining work, and the recommended
+next step. Do not merely point to files or prior messages.
+PROMPT_DELIM
+
+cat > "$compact_file" <<'COMPACT_DELIM'
+Preserve the product gestalt, settled architecture and UX decisions, current
+repository/worktree state, active step goal, user steering, and recap contract.
+Compress repeated terminal captures, superseded launch attempts, and other
+operational noise that is not needed to complete this step.
+COMPACT_DELIM
+
+~/.claude/skills/spawn-agent/scripts/agent-spawn.sh \
+  ide:design codex ./project \
+  --fork-session 01a0702a-7b5e-71e0-bb62-287d55a7f9ba \
+  --compact-prompt-file "$compact_file" \
+  --rollout-path-file "$rollout_file" \
+  --prompt-file "$prompt_file"
+
+~/.claude/skills/spawn-agent/scripts/codex-jsonl-watch.py recap \
+  "$(cat "$rollout_file")" "$marker" 7200
+```
+
+The fork is a snapshot taken when it starts. Later parent messages do not flow
+into it; steer the child in its tmux window. Do not use `--resume`: resuming
+would append to and contend with the parent instead of creating a child.
+
+Codex `/compact` accepts no inline argument. The launcher supplies the
+step-specific policy through the process-local
+`experimental_compact_prompt_file` config override, submits bare `/compact`,
+and waits for the rollout's `context_compacted` event before it places the task
+in the composer. A missing event, vanished process, or startup modal fails with
+the task unsent. The launcher never edits global Codex configuration.
+
+Keep `compact_file` in place for as long as the child remains open: the Codex
+process retains that file-backed config for any later compaction. After closing
+the child window, remove `step_dir`.
 
 ### 4. Report success
 
@@ -113,6 +190,15 @@ This prints the current socket, server PID, all sessions, and all windows.
 # Spawn agy (Antigravity CLI)
 /spawn-agent chaos:agy-review agy ./project "Check this design"
 
+# Fork a Codex session so the child inherits its full conversation
+/spawn-agent chaos:design codex ./project --fork-session <uuid> "Design step one"
+
+# Recommended for a large inherited session: compact first and expose JSONL
+/spawn-agent chaos:design codex ./project --fork-session <uuid> \
+  --compact-prompt-file /tmp/step/compact-prompt \
+  --rollout-path-file /tmp/step/rollout-path \
+  --prompt-file /tmp/step/task-prompt
+
 # Spawn without initial prompt (interactive from start)
 /spawn-agent chaos:helper claude .
 ```
@@ -134,7 +220,54 @@ Spawn any supported agent:
 ```bash
 ~/.claude/skills/spawn-agent/scripts/agent-spawn.sh <session:window> <agent> [directory] [prompt]
 ~/.claude/skills/spawn-agent/scripts/agent-spawn.sh <session:window> <agent> [directory] --prompt-file <file>
+~/.claude/skills/spawn-agent/scripts/agent-spawn.sh <session:window> codex [directory] --fork-session <uuid> --prompt-file <file>
+~/.claude/skills/spawn-agent/scripts/agent-spawn.sh <session:window> codex [directory] --fork-session <uuid> --compact-prompt-file <file> --rollout-path-file <file> --prompt-file <file>
 ```
+
+For Codex and agy, the script identifies the live composer before sending any
+input. If an update, trust, or other startup dialog is present, it fails without
+pasting or pressing Enter. Resolve the operator decision in that window, then
+send the prompt explicitly or start again.
+
+All Codex processes launched here receive the process-local override
+`check_for_update_on_startup=false`, so managed agent windows do not stop at the
+update chooser. This does not edit global config or suppress update checks in
+ordinary Codex sessions. The modal detector remains a fail-closed backstop.
+
+### codex-jsonl-watch.py
+
+Wait for the last-response contract of a Codex fork and print only the matching
+final message:
+
+```bash
+~/.claude/skills/spawn-agent/scripts/codex-jsonl-watch.py recap \
+  <rollout-path-or-session-uuid> '<unique recap marker>' [timeout-seconds]
+```
+
+Use a short, unique, single-line marker. The one-shot watcher follows only
+newline-terminated records, retaining an incomplete trailing append until its
+newline arrives. It requires a `response_item` whose payload is an assistant
+message in phase `final_answer` and whose joined `output_text` begins with the
+marker; then it prints that whole message exactly once and exits. Marker text
+in the prompt, commentary, another role, or the middle of a final answer cannot
+match.
+
+It accepts either the recorded rollout path or a Codex session UUID. UUIDs are
+resolved below `$CODEX_HOME/sessions` (default `~/.codex/sessions`).
+
+Whole-scrollback recap monitoring is deprecated. Tmux capture remains useful
+for startup composer/modal readiness only; it is not a completion protocol.
+
+### codex-rollout-path.sh
+
+Resolve the rollout currently held open by the Codex process below a tmux pane:
+
+```bash
+~/.claude/skills/spawn-agent/scripts/codex-rollout-path.sh <session:window>
+```
+
+Normal fork workflows should use `--rollout-path-file`, which calls this helper
+and records the answer atomically before task delivery.
 
 ### claude-spawn.sh
 
@@ -187,6 +320,13 @@ of waiting for user input. To detect when agents are ready:
 ## Notes
 
 - Agents run interactively in tmux windows
+- `--fork-session` preserves the named Codex transcript in a new interactive
+  session; `codex exec fork` is non-interactive and intentionally not used
+- Use `--compact-prompt-file` by default for large inherited sessions; it gates
+  task delivery on the structured Codex compaction-complete event
+- Completion monitoring reads the rollout JSONL, never whole tmux scrollback
+- Spawned Codex processes suppress startup update checks with a process-local
+  override; normal Codex launches retain their usual update behavior
 - Use `tmux-info.sh` to see all sessions and windows on the current server
 - Use claude-send.sh to send messages to running agents
 - Socket detection is automatic -- you don't need to think about `-L` or `-S`
