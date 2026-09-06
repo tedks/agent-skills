@@ -56,6 +56,11 @@ codex_trust_modal_active() {
        "$last_nonempty" == *"enter Confirm"* ]]
 }
 
+# Claude Code pane classifiers live in their own file so that
+# claude-trust-dir.sh --verify shares them verbatim rather than keeping a
+# private copy that could drift from what the spawner actually enforces.
+source "$SCRIPT_DIR/claude-pane-detect.sh"
+
 usage() {
     echo "Usage: agent-spawn.sh <session:window> <agent> [directory] [prompt]" >&2
     echo "       agent-spawn.sh <session:window> <agent> [directory] --prompt-file <file>" >&2
@@ -64,6 +69,7 @@ usage() {
     echo "  directory: working directory (default: current)" >&2
     echo "  prompt: initial prompt for the agent" >&2
     echo "  --prompt-file: read prompt from file (avoids ARG_MAX)" >&2
+    echo "  --trust: pre-grant Claude Code workspace trust for <directory> (claude only)" >&2
     echo "  --fork-session: interactively fork a Codex session UUID" >&2
     echo "  --compact-prompt-file: compact inherited history with this prompt before the task" >&2
     echo "  --compact-timeout: seconds to wait for structured compaction completion" >&2
@@ -85,6 +91,7 @@ shift 2
 prompt_file=""
 prompt=""
 directory="."
+trust_directory=0
 fork_session=""
 compact_prompt_file=""
 compact_timeout=600
@@ -114,6 +121,10 @@ trap cleanup EXIT
 positional=()
 while [[ $# -gt 0 ]]; do
     case "$1" in
+        --trust)
+            trust_directory=1
+            shift
+            ;;
         --prompt-file|-f)
             if [[ $# -lt 2 || -z "$2" ]]; then
                 echo "Error: --prompt-file requires a file path" >&2
@@ -209,6 +220,11 @@ case "$agent" in
         exit 1
         ;;
 esac
+
+if [[ "$trust_directory" -eq 1 && "$agent" != "claude" ]]; then
+    echo "Error: --trust applies to claude only; agy and codex keep their own trust stores." >&2
+    exit 1
+fi
 
 if [[ -n "$fork_session" ]]; then
     if [[ "$agent" != "codex" ]]; then
@@ -325,6 +341,15 @@ if [[ -n "$fork_session" ]]; then
 fi
 printf -v agent_shell_command '%q ' "${agent_command[@]}"
 
+# Granting workspace trust happens here, before launch, and only because the
+# caller asked for it -- never by answering a modal after the fact.
+if [[ "$trust_directory" -eq 1 ]]; then
+    if ! "$SCRIPT_DIR/claude-trust-dir.sh" "$directory"; then
+        echo "Error: could not grant workspace trust for $directory; not launching." >&2
+        exit 1
+    fi
+fi
+
 # Start the agent in a new tmux window, then deliver the prompt via
 # load-buffer/paste-buffer. This avoids ARG_MAX at every boundary:
 # the tmux command, the shell inside tmux, and the agent's execve.
@@ -334,7 +359,10 @@ if [[ -n "$prompt_file" ]]; then
     # Wait for the actual composer before sending anything. In particular,
     # Codex may show an update chooser first; the old fixed sleep pasted the
     # task into that chooser and its Enter selected "Update now".
-    if [[ "$agent" == "agy" || "$agent" == "codex" ]]; then
+    # Every supported agent has a readiness probe below. The else branch
+    # survives as a fallback so a future agent added to the validator above
+    # degrades to the old fixed sleep instead of hanging here.
+    if [[ "$agent" == "agy" || "$agent" == "codex" || "$agent" == "claude" ]]; then
         # agy paints a full-screen TUI and discards anything delivered before it
         # is listening, so a flat `sleep 2` races it -- on a cold start the
         # prompt vanishes and the spawn still reports success.
@@ -387,6 +415,21 @@ if [[ -n "$prompt_file" ]]; then
                 # line. This distinguishes it from a stale composer in restored
                 # history when a modal is actually on top.
                 if codex_composer_ready "$pane_tail"; then
+                    agent_ready=1
+                    break
+                fi
+            elif [[ "$agent" == "claude" ]]; then
+                if claude_trust_modal_active "$pane_tail"; then
+                    echo "Error: Claude Code is asking whether to trust this directory before it will run:" >&2
+                    echo "    $directory" >&2
+                    echo "  Nothing was pasted, and no key was sent." >&2
+                    echo "  Which button an Enter would hit is BUILD-SPECIFIC: 2.1.261 defaults" >&2
+                    echo "  to \"No, exit\", 2.1.220 defaults to \"Yes, I trust this folder\". So an" >&2
+                    echo "  automated Enter may silently GRANT trust to an unvetted directory." >&2
+                    echo "  Answer it yourself, or re-run with --trust to grant it explicitly." >&2
+                    exit 1
+                fi
+                if claude_composer_ready "$pane_tail"; then
                     agent_ready=1
                     break
                 fi
