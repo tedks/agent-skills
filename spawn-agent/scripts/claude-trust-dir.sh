@@ -164,17 +164,24 @@ git_root_of() {
     # wrapper failures ALSO fail here -- and reading those as "not a repo" would
     # silently unbound the walk while Claude, running as a user git does trust,
     # finds the repo and bounds normally. LC_ALL=C so the message is stable.
-    local err status
-    err=$(mktemp)
-    common=$(cd "$target" 2>/dev/null && LC_ALL=C git rev-parse --git-common-dir 2>"$err")
-    status=$?
+    # The assignment is shielded with `|| status=$?` rather than left bare. A bare
+    # `var=$(failing-cmd)` aborts the caller under `set -e`; today the only call
+    # site wraps this in $( ) inside an array append, which happens to suppress
+    # that -- but depending on a caller's syntax for correctness is exactly what
+    # a later refactor breaks. Verified both ways in the suite.
+    #
+    # Stderr is re-fetched on the failure path instead of being captured to a
+    # temp file, so there is nothing to leak if a signal lands mid-probe.
+    local status=0 errout
+    common=$(cd "$target" 2>/dev/null && LC_ALL=C git rev-parse --git-common-dir 2>/dev/null) \
+        || status=$?
     if (( status != 0 )); then
-        if grep -qi 'not a git repository' "$err"; then
-            rm -f "$err"; return 0          # genuinely outside a repo
-        fi
-        rm -f "$err"; printf '?\n'; return 0   # git could not tell us; do not guess
+        errout=$( { cd "$target" && LC_ALL=C git rev-parse --git-common-dir; } 2>&1 >/dev/null ) || true
+        case "$errout" in
+            *"not a git repository"*) return 0 ;;      # genuinely outside a repo
+            *)                        printf '?\n'; return 0 ;;  # cannot tell; do not guess
+        esac
     fi
-    rm -f "$err"
     [[ -n "$common" ]] || return 0
     # --git-common-dir may come back relative to the directory it resolved in.
     common=$(cd "$target" && cd "$common" 2>/dev/null && pwd -P) || return 0

@@ -126,6 +126,29 @@ chmod +x "$TEST_DIR/norepobin/git"
 [[ -z "$(PATH="$TEST_DIR/norepobin:$PATH" git_root_of "$TEST_DIR/plain")" ]] \
     || fail "a genuine not-a-repository must yield unbounded, not '?'"
 
+# git_root_of must survive a command substitution that INHERITS errexit.
+#
+# Default bash does not propagate set -e out of a command substitution, so a
+# bare `common=$(failing-rev-parse)` runs the classifier normally and any test
+# omitting POSIX mode passes on the broken form -- an earlier version of this
+# test did exactly that and pinned nothing. POSIX mode (and inherit_errexit)
+# DO propagate it, aborting before the classifier and killing the prediction.
+out=$(POSIXLY_CORRECT=1 CLAUDE_CONFIG_FILE="$CFG" "$TRUST" --check "$TEST_DIR/norepo" 2>&1) \
+    || fail "--check aborts under POSIX mode on a non-repo (unshielded substitution)"
+printf '%s\n' "$out" | grep -qE '^  (trusted|PROMPTS)' \
+    || fail "--check under POSIX mode produced no prediction"
+
+# ...and the same for a directory git can see, so the success path is covered too.
+POSIXLY_CORRECT=1 CLAUDE_CONFIG_FILE="$CFG" "$TRUST" --check "$TEST_DIR/plain" >/dev/null 2>&1 \
+    || fail "--check aborts under POSIX mode on a real repo"
+
+# No stderr-capture temp file may be left behind on the failure path.
+_tmp_before=$(find /tmp -maxdepth 1 -name 'tmp.*' 2>/dev/null | wc -l)
+CLAUDE_CONFIG_FILE="$CFG" "$TRUST" --check "$TEST_DIR/norepo" >/dev/null 2>&1 || true
+_tmp_after=$(find /tmp -maxdepth 1 -name 'tmp.*' 2>/dev/null | wc -l)
+[[ "$_tmp_before" -eq "$_tmp_after" ]] \
+    || fail "--check leaked a temp file on the non-repo path"
+
 # --- predictor ---------------------------------------------------------
 check() { CLAUDE_CONFIG_FILE="$CFG" "$TRUST" --check "$@" 2>&1; }
 grant() { CLAUDE_CONFIG_FILE="$CFG" "$TRUST" "$@" >/dev/null 2>&1; }
