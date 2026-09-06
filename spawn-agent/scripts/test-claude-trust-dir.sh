@@ -142,6 +142,16 @@ printf '%s\n' "$out" | grep -qE '^  (trusted|PROMPTS)' \
 POSIXLY_CORRECT=1 CLAUDE_CONFIG_FILE="$CFG" "$TRUST" --check "$TEST_DIR/plain" >/dev/null 2>&1 \
     || fail "--check aborts under POSIX mode on a real repo"
 
+# inherit_errexit is a SEPARATE mechanism that reaches the same place, and it is
+# reachable from the environment (BASHOPTS), so pin it independently rather than
+# assuming POSIX mode stands in for it. Verified live: the unshielded form exits
+# 128 here.
+env BASHOPTS=inherit_errexit CLAUDE_CONFIG_FILE="$CFG" "$TRUST" --check "$TEST_DIR/norepo" >/dev/null 2>&1 \
+    || fail "--check aborts under inherit_errexit on a non-repo"
+env BASHOPTS=inherit_errexit POSIXLY_CORRECT=1 CLAUDE_CONFIG_FILE="$CFG" \
+    "$TRUST" --check "$TEST_DIR/norepo" >/dev/null 2>&1 \
+    || fail "--check aborts under inherit_errexit + POSIX mode"
+
 # No stderr-capture temp file may be left behind on the failure path.
 _tmp_before=$(find /tmp -maxdepth 1 -name 'tmp.*' 2>/dev/null | wc -l)
 CLAUDE_CONFIG_FILE="$CFG" "$TRUST" --check "$TEST_DIR/norepo" >/dev/null 2>&1 || true
