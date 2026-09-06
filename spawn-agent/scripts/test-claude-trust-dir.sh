@@ -36,11 +36,14 @@ git init -q "$TEST_DIR/plain"
 git_q -C "$TEST_DIR/plain" commit -q --allow-empty -m x
 mkdir -p "$TEST_DIR/plain/deep/deeper"
 
-# bare repo plus a linked worktree, the layout this fleet actually uses
-git init -q --bare "$TEST_DIR/container/.bare"
-git_q clone -q "$TEST_DIR/container/.bare" "$TEST_DIR/container/master" 2>/dev/null || true
-git_q -C "$TEST_DIR/container/master" commit -q --allow-empty -m x
-git_q -C "$TEST_DIR/container/master" push -q origin HEAD:master 2>/dev/null || true
+# Bare repo plus a genuine LINKED WORKTREE -- the layout this fleet actually
+# uses, and the one the boundary rule exists for. A `git clone` would produce an
+# independent .git and prove nothing about worktrees, so build it with
+# `worktree add` off the bare repo.
+git init -q "$TEST_DIR/seed"
+git_q -C "$TEST_DIR/seed" commit -q --allow-empty -m x
+git_q clone -q --bare "$TEST_DIR/seed" "$TEST_DIR/container/.bare" 2>/dev/null
+git_q --git-dir="$TEST_DIR/container/.bare" worktree add -q "$TEST_DIR/container/master" 2>/dev/null
 
 git init -q "$TEST_DIR/inner"
 git_q -C "$TEST_DIR/inner" commit -q --allow-empty -m x
@@ -68,6 +71,10 @@ expect_root "$TEST_DIR/super"              "$TEST_DIR/super"
 # A bare repo's common dir IS the repo, so dirname() would hand back its parent
 # -- a boundary one level too permissive.
 expect_root "$TEST_DIR/bare.git"           "$TEST_DIR/bare.git"
+# The case the whole boundary rule exists for: a linked worktree resolves to
+# the CONTAINER (which holds the shared .bare), not to the worktree itself.
+# Getting this wrong is what made ~/Projects/<repo>=true appear not to work.
+expect_root "$TEST_DIR/container/master"   "$TEST_DIR/container"
 expect_root "$TEST_DIR/norepo"             ""
 
 # "git is missing" must not be mistaken for "not in a repo", which would
@@ -87,18 +94,22 @@ chmod +x "$TEST_DIR/brokenbin/git"
 check() { CLAUDE_CONFIG_FILE="$CFG" "$TRUST" --check "$@" 2>&1; }
 grant() { CLAUDE_CONFIG_FILE="$CFG" "$TRUST" "$@" >/dev/null 2>&1; }
 
-# A false entry does NOT veto: it is skipped and the walk continues upward.
+# A false entry does NOT veto: it is skipped and the walk continues UPWARD.
+# The false entry must sit BETWEEN the target and the truthy one, or the walker
+# never reaches it and the test would pass even against an implementation where
+# false vetoes -- which is what the first cut of this test did.
+#   deeper (no entry) -> deep (FALSE, must be skipped) -> plain (TRUE, grants)
 python3 - "$CFG" "$TEST_DIR" <<'PY'
 import json, sys
 cfg = json.load(open(sys.argv[1])); root = sys.argv[2]
 cfg["projects"] = {
-    f"{root}/plain":            {"hasTrustDialogAccepted": False},
-    f"{root}/plain/deep":       {"hasTrustDialogAccepted": True},
+    f"{root}/plain/deep": {"hasTrustDialogAccepted": False},
+    f"{root}/plain":      {"hasTrustDialogAccepted": True},
 }
 json.dump(cfg, open(sys.argv[1], "w"))
 PY
 check "$TEST_DIR/plain/deep/deeper" | grep -q '^  trusted' \
-    || fail "a truthy entry below a false one should still grant"
+    || fail "a false entry between target and grant must be skipped, not veto"
 
 # A truthy entry ABOVE the boundary must not apply.
 python3 - "$CFG" "$TEST_DIR" <<'PY'
