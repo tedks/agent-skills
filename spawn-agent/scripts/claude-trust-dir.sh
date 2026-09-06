@@ -150,20 +150,26 @@ git_root_of() {
     # --git-common-dir may come back relative to the directory it resolved in.
     common=$(cd "$target" && cd "$common" 2>/dev/null && pwd -P) || return 0
 
-    # A bare repo's common dir IS the repo, so dirname() would hand back its
-    # parent -- one level too permissive. Use the repo itself.
     if [[ "$(cd "$target" && git rev-parse --is-bare-repository 2>/dev/null)" == "true" ]]; then
-        printf '%s\n' "$common"
-        return 0
+        # A bare repo's common dir IS the repo, so dirname() would hand back its
+        # parent -- one level too permissive.
+        boundary="$common"
+    else
+        boundary=$(dirname "$common")
     fi
 
-    boundary=$(dirname "$common")
-    # In a SUBMODULE the common dir points into the superproject's
-    # .git/modules/<name>, whose parent is not an ancestor of the target at all.
-    # resolve() tests the boundary before consulting the entry, so such a
-    # boundary makes even a direct truthy entry unreachable -- --check would
-    # then contradict --trust on the same directory. Only accept a boundary that
-    # actually contains the target; otherwise fall back to the worktree root.
+    # ONE containment gate for both derivations. A candidate that does not
+    # contain the target is unusable however it was derived, because resolve()
+    # tests the boundary before consulting the entry -- so such a boundary makes
+    # even a direct truthy entry unreachable, and --check then contradicts
+    # --trust on the same directory. Two shapes hit this:
+    #
+    #   submodule  -- common dir is the SUPERPROJECT's .git/modules/<name>,
+    #                 whose parent is outside the submodule entirely.
+    #   bare-repo container (this fleet's layout) -- the container holds a .git
+    #                 FILE pointing at .bare, so git reports is-bare=true and a
+    #                 common dir of <container>/.bare, a DESCENDANT of the
+    #                 target. Gating only the dirname path missed this one.
     if [[ "$target" == "$boundary" || "$target" == "$boundary"/* ]]; then
         printf '%s\n' "$boundary"
         return 0
@@ -216,8 +222,11 @@ for path, root in zip(args[0::2], args[1::2]):
         continue
     boundary = root or None
     trusted, granter = resolve(path, boundary)
+    # An empty boundary means "no usable containing project root" -- either not
+    # a repo at all, or a repo shape (a bare container) that offers none. Do not
+    # claim the former; we only know the walk is unbounded.
     where = (f"project root {boundary}" if boundary
-             else "/ (not in a git repo, so the walk is unbounded)")
+             else "/ (no containing project root; the walk is unbounded)")
     if trusted:
         via = "own entry" if granter == path else f"granted by {granter}"
         print(f"  trusted   {path}\n            ({via}; {where})")

@@ -75,6 +75,14 @@ expect_root "$TEST_DIR/bare.git"           "$TEST_DIR/bare.git"
 # the CONTAINER (which holds the shared .bare), not to the worktree itself.
 # Getting this wrong is what made ~/Projects/<repo>=true appear not to work.
 expect_root "$TEST_DIR/container/master"   "$TEST_DIR/container"
+# The CONTAINER itself, which is what you get opening a session at
+# ~/Projects/<project>/ -- CLAUDE.md says that is normal. It holds a .git FILE
+# pointing at .bare, so git reports is-bare=true with a common dir of .bare, a
+# DESCENDANT of the target. A boundary below the target makes resolve() bail
+# before reading the entry, so --check contradicted --trust here. Unbounded is
+# correct: git offers no work tree to bound against.
+printf 'gitdir: %s\n' "$TEST_DIR/container/.bare" > "$TEST_DIR/container/.git"
+expect_root "$TEST_DIR/container"          ""
 expect_root "$TEST_DIR/norepo"             ""
 
 # "git is missing" must not be mistaken for "not in a repo", which would
