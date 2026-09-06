@@ -329,13 +329,20 @@ Inspect or set Claude Code's workspace trust (see the trust section below):
 ```bash
 ~/.claude/skills/spawn-agent/scripts/claude-trust-dir.sh --list
 ~/.claude/skills/spawn-agent/scripts/claude-trust-dir.sh --check <dir>...
+~/.claude/skills/spawn-agent/scripts/claude-trust-dir.sh --verify <dir>...
 ~/.claude/skills/spawn-agent/scripts/claude-trust-dir.sh [--dry-run] <dir>...
 ```
 
-`--check` reports effective trust and names the ancestor that supplied it.
-Setting is idempotent, takes a lock, and replaces `~/.claude.json` by atomic
-rename. It warns when Claude sessions are live, because each one holds that
-file in memory and may flush its own copy over the change.
+`--check` predicts whether Claude will prompt, and names the entry that grants.
+`--verify` is the tripwire: it launches Claude in a throwaway tmux window,
+observes whether the dialog actually appears, kills it without ever sending a
+key, and exits 2 on any disagreement with the prediction. **Run it after a
+Claude upgrade** — the prediction models an undocumented internal.
+
+Setting is idempotent, takes a lock, and replaces the config by atomic rename.
+It re-stats the file immediately before replacing and refuses if it changed, so
+a concurrent write by a live session becomes a loud retry rather than silent
+data loss. It honours `CLAUDE_CONFIG_DIR`.
 
 ## Detecting Idle State
 
@@ -397,16 +404,31 @@ quieter way: the window exits, tmux reaps it, an unguarded spawner reports
 success having launched nothing, and the refusal is written to disk as
 `hasTrustDialogAccepted: false`.
 
-**Trust is inherited, and the nearest ancestor wins.** A directory with no
-entry of its own takes the value of the closest ancestor that has one. So
-`~/Projects: true` blanket-trusts everything beneath it — but one stray decline
-on an intermediate directory overrides that for its entire subtree, on every
-future run, until somebody repairs it. There is no CLI flag and no
-settings.json key for any of this: `~/.claude.json` is the only store, and it
-is Claude Code's own state file rather than a supported configuration surface.
+**How trust actually resolves.** Two rules, both counter-intuitive, both
+established by extracting the resolver from the Claude binary rather than
+inferred from behaviour — an inferred rule was wrong, and so was the first
+port:
 
-Use `claude-trust-dir.sh --check <dir>` to see what a directory actually
-resolves to and why, and `--trust` to grant it deliberately before launch.
+- **Only a truthy entry grants.** A `false` entry does *not* veto; it is
+  skipped and the walk continues upward.
+- **The walk stops at the project container** — the directory holding the git
+  *common* dir, shared by every worktree of a repo. A truthy entry above that
+  boundary never applies, so `~/Projects: true` does **not** blanket-trust the
+  repos beneath it. Outside a repo the walk runs to `/`.
+
+In a bare-repo-plus-worktrees layout the boundary is the project directory, not
+the individual worktree — which is why `~/Projects/foo: true` covers every
+worktree of `foo`, and why a repo whose own entry is missing or `false` prompts
+regardless of anything set above it.
+
+There is no CLI flag and no settings.json key for any of this: `~/.claude.json`
+is the only store, and it is Claude Code's own state file rather than a
+supported configuration surface. It follows that the model above **will drift**.
+`--verify` exists to notice when it does.
+
+Use `--check <dir>` to see what a directory resolves to and why, `--verify` to
+confirm that prediction against a live Claude, and `--trust` to grant
+deliberately before launch.
 
 ## agy and the workspace trust prompt
 

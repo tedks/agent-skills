@@ -56,41 +56,10 @@ codex_trust_modal_active() {
        "$last_nonempty" == *"enter Confirm"* ]]
 }
 
-# Claude Code's workspace trust dialog. Unlike agy's, its default button is
-# "No, exit", so a blind Enter does not wrongly grant trust -- it exits, tmux
-# reaps the window, and the spawn reports success having launched nothing.
-# Worse, that answer is persisted to ~/.claude.json and suppresses trust for
-# more than just the directory it was asked about. See claude-trust-dir.sh.
-#
-# Matching is deliberately on SHORT fragments. Claude re-flows the dialog to
-# the pane width, and tmux sizes a session to its smallest attached client, so
-# a long literal silently stops matching on a narrow terminal -- which is
-# exactly when the paste would be most damaging. "No, exit" survives any width
-# a terminal can plausibly have. A false positive here only refuses to spawn;
-# a false negative pastes into the dialog. Fail closed.
-claude_trust_modal_active() {
-    local active_tail
-    active_tail=$(printf '%s\n' "$1" | tail -n 25)
-    [[ "$active_tail" == *"Quick safety check"* || \
-       "$active_tail" == *"Yes, I trust this folder"* || \
-       "$active_tail" == *"No, exit"* ]]
-}
-
-# Claude's composer, established from positive evidence the dialog cannot
-# supply -- the same three-signal discipline codex_composer_ready uses. The
-# "❯" glyph alone is NOT evidence: the dialog draws it as its selection
-# cursor, so requiring only that (plus the absence of a footer that wraps out
-# of view) let a wrapped dialog read as a live composer.
-claude_composer_ready() {
-    local active_tail
-    active_tail=$(printf '%s\n' "$1" | tail -n 25)
-    # A dialog on screen is never a ready composer, at any width.
-    if claude_trust_modal_active "$1"; then
-        return 1
-    fi
-    printf '%s\n' "$active_tail" | grep -q '─' && \
-        printf '%s\n' "$active_tail" | grep -q '❯'
-}
+# Claude Code pane classifiers live in their own file so that
+# claude-trust-dir.sh --verify shares them verbatim rather than keeping a
+# private copy that could drift from what the spawner actually enforces.
+source "$SCRIPT_DIR/claude-pane-detect.sh"
 
 usage() {
     echo "Usage: agent-spawn.sh <session:window> <agent> [directory] [prompt]" >&2

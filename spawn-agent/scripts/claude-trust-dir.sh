@@ -12,18 +12,27 @@
 # in ~/.claude.json, which is Claude Code's own state file rather than a
 # documented config surface. Treat the shape as version-dependent.
 #
-# !! DISPUTED -- DO NOT RELY ON --check UNTIL THIS IS SETTLED !!
-# This file was written against an inferred rule: "trust is inherited, nearest
-# ancestor wins". Council review of PR #111 disproved it by extracting the real
-# resolver from the installed binary: a `false` entry does NOT veto (it is
-# skipped and the walk continues up), and the walk is bounded by the git root,
-# so a `true` above that boundary never applies. `effective()` below therefore
-# disagrees with Claude in both directions. Awaiting an operator decision on
-# whether to replicate the real algorithm or stop predicting; see PR #111.
+# HOW TRUST RESOLVES. `resolve()` below is a port of the walker extracted from
+# claude.exe v2.1.261 (minified `AB`), not a rule inferred from behaviour --
+# an earlier inferred rule ("nearest ancestor wins") was wrong in both
+# directions and PR #111's council caught it. The real rule:
+#
+#   * only a TRUTHY hasTrustDialogAccepted grants. A `false` entry does NOT
+#     veto: it is skipped and the walk continues upward.
+#   * the walk is BOUNDED by the project container -- the directory holding the
+#     git common dir, shared by every worktree of a repo. A truthy entry above
+#     that boundary never applies, so ~/Projects=true does NOT blanket-trust a
+#     repo beneath it. Outside a repo the walk runs to the filesystem root.
+#
+# This is an undocumented internal and WILL drift. `--verify` is the tripwire:
+# it launches Claude in a throwaway tmux window, observes whether the dialog
+# actually appears, and reports any disagreement with the prediction. Run it
+# after a Claude upgrade. It never answers the dialog.
 #
 # Usage:
 #   claude-trust-dir.sh --list                     show every stored entry
-#   claude-trust-dir.sh --check <dir>...           report effective trust, set nothing
+#   claude-trust-dir.sh --check <dir>...           predict trust, set nothing
+#   claude-trust-dir.sh --verify <dir>...          check the prediction against reality
 #   claude-trust-dir.sh [--dry-run] <dir>...       mark directories trusted
 #
 # Granting trust is an operator decision. Nothing here runs automatically:
@@ -75,6 +84,7 @@ while [[ $# -gt 0 ]]; do
     case "$1" in
         --list)    mode="list"; shift ;;
         --check)   mode="check"; shift ;;
+        --verify)  mode="verify"; shift ;;
         --dry-run) dry_run=1; shift ;;
         -h|--help) usage ;;
         --) shift; while [[ $# -gt 0 ]]; do dirs+=("$1"); shift; done ;;
@@ -101,7 +111,8 @@ rows = [(p, v.get("hasTrustDialogAccepted"))
         if isinstance(v, dict) and "hasTrustDialogAccepted" in v]
 for path, trusted in sorted(rows):
     print(f"{'trusted' if trusted else 'DECLINED':>8}  {path}")
-print(f"\n{len(rows)} entries; descendants inherit from the nearest listed ancestor.")
+print(f"\n{len(rows)} entries. Only truthy entries grant, and the search stops at the"
+      "\ngit root -- use --check to resolve a specific directory.")
 PY
     exit 0
 fi
@@ -115,35 +126,118 @@ for d in "${dirs[@]}"; do
     canonical+=("$(canonicalise "$d")")
 done
 
-if [[ "$mode" == "check" ]]; then
-    python3 - "$CONFIG" "${canonical[@]}" <<'PY'
+# The walk's boundary. NOT `--show-toplevel`: in a bare-repo-plus-worktrees
+# layout that returns the individual worktree, and --verify proved that wrong
+# (it predicted PROMPTS for a directory Claude actually trusts). The boundary
+# is the directory holding the git COMMON dir -- the project container, shared
+# by every worktree -- which explains both observed cases. Empty means "not in
+# a repo", i.e. an unbounded walk.
+git_root_of() {
+    local common
+    common=$(cd "$1" 2>/dev/null && git rev-parse --git-common-dir 2>/dev/null) || return 0
+    [[ -n "$common" ]] || return 0
+    # --git-common-dir may come back relative to the directory it resolved in.
+    common=$(cd "$1" && cd "$common" 2>/dev/null && pwd -P) || return 0
+    dirname "$common"
+}
+
+predict() {
+    local pairs=()
+    local d
+    for d in "$@"; do
+        pairs+=("$d" "$(git_root_of "$d")")
+    done
+    python3 - "$CONFIG" "${pairs[@]}" <<'PY'
 import json, sys, os
+
 cfg = json.load(open(sys.argv[1]))
 projects = cfg.get("projects", {})
 
-def effective(path):
-    """Nearest ancestor with an explicit entry decides; None if nothing does."""
-    cur = path
+def resolve(start, boundary):
+    """Port of `AB` from claude.exe v2.1.261.
+
+    Only truthy entries grant. `boundary` (the git root, or None) stops the
+    walk. Returns (trusted, granting_path_or_None)."""
+    cur = start
     while True:
+        if boundary is not None and cur != boundary and            not cur.startswith(boundary.rstrip("/") + "/"):
+            return False, None
         entry = projects.get(cur)
-        if isinstance(entry, dict) and "hasTrustDialogAccepted" in entry:
-            return entry["hasTrustDialogAccepted"], cur
+        if isinstance(entry, dict) and entry.get("hasTrustDialogAccepted"):
+            return True, cur
+        if cur == boundary:
+            return False, None
         parent = os.path.dirname(cur)
         if parent == cur:
-            return None, None
+            return False, None
         cur = parent
 
-for path in sys.argv[2:]:
-    trusted, source = effective(path)
-    if trusted is None:
-        print(f"  PROMPTS   {path}\n            (no entry on any ancestor)")
-    elif trusted:
-        via = "own entry" if source == path else f"inherited from {source}"
-        print(f"  trusted   {path}\n            ({via})")
+args = sys.argv[2:]
+for path, root in zip(args[0::2], args[1::2]):
+    boundary = root or None
+    trusted, granter = resolve(path, boundary)
+    where = (f"project root {boundary}" if boundary
+             else "/ (not in a git repo, so the walk is unbounded)")
+    if trusted:
+        via = "own entry" if granter == path else f"granted by {granter}"
+        print(f"  trusted   {path}\n            ({via}; {where})")
     else:
-        via = "own entry" if source == path else f"inherited from {source}"
-        print(f"  DECLINED  {path}\n            ({via}) -- will prompt, and a blind Enter re-declines")
+        blocked = ""
+        entry = projects.get(path)
+        if isinstance(entry, dict) and entry.get("hasTrustDialogAccepted") is False:
+            blocked = "; its own entry is false, which does NOT veto -- it is simply not a grant"
+        print(f"  PROMPTS   {path}\n            (no truthy entry at or under {where}{blocked})")
+print("\nPredicted from a port of Claude's internal resolver; run --verify to confirm.")
 PY
+}
+
+if [[ "$mode" == "check" ]]; then
+    predict "${canonical[@]}"
+    exit 0
+fi
+
+if [[ "$mode" == "verify" ]]; then
+    # The tripwire. Launch Claude in a throwaway tmux window, watch for the
+    # dialog or the composer, kill it. No key is ever sent, so this cannot
+    # answer the dialog or alter stored trust.
+    source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/claude-pane-detect.sh"
+    command -v tmux >/dev/null || { echo "Error: --verify needs tmux." >&2; exit 1; }
+    command -v claude >/dev/null || { echo "Error: --verify needs claude on PATH." >&2; exit 1; }
+
+    predict "${canonical[@]}"
+    echo
+    echo "Observed:"
+    sock="/tmp/claude-trust-verify.$$"
+    trap 'tmux -S "$sock" kill-server 2>/dev/null || true' EXIT
+    mismatch=0
+    for d in "${canonical[@]}"; do
+        expected="PROMPTS"
+        predict "$d" | grep -q '^  trusted' && expected="trusted"
+        tmux -S "$sock" new-session -d -s v -n w -c "$d" claude 2>/dev/null || {
+            echo "  ERROR     $d (could not start a tmux window)"; mismatch=1; continue; }
+        observed="timeout"
+        for _ in $(seq 1 120); do
+            pane=$(tmux -S "$sock" capture-pane -p -t v:w 2>/dev/null) || { observed="exited"; break; }
+            if claude_trust_modal_active "$pane"; then observed="PROMPTS"; break; fi
+            if claude_composer_ready "$pane"; then observed="trusted"; break; fi
+            sleep 0.25
+        done
+        tmux -S "$sock" kill-session -t v 2>/dev/null || true
+        if [[ "$observed" == "$expected" ]]; then
+            echo "  agrees    $d ($observed)"
+        else
+            echo "  MISMATCH  $d: predicted $expected, observed $observed"
+            mismatch=1
+        fi
+    done
+    if [[ "$mismatch" -ne 0 ]]; then
+        echo
+        echo "The prediction no longer matches this Claude build. resolve() is a port of" >&2
+        echo "an internal that has evidently changed; re-extract it before trusting --check." >&2
+        exit 2
+    fi
+    echo
+    echo "Prediction matches observed behaviour on this build."
     exit 0
 fi
 
