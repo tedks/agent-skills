@@ -422,9 +422,10 @@ if [[ -n "$prompt_file" ]]; then
                 if claude_trust_modal_active "$pane_tail"; then
                     echo "Error: Claude Code is asking whether to trust this directory before it will run:" >&2
                     echo "    $directory" >&2
-                    echo "  Nothing was pasted, and no key was sent. Its default button is" >&2
-                    echo "  \"No, exit\", so an automated Enter would not merely fail to launch --" >&2
-                    echo "  it would record a durable decline for this whole directory tree." >&2
+                    echo "  Nothing was pasted, and no key was sent." >&2
+                    echo "  Which button an Enter would hit is BUILD-SPECIFIC: 2.1.261 defaults" >&2
+                    echo "  to \"No, exit\", 2.1.220 defaults to \"Yes, I trust this folder\". So an" >&2
+                    echo "  automated Enter may silently GRANT trust to an unvetted directory." >&2
                     echo "  Answer it yourself, or re-run with --trust to grant it explicitly." >&2
                     exit 1
                 fi

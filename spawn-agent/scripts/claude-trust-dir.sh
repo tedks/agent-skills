@@ -46,8 +46,10 @@
 # Atomic rename prevents a torn file; it does not prevent a lost update. To
 # stop the second direction being SILENT, the write re-stats the file
 # immediately beforehand and refuses to replace it if it changed since we read
-# it -- turning data loss into a loud retry. A microsecond-wide window remains
-# between that check and the rename. Prefer running with few sessions live.
+# it -- turning data loss into a loud retry. The check hashes the file's bytes,
+# so it cannot be fooled by a same-size rewrite. A microsecond-wide window
+# remains between that check and the rename. Prefer running with few sessions
+# live.
 
 set -euo pipefail
 
@@ -133,12 +135,42 @@ done
 # by every worktree -- which explains both observed cases. Empty means "not in
 # a repo", i.e. an unbounded walk.
 git_root_of() {
-    local common
-    common=$(cd "$1" 2>/dev/null && git rev-parse --git-common-dir 2>/dev/null) || return 0
+    local target="$1" common boundary toplevel
+    # "git is missing" must never be mistaken for "not in a repo": the latter is
+    # legitimately an unbounded walk, the former is us not knowing, and silently
+    # unbounding would restore the blanket-trust semantics this predictor exists
+    # to correct. Callers get "?" and must refuse to claim an answer.
+    command -v git >/dev/null 2>&1 || { printf '?\n'; return 0; }
+    common=$(cd "$target" 2>/dev/null && git rev-parse --git-common-dir 2>/dev/null) || return 0
     [[ -n "$common" ]] || return 0
     # --git-common-dir may come back relative to the directory it resolved in.
-    common=$(cd "$1" && cd "$common" 2>/dev/null && pwd -P) || return 0
-    dirname "$common"
+    common=$(cd "$target" && cd "$common" 2>/dev/null && pwd -P) || return 0
+
+    # A bare repo's common dir IS the repo, so dirname() would hand back its
+    # parent -- one level too permissive. Use the repo itself.
+    if [[ "$(cd "$target" && git rev-parse --is-bare-repository 2>/dev/null)" == "true" ]]; then
+        printf '%s\n' "$common"
+        return 0
+    fi
+
+    boundary=$(dirname "$common")
+    # In a SUBMODULE the common dir points into the superproject's
+    # .git/modules/<name>, whose parent is not an ancestor of the target at all.
+    # resolve() tests the boundary before consulting the entry, so such a
+    # boundary makes even a direct truthy entry unreachable -- --check would
+    # then contradict --trust on the same directory. Only accept a boundary that
+    # actually contains the target; otherwise fall back to the worktree root.
+    if [[ "$target" == "$boundary" || "$target" == "$boundary"/* ]]; then
+        printf '%s\n' "$boundary"
+        return 0
+    fi
+    toplevel=$(cd "$target" && git rev-parse --show-toplevel 2>/dev/null) || true
+    if [[ -n "$toplevel" && ( "$target" == "$toplevel" || "$target" == "$toplevel"/* ) ]]; then
+        printf '%s\n' "$toplevel"
+        return 0
+    fi
+    # Nothing defensible: unbounded rather than wrong.
+    return 0
 }
 
 predict() {
@@ -174,6 +206,10 @@ def resolve(start, boundary):
 
 args = sys.argv[2:]
 for path, root in zip(args[0::2], args[1::2]):
+    if root == "?":
+        print(f"  UNKNOWN   {path}\n            (git is not available, so the boundary cannot be"
+              f" determined;\n             refusing to guess -- the answer depends on it)")
+        continue
     boundary = root or None
     trusted, granter = resolve(path, boundary)
     where = (f"project root {boundary}" if boundary
@@ -203,27 +239,49 @@ if [[ "$mode" == "verify" ]]; then
     source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/claude-pane-detect.sh"
     command -v tmux >/dev/null || { echo "Error: --verify needs tmux." >&2; exit 1; }
     command -v claude >/dev/null || { echo "Error: --verify needs claude on PATH." >&2; exit 1; }
+    # The prediction would read $CONFIG while the launched Claude reads its own
+    # profile, so any disagreement would be an artefact of the split rather than
+    # real drift -- and it would be reported as "the internal has changed".
+    if [[ -n "${CLAUDE_CONFIG_FILE:-}" ]]; then
+        echo "Error: --verify is meaningless with CLAUDE_CONFIG_FILE set." >&2
+        echo "  Prediction would read $CONFIG; the launched Claude would not." >&2
+        echo "  Unset it (CLAUDE_CONFIG_DIR is honoured by both and is fine)." >&2
+        exit 1
+    fi
 
     predict "${canonical[@]}"
     echo
     echo "Observed:"
     sock="/tmp/claude-trust-verify.$$"
-    trap 'tmux -S "$sock" kill-server 2>/dev/null || true' EXIT
+    # kill-server does not unlink the socket path; without the rm these
+    # accumulate one per run and a later reuse fails with "server exited
+    # unexpectedly".
+    trap 'tmux -S "$sock" kill-server 2>/dev/null || true; rm -f "$sock"' EXIT
     mismatch=0
     for d in "${canonical[@]}"; do
         expected="PROMPTS"
         predict "$d" | grep -q '^  trusted' && expected="trusted"
-        tmux -S "$sock" new-session -d -s v -n w -c "$d" claude 2>/dev/null || {
+        # Fixed wide geometry: claude_trust_dialog_specific matches phrases long
+        # enough to wrap on a narrow pane, and here we own the pane, so we simply
+        # render wide enough that they cannot.
+        tmux -S "$sock" new-session -d -x 200 -y 50 -s v -n w -c "$d" claude 2>/dev/null || {
             echo "  ERROR     $d (could not start a tmux window)"; mismatch=1; continue; }
         observed="timeout"
         for _ in $(seq 1 120); do
             pane=$(tmux -S "$sock" capture-pane -p -t v:w 2>/dev/null) || { observed="exited"; break; }
-            if claude_trust_modal_active "$pane"; then observed="PROMPTS"; break; fi
+            # The trust dialog specifically -- the broad detector also matches
+            # the bypass-permissions dialog, which would be reported as drift.
+            if claude_trust_dialog_specific "$pane"; then observed="PROMPTS"; break; fi
+            if claude_trust_modal_active "$pane"; then observed="other-dialog"; break; fi
             if claude_composer_ready "$pane"; then observed="trusted"; break; fi
             sleep 0.25
         done
         tmux -S "$sock" kill-session -t v 2>/dev/null || true
-        if [[ "$observed" == "$expected" ]]; then
+        if [[ "$observed" == "other-dialog" ]]; then
+            # Some other modal (bypass-permissions, an update chooser) got there
+            # first. That is not evidence either way about trust resolution.
+            echo "  INCONCLUSIVE $d: a non-trust dialog is on screen; cannot judge"
+        elif [[ "$observed" == "$expected" ]]; then
             echo "  agrees    $d ($observed)"
         else
             echo "  MISMATCH  $d: predicted $expected, observed $observed"
@@ -258,7 +316,7 @@ if [[ "${live:-0}" -gt 0 && "$dry_run" -eq 0 ]]; then
 fi
 
 DRY_RUN="$dry_run" python3 - "$CONFIG" "${canonical[@]}" <<'PY'
-import json, os, sys, tempfile
+import hashlib, json, os, sys, tempfile
 
 config_path = sys.argv[1]
 targets = sys.argv[2:]
@@ -266,9 +324,15 @@ dry_run = os.environ.get("DRY_RUN") == "1"
 
 # Fingerprint the file we are about to base our edit on, so a concurrent
 # writer between here and the rename is detected rather than silently undone.
+# Content hash, not (mtime, size): a same-size rewrite on a coarse-timestamp
+# filesystem can reproduce both, and the whole point of this check is to be
+# unable to miss a concurrent write.
 def fingerprint(path):
-    st = os.stat(path)
-    return (st.st_mtime_ns, st.st_size)
+    h = hashlib.sha256()
+    with open(path, "rb") as fh:
+        for chunk in iter(lambda: fh.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()
 
 before = fingerprint(config_path)
 

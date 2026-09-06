@@ -398,11 +398,24 @@ Claude Code'll be able to read, edit, and execute files here.
 Enter to confirm · Esc to cancel
 ```
 
-The default button is **"No, exit"** — the opposite of agy's. A blind Enter
-therefore cannot grant trust by accident. What it does instead is worse in a
-quieter way: the window exits, tmux reaps it, an unguarded spawner reports
-success having launched nothing, and the refusal is written to disk as
-`hasTrustDialogAccepted: false`.
+**Which button is the default is build-specific — do not assume either way.**
+Both of these were observed on one machine on the same day, an auto-update
+having re-pointed the `claude` symlink between them:
+
+```
+v2.1.261:  ❯ No, exit                    / Yes, I trust this folder
+v2.1.220:  ❯ 1. Yes, I trust this folder / 2. No, exit
+```
+
+So a blind Enter may *decline* on one build and silently **grant trust to a
+directory nobody vetted** on another — the same failure this skill already
+treats as serious for agy. On the declining build the damage is quieter but
+real: the window exits, tmux reaps it, an unguarded spawner reports success
+having launched nothing, and the refusal is persisted.
+
+Detection matches fragments present in **both** layouts, so it fails closed on
+both. Note that `--verify` **cannot** catch this class of drift: it compares a
+trust *prediction* against observation, and both layouts observe as a prompt.
 
 **How trust actually resolves.** Two rules, both counter-intuitive, both
 established by extracting the resolver from the Claude binary rather than
