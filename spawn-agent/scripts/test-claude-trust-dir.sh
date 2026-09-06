@@ -142,10 +142,12 @@ printf '%s\n' "$out" | grep -qE '^  (trusted|PROMPTS)' \
 POSIXLY_CORRECT=1 CLAUDE_CONFIG_FILE="$CFG" "$TRUST" --check "$TEST_DIR/plain" >/dev/null 2>&1 \
     || fail "--check aborts under POSIX mode on a real repo"
 
-# inherit_errexit is a SEPARATE mechanism that reaches the same place, and it is
-# reachable from the environment (BASHOPTS), so pin it independently rather than
-# assuming POSIX mode stands in for it. Verified live: the unshielded form exits
-# 128 here.
+# POSIX mode turns inherit_errexit ON, so these are two routes into ONE
+# mechanism rather than two mechanisms. Pinned separately anyway: BASHOPTS is
+# reachable from the environment independently of POSIX mode, and a future bash
+# could decouple them. Note the `env` prefix is required -- a bare
+# `BASHOPTS=... cmd` trips bash's readonly guard and never reaches the child,
+# which silently turns this assertion into a no-op.
 env BASHOPTS=inherit_errexit CLAUDE_CONFIG_FILE="$CFG" "$TRUST" --check "$TEST_DIR/norepo" >/dev/null 2>&1 \
     || fail "--check aborts under inherit_errexit on a non-repo"
 env BASHOPTS=inherit_errexit POSIXLY_CORRECT=1 CLAUDE_CONFIG_FILE="$CFG" \
