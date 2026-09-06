@@ -153,11 +153,15 @@ env BASHOPTS=inherit_errexit POSIXLY_CORRECT=1 CLAUDE_CONFIG_FILE="$CFG" \
     || fail "--check aborts under inherit_errexit + POSIX mode"
 
 # No stderr-capture temp file may be left behind on the failure path.
-_tmp_before=$(find /tmp -maxdepth 1 -name 'tmp.*' 2>/dev/null | wc -l)
-CLAUDE_CONFIG_FILE="$CFG" "$TRUST" --check "$TEST_DIR/norepo" >/dev/null 2>&1 || true
-_tmp_after=$(find /tmp -maxdepth 1 -name 'tmp.*' 2>/dev/null | wc -l)
-[[ "$_tmp_before" -eq "$_tmp_after" ]] \
-    || fail "--check leaked a temp file on the non-repo path"
+# Scoped to a private TMPDIR rather than counting /tmp: this machine runs many
+# concurrent sessions, so a global before/after count races against unrelated
+# mktemp activity (false failure) AND would miss a leak from an implementation
+# that honours a different TMPDIR (false pass).
+_leakdir="$TEST_DIR/tmpprobe"
+mkdir -p "$_leakdir"
+TMPDIR="$_leakdir" CLAUDE_CONFIG_FILE="$CFG" "$TRUST" --check "$TEST_DIR/norepo" >/dev/null 2>&1 || true
+[[ -z "$(ls -A "$_leakdir")" ]] \
+    || fail "--check leaked a temp file on the non-repo path: $(ls -A "$_leakdir")"
 
 # --- predictor ---------------------------------------------------------
 check() { CLAUDE_CONFIG_FILE="$CFG" "$TRUST" --check "$@" 2>&1; }
