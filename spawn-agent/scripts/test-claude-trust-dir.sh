@@ -75,6 +75,14 @@ expect_root "$TEST_DIR/norepo"             ""
 [[ "$(PATH=/nonexistent git_root_of "$TEST_DIR/plain")" == "?" ]] \
     || fail "git-absent must yield '?', not an unbounded walk"
 
+# A git that is PRESENT but broken cannot answer either, and `command -v` does
+# not catch that -- so the probe is `git --version`, not mere existence.
+mkdir -p "$TEST_DIR/brokenbin"
+printf '#!/bin/sh\nexit 127\n' > "$TEST_DIR/brokenbin/git"
+chmod +x "$TEST_DIR/brokenbin/git"
+[[ "$(PATH="$TEST_DIR/brokenbin:$PATH" git_root_of "$TEST_DIR/plain")" == "?" ]] \
+    || fail "a broken git must yield '?', not a silent unbounded walk"
+
 # --- predictor ---------------------------------------------------------
 check() { CLAUDE_CONFIG_FILE="$CFG" "$TRUST" --check "$@" 2>&1; }
 grant() { CLAUDE_CONFIG_FILE="$CFG" "$TRUST" "$@" >/dev/null 2>&1; }

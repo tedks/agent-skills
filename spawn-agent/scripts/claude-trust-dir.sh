@@ -140,7 +140,11 @@ git_root_of() {
     # legitimately an unbounded walk, the former is us not knowing, and silently
     # unbounding would restore the blanket-trust semantics this predictor exists
     # to correct. Callers get "?" and must refuse to claim an answer.
-    command -v git >/dev/null 2>&1 || { printf '?\n'; return 0; }
+    # `command -v` only catches git being ABSENT. A git that is present but
+    # broken (bad install, unreadable objects) also cannot answer, and must not
+    # be mistaken for "not in a repo" -- that reading silently unbounds the walk
+    # and restores the blanket-trust semantics this predictor exists to correct.
+    git --version >/dev/null 2>&1 || { printf '?\n'; return 0; }
     common=$(cd "$target" 2>/dev/null && git rev-parse --git-common-dir 2>/dev/null) || return 0
     [[ -n "$common" ]] || return 0
     # --git-common-dir may come back relative to the directory it resolved in.
@@ -257,15 +261,31 @@ if [[ "$mode" == "verify" ]]; then
     # accumulate one per run and a later reuse fails with "server exited
     # unexpectedly".
     trap 'tmux -S "$sock" kill-server 2>/dev/null || true; rm -f "$sock"' EXIT
+    # Three counters, not one flag. "Nothing disagreed" is NOT the same as
+    # "the prediction was confirmed": a run in which every directory was
+    # unverifiable must not report success, or the tripwire is disarmed while
+    # claiming to be armed.
     mismatch=0
+    verified=0
+    unverifiable=0
     for d in "${canonical[@]}"; do
+        pred=$(predict "$d")
+        # An UNKNOWN prediction is not a prediction of PROMPTS. Verifying
+        # against it would manufacture a MISMATCH out of a question we declined
+        # to answer.
+        if printf '%s\n' "$pred" | grep -q '^  UNKNOWN'; then
+            echo "  SKIPPED   $d: no prediction was made (git unavailable), nothing to verify"
+            unverifiable=$((unverifiable + 1))
+            continue
+        fi
         expected="PROMPTS"
-        predict "$d" | grep -q '^  trusted' && expected="trusted"
+        printf '%s\n' "$pred" | grep -q '^  trusted' && expected="trusted"
         # Fixed wide geometry: claude_trust_dialog_specific matches phrases long
         # enough to wrap on a narrow pane, and here we own the pane, so we simply
         # render wide enough that they cannot.
         tmux -S "$sock" new-session -d -x 200 -y 50 -s v -n w -c "$d" claude 2>/dev/null || {
-            echo "  ERROR     $d (could not start a tmux window)"; mismatch=1; continue; }
+            echo "  ERROR     $d (could not start a tmux window)"
+            unverifiable=$((unverifiable + 1)); continue; }
         observed="timeout"
         for _ in $(seq 1 120); do
             pane=$(tmux -S "$sock" capture-pane -p -t v:w 2>/dev/null) || { observed="exited"; break; }
@@ -277,25 +297,47 @@ if [[ "$mode" == "verify" ]]; then
             sleep 0.25
         done
         tmux -S "$sock" kill-session -t v 2>/dev/null || true
-        if [[ "$observed" == "other-dialog" ]]; then
-            # Some other modal (bypass-permissions, an update chooser) got there
-            # first. That is not evidence either way about trust resolution.
-            echo "  INCONCLUSIVE $d: a non-trust dialog is on screen; cannot judge"
-        elif [[ "$observed" == "$expected" ]]; then
-            echo "  agrees    $d ($observed)"
-        else
-            echo "  MISMATCH  $d: predicted $expected, observed $observed"
-            mismatch=1
-        fi
+        case "$observed" in
+            other-dialog)
+                # Some other modal (bypass-permissions, an update chooser) got
+                # there first. Not evidence either way about trust resolution.
+                echo "  INCONCLUSIVE $d: a non-trust dialog is on screen; cannot judge"
+                unverifiable=$((unverifiable + 1))
+                ;;
+            timeout|exited)
+                # Claude never reached a state we can classify. That is a
+                # failure to observe, not evidence that the prediction is wrong.
+                echo "  INCONCLUSIVE $d: claude $observed before showing a dialog or composer"
+                unverifiable=$((unverifiable + 1))
+                ;;
+            "$expected")
+                echo "  agrees    $d ($observed)"
+                verified=$((verified + 1))
+                ;;
+            *)
+                echo "  MISMATCH  $d: predicted $expected, observed $observed"
+                mismatch=$((mismatch + 1))
+                ;;
+        esac
     done
+    echo
     if [[ "$mismatch" -ne 0 ]]; then
-        echo
         echo "The prediction no longer matches this Claude build. resolve() is a port of" >&2
         echo "an internal that has evidently changed; re-extract it before trusting --check." >&2
         exit 2
     fi
-    echo
-    echo "Prediction matches observed behaviour on this build."
+    if [[ "$verified" -eq 0 ]]; then
+        echo "Verified NOTHING: all $unverifiable target(s) were unverifiable." >&2
+        echo "  This is not a pass. The tripwire made no observation it could compare," >&2
+        echo "  so --check remains unconfirmed on this build." >&2
+        exit 3
+    fi
+    if [[ "$unverifiable" -ne 0 ]]; then
+        echo "Partial: $verified confirmed, $unverifiable unverifiable, 0 disagreements." >&2
+        echo "  The confirmed ones agree, but this run did not cover everything asked." >&2
+        exit 3
+    fi
+    echo "Prediction matches observed behaviour on this build ($verified confirmed)."
     exit 0
 fi
 
