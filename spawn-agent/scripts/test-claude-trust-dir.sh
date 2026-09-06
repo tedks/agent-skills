@@ -98,6 +98,34 @@ chmod +x "$TEST_DIR/brokenbin/git"
 [[ "$(PATH="$TEST_DIR/brokenbin:$PATH" git_root_of "$TEST_DIR/plain")" == "?" ]] \
     || fail "a broken git must yield '?', not a silent unbounded walk"
 
+# And a git that answers --version fine but cannot inspect THIS repo -- dubious
+# ownership, a permissions failure, a wrapper. That failure is not "not a repo",
+# so it must not silently unbound the walk either.
+mkdir -p "$TEST_DIR/partialbin"
+cat > "$TEST_DIR/partialbin/git" <<'STUB'
+#!/bin/sh
+case "$1" in
+  --version) echo "git version 2.99.0"; exit 0 ;;
+  *) echo "fatal: detected dubious ownership in repository" >&2; exit 128 ;;
+esac
+STUB
+chmod +x "$TEST_DIR/partialbin/git"
+[[ "$(PATH="$TEST_DIR/partialbin:$PATH" git_root_of "$TEST_DIR/plain")" == "?" ]] \
+    || fail "a git that fails rev-parse for a non-'not a repository' reason must yield '?'"
+
+# ...but a genuine "not a git repository" must still mean unbounded, not "?".
+mkdir -p "$TEST_DIR/norepobin"
+cat > "$TEST_DIR/norepobin/git" <<'STUB'
+#!/bin/sh
+case "$1" in
+  --version) echo "git version 2.99.0"; exit 0 ;;
+  *) echo "fatal: not a git repository (or any of the parent directories): .git" >&2; exit 128 ;;
+esac
+STUB
+chmod +x "$TEST_DIR/norepobin/git"
+[[ -z "$(PATH="$TEST_DIR/norepobin:$PATH" git_root_of "$TEST_DIR/plain")" ]] \
+    || fail "a genuine not-a-repository must yield unbounded, not '?'"
+
 # --- predictor ---------------------------------------------------------
 check() { CLAUDE_CONFIG_FILE="$CFG" "$TRUST" --check "$@" 2>&1; }
 grant() { CLAUDE_CONFIG_FILE="$CFG" "$TRUST" "$@" >/dev/null 2>&1; }

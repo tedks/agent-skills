@@ -153,7 +153,22 @@ git_root_of() {
     # be mistaken for "not in a repo" -- that reading silently unbounds the walk
     # and restores the blanket-trust semantics this predictor exists to correct.
     git --version >/dev/null 2>&1 || { printf '?\n'; return 0; }
-    common=$(cd "$target" 2>/dev/null && git rev-parse --git-common-dir 2>/dev/null) || return 0
+    # A rev-parse failure is ambiguous: "not a git repository" legitimately means
+    # an unbounded walk, but dubious-ownership rejections, permission errors and
+    # wrapper failures ALSO fail here -- and reading those as "not a repo" would
+    # silently unbound the walk while Claude, running as a user git does trust,
+    # finds the repo and bounds normally. LC_ALL=C so the message is stable.
+    local err status
+    err=$(mktemp)
+    common=$(cd "$target" 2>/dev/null && LC_ALL=C git rev-parse --git-common-dir 2>"$err")
+    status=$?
+    if (( status != 0 )); then
+        if grep -qi 'not a git repository' "$err"; then
+            rm -f "$err"; return 0          # genuinely outside a repo
+        fi
+        rm -f "$err"; printf '?\n'; return 0   # git could not tell us; do not guess
+    fi
+    rm -f "$err"
     [[ -n "$common" ]] || return 0
     # --git-common-dir may come back relative to the directory it resolved in.
     common=$(cd "$target" && cd "$common" 2>/dev/null && pwd -P) || return 0
