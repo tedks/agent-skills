@@ -450,8 +450,8 @@ run_claude claude-ready >/dev/null
 grep -q '^paste-buffer ' "$LOG"
 
 # Claude: the trust dialog is refused without sending anything. Its default
-# button is "No, exit", so an Enter here would not merely fail to launch -- it
-# would persist a decline that suppresses trust well beyond this directory.
+# button is BUILD-SPECIFIC -- 2.1.220 defaults to "Yes, I trust this folder" --
+# so an Enter here may silently grant trust to an unvetted directory.
 : > "$LOG"
 if run_claude claude-trust >/dev/null 2>"$STDERR"; then
     echo 'FAIL: Claude trust dialog was treated as a composer' >&2

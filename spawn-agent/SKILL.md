@@ -423,7 +423,10 @@ inferred from behaviour — an inferred rule was wrong, and so was the first
 port:
 
 - **Only a truthy entry grants.** A `false` entry does *not* veto; it is
-  skipped and the walk continues upward.
+  skipped and the walk continues upward. `false` is also what Claude writes by
+  default for any project it opens — observed on a directory it trusted by
+  inheritance without ever showing the dialog — so a `false` entry is **not**
+  evidence that anyone declined anything.
 - **The walk stops at the project container** — the directory holding the git
   *common* dir, shared by every worktree of a repo. A truthy entry above that
   boundary never applies, so `~/Projects: true` does **not** blanket-trust the

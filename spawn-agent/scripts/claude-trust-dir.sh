@@ -18,11 +18,19 @@
 # directions and PR #111's council caught it. The real rule:
 #
 #   * only a TRUTHY hasTrustDialogAccepted grants. A `false` entry does NOT
-#     veto: it is skipped and the walk continues upward.
+#     veto: it is skipped and the walk continues upward. Note `false` is also
+#     what Claude WRITES BY DEFAULT for any project it opens -- observed on a
+#     directory it trusted by inheritance without ever showing the dialog. So a
+#     false entry is NOT evidence that anyone declined anything, and must not be
+#     reported as one.
 #   * the walk is BOUNDED by the project container -- the directory holding the
 #     git common dir, shared by every worktree of a repo. A truthy entry above
 #     that boundary never applies, so ~/Projects=true does NOT blanket-trust a
 #     repo beneath it. Outside a repo the walk runs to the filesystem root.
+#
+# `--verify` launches a real Claude, which RECORDS THE PROJECT in the config as
+# a side effect (a new entry, with hasTrustDialogAccepted false by default). It
+# never answers the dialog and never grants trust, but it is not read-only.
 #
 # This is an undocumented internal and WILL drift. `--verify` is the tripwire:
 # it launches Claude in a throwaway tmux window, observes whether the dialog
@@ -408,7 +416,7 @@ for path in targets:
     entry["hasTrustDialogAccepted"] = True
     changed.append(path)
     print(f"  {'would trust' if dry_run else 'trusted'}      {path}"
-          + ("  (was an explicit decline)" if previous is False else ""))
+          + ("  (previous value was false)" if previous is False else ""))
 
 if not changed:
     print("\nNothing to change.")
