@@ -120,9 +120,15 @@ rows = [(p, v.get("hasTrustDialogAccepted"))
         for p, v in projects.items()
         if isinstance(v, dict) and "hasTrustDialogAccepted" in v]
 for path, trusted in sorted(rows):
-    print(f"{'trusted' if trusted else 'DECLINED':>8}  {path}")
-print(f"\n{len(rows)} entries. Only truthy entries grant, and the search stops at the"
-      "\ngit root -- use --check to resolve a specific directory.")
+    # NOT "DECLINED": false is what Claude writes by default for every project
+    # it opens, so the overwhelming majority of these are defaults rather than
+    # refusals. Calling them declines sends an operator hunting for a stray
+    # refusal through dozens of false alarms -- and may prompt needless --trust
+    # writes to a live config.
+    print(f"{'trusted' if trusted else 'no grant':>8}  {path}")
+print(f"\n{len(rows)} entries. Only a truthy entry grants; 'no grant' means false or"
+      "\nunset, which is Claude's default and NOT a decline. The search also stops"
+      "\nat the project root -- use --check to resolve a specific directory.")
 PY
     exit 0
 fi
