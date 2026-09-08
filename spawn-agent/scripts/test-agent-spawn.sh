@@ -66,6 +66,9 @@ for arg in shlex.split(__import__('sys').argv[1]):
         with open(os.environ['FAKE_COMPACT_PATHS'], 'a') as out:
             out.write(path + '\n')
 PY
+        if [[ -n "${FAKE_MUTATE_PROMPT:-}" ]]; then
+            printf '%s' 'A changed caller task must not be delivered' > "$FAKE_MUTATE_PROMPT"
+        fi
         ;;
     display-message)
         case " $* " in
@@ -159,9 +162,9 @@ if [[ "$1" == queue && "$2" == --help ]]; then
     printf '%s\n' 'Usage: codex queue --thread <THREAD> --message <TEXT>'
 elif [[ "$1" == queue ]]; then
     [[ "${FAKE_QUEUE_MODE:-available}" != rejected ]] || exit 1
-    [[ "$2" == --thread && "$4" == --message && $# -eq 5 ]]
+    [[ "$2" == --thread && "$4" == --message=* && $# -eq 4 ]]
     printf '%s' "$3" > "$FAKE_QUEUE_THREAD"
-    printf '%s' "$5" > "$FAKE_QUEUED_TASK"
+    printf '%s' "${4#--message=}" > "$FAKE_QUEUED_TASK"
 else
     printf '%s\n' "$@" > "$FAKE_CODEX_ARGS"
 fi
@@ -374,6 +377,7 @@ cmp "$PROMPT" "$FAKE_QUEUED_TASK"
 # unsent. The only loaded input is the explicitly-authorized /compact command.
 : > "$LOG"
 printf '%s\n' '{"type":"session_meta","payload":{"id":"01a07050-1111-7222-8333-444444444444","forked_from_id":"01a0702a-7b5e-71e0-bb62-287d55a7f9ba"}}' > "$ROLLOUT"
+: > "$FAKE_QUEUED_TASK"
 if FAKE_COMPACTION_MODE=none run_spawn codex-ready \
     --compact-prompt-file "$COMPACT_PROMPT" --compact-timeout 1 \
     >/dev/null 2>"$STDERR"; then
@@ -381,6 +385,7 @@ if FAKE_COMPACTION_MODE=none run_spawn codex-ready \
     exit 1
 fi
 grep -Fq 'task prompt not sent' "$STDERR"
+[[ ! -s "$FAKE_QUEUED_TASK" ]]
 [[ $(grep -c '^load-buffer ' "$LOG") -eq 1 ]]
 if grep -Fq "$PROMPT" "$LOG"; then
     echo 'FAIL: task was loaded before compaction completed' >&2
@@ -417,6 +422,14 @@ for mode in unavailable rejected; do
     if [[ "$mode" == unavailable ]]; then [[ ! -s "$LOG" ]]; fi
 done
 
+: > "$LOG"
+: > "$FAKE_QUEUED_TASK"
+if FAKE_QUEUE_MODE=rejected run_spawn codex-ready --compact-prompt-file "$COMPACT_PROMPT" \
+        >"$TEST_DIR/stdout" 2>"$STDERR"; then exit 1; fi
+[[ ! -s "$FAKE_QUEUED_TASK" ]]
+[[ $(grep -c '^load-buffer ' "$LOG") -eq 1 ]]
+! grep -q '^Spawned ' "$TEST_DIR/stdout"
+
 # Reject parent identity, unrelated forks, and partial metadata before sending.
 cp "$ROLLOUT" "$TEST_DIR/saved-rollout"
 for meta in \
@@ -435,7 +448,7 @@ cp "$TEST_DIR/saved-rollout" "$ROLLOUT"
 
 # Exact multiline UTF-8 bytes and trailing newlines survive argv delivery.
 cp "$PROMPT" "$TEST_DIR/saved-prompt"
-printf 'Quotes " and shell $() `text`; café\nsecond line\n\n' > "$PROMPT"
+printf '%s\n\n' '- Review quotes " and shell $() `text`; café' 'second line' > "$PROMPT"
 run_spawn codex-ready --codex-bin "$TEST_DIR/bin/codex" --model 'chosen-model' >/dev/null
 cmp "$PROMPT" "$FAKE_QUEUED_TASK"
 grep -Fq -- '-m chosen-model' "$LAUNCH"
@@ -443,6 +456,23 @@ python3 -c 'import sys; print("x" * 32768, end="")' > "$PROMPT"
 : > "$LOG"
 if run_spawn codex-ready >/dev/null 2>"$STDERR"; then exit 1; fi
 [[ ! -s "$LOG" ]]
+cp "$TEST_DIR/saved-prompt" "$PROMPT"
+
+# Executable/model selection is explicit, shell-escaped, and overrideable.
+cp "$TEST_DIR/bin/codex" "$TEST_DIR/bin/chosen codex"
+SPAWN_CODEX_BIN="$TEST_DIR/bin/chosen codex" SPAWN_CODEX_MODEL=env-model \
+    run_spawn codex-ready >/dev/null
+grep -Fq 'chosen\ codex fork' "$LAUNCH"
+grep -Fq -- '-m env-model' "$LAUNCH"
+SPAWN_CODEX_MODEL=env-model run_spawn codex-ready --model cli-model >/dev/null
+grep -Fq -- '-m cli-model' "$LAUNCH"
+: > "$LOG"
+if env -u TMUX PATH="$TEST_DIR/bin:$PATH" FAKE_TMUX_LOG="$LOG" \
+        "$SPAWN" test:department claude . --model arbitrary >/dev/null 2>"$STDERR"; then exit 1; fi
+[[ ! -s "$LOG" ]]
+FAKE_MUTATE_PROMPT="$PROMPT" run_spawn codex-ready >/dev/null
+cmp "$TEST_DIR/saved-prompt" "$FAKE_QUEUED_TASK"
+! cmp -s "$PROMPT" "$FAKE_QUEUED_TASK"
 cp "$TEST_DIR/saved-prompt" "$PROMPT"
 
 # The JSONL watcher ignores prompt/user/commentary/non-prefix matches. A valid
@@ -567,3 +597,4 @@ if grep -q '^new-session' "$LOG"; then
 fi
 
 echo 'PASS: Codex fork spawning, Claude trust-dialog refusal (incl. wrapped), and JSONL recap watching'
+python3 "$SCRIPT_DIR/test-codex-fork-task.py"

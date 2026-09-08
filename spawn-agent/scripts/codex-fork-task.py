@@ -71,7 +71,7 @@ def main():
         task = task_text(args.task)
         # Native queue currently accepts argv, not stdin. Pass one exact UTF-8
         # argument, including trailing newlines, without shell interpolation.
-        result = subprocess.run([args.executable, "queue", "--thread", child, "--message", task],
+        result = subprocess.run([args.executable, "queue", "--thread", child, "--message=" + task],
                                 capture_output=True, timeout=15)
         if result.returncode:
             raise ValueError("Codex queue rejected task delivery; inspect the child before retrying (no automatic paste fallback)")
@@ -81,6 +81,10 @@ def main():
 if __name__ == "__main__":
     try:
         main()
-    except (OSError, ValueError, KeyError, TypeError, subprocess.TimeoutExpired) as error:
+    except subprocess.TimeoutExpired:
+        # TimeoutExpired's string includes argv, which would echo the task.
+        print("Error: Codex command timed out; inspect the existing child before retrying task delivery.", file=sys.stderr)
+        sys.exit(1)
+    except (OSError, ValueError, KeyError, TypeError) as error:
         print(f"Error: {error}", file=sys.stderr)
         sys.exit(1)

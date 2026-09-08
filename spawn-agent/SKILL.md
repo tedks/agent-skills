@@ -182,8 +182,10 @@ it. Ordinary nonfork/Claude/agy prompts still use file-backed tmux paste.
 Queue support is checked before creating a window; older Codex versions without
 `queue --thread/--message` are explicitly unsupported for tasked forks.
 
-The queue CLI was inspected on `codex-cli 0.153.4`; automated fake-CLI/TUI tests
-cover this launcher protocol. Earlier compaction-only testing on `0.146.0`
+One disposable real fork on `codex-cli 0.153.4` verified distinct child ancestry,
+completed compaction, task delivery and its marker-qualified final recap.
+Automated fake-CLI/TUI tests cover failure paths and exact task bytes, including
+leading bullets and trailing newlines. Earlier compaction-only testing on `0.146.0`
 does not establish queue support. Recheck the real fork workflow after a Codex
 upgrade changes these interfaces.
 
@@ -408,7 +410,8 @@ of waiting for user input. To detect when agents are ready:
 - Use `tmux-info.sh` to see all sessions and windows on the current server
 - Use claude-send.sh to send messages to running agents
 - Socket detection is automatic -- you don't need to think about `-L` or `-S`
-- Prompts are passed via temp files to avoid ARG_MAX limits
+- Pass prompts by file. Fork tasks use the bounded queue argument described above;
+  other launches use tmux buffers to avoid ARG_MAX limits.
 
 ## Reusing the surrounding tools
 

@@ -111,6 +111,7 @@ _cleanup_command_file=""
 _cleanup_rollout_output=""
 _cleanup_cursor_output=""
 _cleanup_compact_file=""
+_cleanup_fork_task=""
 
 # Trap to clean up temp files on exit/interrupt (only files we created).
 # Set early so failure paths during parsing don't leak temp files.
@@ -124,6 +125,7 @@ cleanup() {
     if [[ -n "$_cleanup_rollout_output" ]]; then rm -f "$_cleanup_rollout_output" || true; fi
     if [[ -n "$_cleanup_cursor_output" ]]; then rm -f "$_cleanup_cursor_output" || true; fi
     if [[ -n "$_cleanup_compact_file" ]]; then rm -f "$_cleanup_compact_file" || true; fi
+    if [[ -n "$_cleanup_fork_task" ]]; then rm -f "$_cleanup_fork_task" || true; fi
     return 0
 }
 trap cleanup EXIT
@@ -317,6 +319,11 @@ if [[ -n "$prompt_file" ]]; then
 fi
 
 if [[ -n "$fork_session" && -n "$prompt_file" ]]; then
+    # Keep compaction and later delivery on the same assignment even if the
+    # caller edits their task file while this child is starting.
+    _cleanup_fork_task=$(mktemp /tmp/spawn-agent-fork-task.XXXXXX)
+    cp -- "$prompt_file" "$_cleanup_fork_task"
+    prompt_file="$_cleanup_fork_task"
     python3 "$SCRIPT_DIR/codex-fork-task.py" preflight "$codex_bin" "$prompt_file"
 fi
 
