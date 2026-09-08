@@ -88,6 +88,9 @@ PY
     send-keys)
         if [[ "$(<"$FAKE_COMPOSER")" == '/compact' && \
               "${FAKE_COMPACTION_MODE:-complete}" == complete ]]; then
+            if [[ -n "${FAKE_STARTUP_RECEIPT:-}" ]]; then
+                [[ "$(<"$FAKE_STARTUP_RECEIPT")" -eq $(wc -c < "$FAKE_ROLLOUT") ]]
+            fi
             printf '%s\n' '{"type":"event_msg","payload":{"type":"context_compacted"}}' >> "$FAKE_ROLLOUT"
         fi
         : > "$FAKE_COMPOSER"
@@ -343,9 +346,12 @@ grep -Fq "$TEST_DIR/repo\\ with\\ spaces" "$LOG"
 : > "$LOG"
 ROLLOUT_OUT="$TEST_DIR/child-rollout"
 CURSOR_OUT="$TEST_DIR/recap-cursor"
-run_spawn codex-ready \
+STARTUP_OUT="$TEST_DIR/startup-cursor"
+startup_before=$("$WATCH" cursor "$ROLLOUT")
+FAKE_STARTUP_RECEIPT="$STARTUP_OUT" run_spawn codex-ready \
     --compact-prompt-file "$COMPACT_PROMPT" \
     --rollout-path-file "$ROLLOUT_OUT" \
+    --startup-cursor-file "$STARTUP_OUT" \
     --recap-cursor-file "$CURSOR_OUT" >/dev/null
 grep -Fq 'experimental_compact_prompt_file' "$LAUNCH"
 grep -Fq 'check_for_update_on_startup=false' "$LAUNCH"
@@ -368,10 +374,28 @@ for index in "${!codex_args[@]}"; do
 done
 [[ "$(<"$ROLLOUT_OUT")" == "$ROLLOUT" ]]
 [[ "$(<"$CURSOR_OUT")" -eq $(wc -c < "$ROLLOUT") ]]
+[[ "$(<"$STARTUP_OUT")" -eq "$startup_before" ]]
+[[ "$(<"$STARTUP_OUT")" -lt "$(<"$CURSOR_OUT")" ]]
+[[ "$(stat -c %a "$STARTUP_OUT")" == 600 ]]
 mapfile -t loaded_buffers < <(awk '$1 == "load-buffer" { print $3 }' "$LOG")
 [[ ${#loaded_buffers[@]} -eq 1 ]]
 [[ "${loaded_buffers[0]}" == spawn-agent-compact-* ]]
 cmp "$PROMPT" "$FAKE_QUEUED_TASK"
+
+# The optional startup receipt needs actual fork compaction and a distinct file.
+for args in \
+    '--startup-cursor-file only' \
+    '--startup-cursor-file'; do
+    : > "$LOG"
+    read -r -a invalid_args <<< "$args"
+    if run_spawn codex-ready "${invalid_args[@]}" >/dev/null 2>"$STDERR"; then exit 1; fi
+    [[ ! -s "$LOG" ]]
+done
+: > "$LOG"
+if run_spawn codex-ready --compact-prompt-file "$COMPACT_PROMPT" \
+        --rollout-path-file "$ROLLOUT_OUT" --startup-cursor-file "$ROLLOUT_OUT" \
+        >/dev/null 2>"$STDERR"; then exit 1; fi
+[[ ! -s "$LOG" ]]
 
 # If structured compaction completion never arrives, fail with the task still
 # unsent. The only loaded input is the explicitly-authorized /compact command.

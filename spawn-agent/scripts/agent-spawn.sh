@@ -13,6 +13,7 @@
 #       --compact-timeout <seconds>   Compaction timeout (default: 600)
 #       --rollout-path-file <file>    Record the child Codex rollout path
 #       --recap-cursor-file <file>    Record where recap watching should begin
+#       --startup-cursor-file <file> Record the cursor before fork compaction
 #       --codex-bin <executable>     Codex executable (default: codex on PATH)
 #       --model <model>              Codex model (default: Codex configuration)
 #
@@ -78,6 +79,7 @@ usage() {
     echo "  --compact-timeout: seconds to wait for structured compaction completion" >&2
     echo "  --rollout-path-file: atomically write the child Codex rollout path" >&2
     echo "  --recap-cursor-file: atomically write the safe JSONL recap start offset" >&2
+    echo "  --startup-cursor-file: atomically write the pre-compaction JSONL offset" >&2
     echo "  --codex-bin: executable path/name (or SPAWN_CODEX_BIN; default codex)" >&2
     echo "  --model: Codex model (or SPAWN_CODEX_MODEL; default Codex config)" >&2
     exit 1
@@ -103,6 +105,7 @@ compact_timeout=600
 compact_timeout_set=""
 rollout_path_file=""
 recap_cursor_file=""
+startup_cursor_file=""
 codex_bin="${SPAWN_CODEX_BIN:-codex}"
 codex_model="${SPAWN_CODEX_MODEL:-}"
 codex_options_set=""
@@ -110,6 +113,7 @@ _cleanup_prompt_file=""
 _cleanup_command_file=""
 _cleanup_rollout_output=""
 _cleanup_cursor_output=""
+_cleanup_startup_output=""
 _cleanup_compact_file=""
 _cleanup_fork_task=""
 
@@ -124,6 +128,7 @@ cleanup() {
     if [[ -n "$_cleanup_command_file" ]]; then rm -f "$_cleanup_command_file" || true; fi
     if [[ -n "$_cleanup_rollout_output" ]]; then rm -f "$_cleanup_rollout_output" || true; fi
     if [[ -n "$_cleanup_cursor_output" ]]; then rm -f "$_cleanup_cursor_output" || true; fi
+    if [[ -n "$_cleanup_startup_output" ]]; then rm -f "$_cleanup_startup_output" || true; fi
     if [[ -n "$_cleanup_compact_file" ]]; then rm -f "$_cleanup_compact_file" || true; fi
     if [[ -n "$_cleanup_fork_task" ]]; then rm -f "$_cleanup_fork_task" || true; fi
     return 0
@@ -205,6 +210,14 @@ while [[ $# -gt 0 ]]; do
                 exit 1
             fi
             recap_cursor_file="$2"
+            shift 2
+            ;;
+        --startup-cursor-file)
+            if [[ $# -lt 2 || -z "$2" ]]; then
+                echo "Error: --startup-cursor-file requires a file path" >&2
+                exit 1
+            fi
+            startup_cursor_file="$2"
             shift 2
             ;;
         *)
@@ -305,6 +318,10 @@ if [[ -n "$compact_timeout_set" && -z "$compact_prompt_file" ]]; then
     echo "Error: --compact-timeout requires --compact-prompt-file" >&2
     exit 1
 fi
+if [[ -n "$startup_cursor_file" && ( -z "$compact_prompt_file" || -z "$rollout_path_file" ) ]]; then
+    echo "Error: --startup-cursor-file requires --compact-prompt-file and --rollout-path-file" >&2
+    exit 1
+fi
 
 # Normalize prompt to a file if provided as positional arg
 if [[ -n "$prompt" && -z "$prompt_file" ]]; then
@@ -359,6 +376,19 @@ if [[ -n "$recap_cursor_file" ]]; then
         exit 1
     }
     recap_cursor_file="$cursor_dir/$(basename -- "$recap_cursor_file")"
+fi
+
+if [[ -n "$startup_cursor_file" ]]; then
+    startup_dir=$(CDPATH='' cd -- "$(dirname -- "$startup_cursor_file")" && pwd) || {
+        echo "Error: startup cursor directory does not exist" >&2
+        exit 1
+    }
+    startup_cursor_file="$startup_dir/$(basename -- "$startup_cursor_file")"
+    if [[ -d "$startup_cursor_file" || "$startup_cursor_file" == "$rollout_path_file" || \
+          "$startup_cursor_file" == "$recap_cursor_file" ]]; then
+        echo "Error: startup cursor must be a separate receipt file" >&2
+        exit 1
+    fi
 fi
 
 # Build one shell-escaped command string for tmux. A bare `codex fork` is the
@@ -533,6 +563,13 @@ if [[ -n "$prompt_file" ]]; then
 
     if [[ -n "$compact_prompt_file" ]]; then
         compact_after=$("$SCRIPT_DIR/codex-jsonl-watch.py" cursor "$rollout_path")
+        if [[ -n "$startup_cursor_file" ]]; then
+            _cleanup_startup_output=$(mktemp "$startup_dir/.codex-startup.XXXXXX")
+            chmod 600 "$_cleanup_startup_output"
+            printf '%s\n' "$compact_after" > "$_cleanup_startup_output"
+            mv -f -- "$_cleanup_startup_output" "$startup_cursor_file"
+            _cleanup_startup_output=""
+        fi
         compact_before_paste=$("${TMUX_CMD[@]}" capture-pane -p -t "$session:$window")
         compact_before_count=$(printf '%s\n' "$compact_before_paste" | tail -n 20 | \
             grep -c '^[[:space:]]*› /compact[[:space:]]*$' || true)

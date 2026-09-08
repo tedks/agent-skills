@@ -35,6 +35,9 @@ fan-out workflows where you want multiple agents working simultaneously.
   so the parent can watch structured completion without reading tmux history
 - `--recap-cursor-file <file>`: Atomically record the byte offset immediately
   before task delivery, avoiding a normal rescan of inherited history
+- `--startup-cursor-file <file>`: Optionally record the complete-record byte
+  offset before compaction; requires `--compact-prompt-file` and
+  `--rollout-path-file`. Useful for a supervisor verifying fresh compaction.
 - `--compact-timeout <seconds>`: Override the 600-second compaction wait
 - `--codex-bin <executable>`: Select the installed Codex executable, also
   configurable with `SPAWN_CODEX_BIN`; defaults to `codex` on PATH
@@ -115,6 +118,7 @@ prompt_file="$step_dir/prompt"
 compact_file="$step_dir/compact-prompt"
 rollout_file="$step_dir/rollout-path"
 cursor_file="$step_dir/recap-cursor"
+startup_file="$step_dir/startup-cursor"
 marker="STEP-1-7f3a DESIGN COMPLETE — EXECUTIVE RECAP"
 
 {
@@ -145,6 +149,7 @@ COMPACT_DELIM
   --compact-prompt-file "$compact_file" \
   --rollout-path-file "$rollout_file" \
   --recap-cursor-file "$cursor_file" \
+  --startup-cursor-file "$startup_file" \
   --prompt-file "$prompt_file"
 
 IFS= read -r rollout < "$rollout_file"
@@ -175,6 +180,13 @@ error, inspect the existing child before retrying; never blindly spawn or send
 again. Rollout/cursor files identify the child even if task delivery fails;
 they are not success receipts. A success message says the task was **queued**;
 the marker-qualified recap tells you when the step is finished.
+
+For supervised startup, `--startup-cursor-file` writes the existing pre-compaction
+offset atomically as decimal bytes plus newline, mode 600. Pass
+`"$step_dir/startup-cursor"` for Swarm's supervisor. It is distinct from
+`recap-cursor`, which is recorded after compaction and before task delivery.
+Use a fresh step directory for each launch; do not invent a receipt afterward
+or treat its presence as proof that compaction or the assignment finished.
 
 Fork tasks must be nonempty UTF-8, contain no NUL, and be under 32 KiB. Queue
 currently takes the task as one process argument; do not put credentials in
