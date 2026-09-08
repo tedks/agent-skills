@@ -8,7 +8,19 @@ SPAWN="$SCRIPT_DIR/agent-spawn.sh"
 RESOLVE="$SCRIPT_DIR/codex-rollout-path.sh"
 WATCH="$SCRIPT_DIR/codex-jsonl-watch.py"
 TEST_DIR=$(mktemp -d /tmp/test-agent-spawn.XXXXXX)
-trap 'rm -rf "$TEST_DIR"' EXIT
+cleanup() {
+    if [[ -f "$TEST_DIR/compact-paths" ]]; then
+        while IFS= read -r path; do
+            [[ "$path" == /tmp/spawn-agent-compact.* ]] && rm -f -- "$path"
+        done < "$TEST_DIR/compact-paths"
+    fi
+    rm -rf "$TEST_DIR"
+}
+trap cleanup EXIT
+export FAKE_QUEUED_TASK="$TEST_DIR/queued-task"
+export FAKE_QUEUE_THREAD="$TEST_DIR/queue-thread"
+export FAKE_COMPACT_COPY="$TEST_DIR/compact-copy"
+export FAKE_COMPACT_PATHS="$TEST_DIR/compact-paths"
 
 mkdir -p "$TEST_DIR/bin" "$TEST_DIR/repo with spaces"
 PROMPT="$TEST_DIR/prompt"
@@ -28,7 +40,7 @@ mkdir -p "$(dirname "$ROLLOUT")" \
     "$PROC_ROOT/4242/task/4242" "$PROC_ROOT/4242/fd" \
     "$PROC_ROOT/4243/task/4243" "$PROC_ROOT/4243/fd" \
     "$PROC_ROOT/4244/task/4244" "$PROC_ROOT/4244/fd"
-printf '%s\n' '{"type":"session_meta","payload":{"id":"01a07050-1111-7222-8333-444444444444"}}' > "$ROLLOUT"
+printf '%s\n' '{"type":"session_meta","payload":{"id":"01a07050-1111-7222-8333-444444444444","forked_from_id":"01a0702a-7b5e-71e0-bb62-287d55a7f9ba"}}' > "$ROLLOUT"
 printf '%s\n' '{"type":"session_meta","payload":{"id":"01a0702a-7b5e-71e0-bb62-287d55a7f9ba"}}' > "$PARENT_ROLLOUT"
 printf '%s\n' '4243' > "$PROC_ROOT/4242/task/4242/children"
 printf '%s\n' '4244' > "$PROC_ROOT/4243/task/4243/children"
@@ -44,6 +56,16 @@ printf '\n' >> "$FAKE_TMUX_LOG"
 case "${1:-}" in
     new-window)
         printf '%s\n' "${!#}" > "$FAKE_LAUNCH_FILE"
+        python3 - "${!#}" <<'PY'
+import json, os, shlex
+from pathlib import Path
+for arg in shlex.split(__import__('sys').argv[1]):
+    if arg.startswith('experimental_compact_prompt_file='):
+        path = json.loads(arg.split('=', 1)[1])
+        Path(os.environ['FAKE_COMPACT_COPY']).write_bytes(Path(path).read_bytes())
+        with open(os.environ['FAKE_COMPACT_PATHS'], 'a') as out:
+            out.write(path + '\n')
+PY
         ;;
     display-message)
         case " $* " in
@@ -131,7 +153,18 @@ exit 0
 STUB
 cat > "$TEST_DIR/bin/codex" <<'STUB'
 #!/bin/bash
-printf '%s\n' "$@" > "$FAKE_CODEX_ARGS"
+set -eu
+if [[ "$1" == queue && "$2" == --help ]]; then
+    [[ "${FAKE_QUEUE_MODE:-available}" != unavailable ]] || exit 2
+    printf '%s\n' 'Usage: codex queue --thread <THREAD> --message <TEXT>'
+elif [[ "$1" == queue ]]; then
+    [[ "${FAKE_QUEUE_MODE:-available}" != rejected ]] || exit 1
+    [[ "$2" == --thread && "$4" == --message && $# -eq 5 ]]
+    printf '%s' "$3" > "$FAKE_QUEUE_THREAD"
+    printf '%s' "$5" > "$FAKE_QUEUED_TASK"
+else
+    printf '%s\n' "$@" > "$FAKE_CODEX_ARGS"
+fi
 STUB
 chmod +x "$TEST_DIR/bin/tmux" "$TEST_DIR/bin/sleep" "$TEST_DIR/bin/codex"
 
@@ -149,6 +182,7 @@ run_spawn() {
         FAKE_ROLLOUT="$ROLLOUT" \
         FAKE_COMPACTION_MODE="${FAKE_COMPACTION_MODE:-complete}" \
         FAKE_PASTE_MODE="${FAKE_PASTE_MODE:-normal}" \
+        FAKE_QUEUE_MODE="${FAKE_QUEUE_MODE:-available}" \
         SPAWN_PROC_ROOT="$PROC_ROOT" \
         "$SPAWN" "test:department" codex "$TEST_DIR/repo with spaces" \
         --fork-session 01a0702a-7b5e-71e0-bb62-287d55a7f9ba \
@@ -191,8 +225,7 @@ assert_no_input() {
     fi
 }
 
-# A fork is an explicit, shell-escaped `codex fork`, and its prompt is pasted
-# only after the live composer is observed.
+# A fork queues the exact task only after observing its live composer and identity.
 : > "$LOG"
 run_spawn codex-ready >/dev/null
 grep -Fq 'codex fork ' "$LAUNCH"
@@ -200,14 +233,15 @@ grep -Fq -- '-C ' "$LAUNCH"
 grep -Fq 'check_for_update_on_startup=false' "$LAUNCH"
 grep -Fq '01a0702a-7b5e-71e0-bb62-287d55a7f9ba' "$LAUNCH"
 grep -Fq 'repo\ with\ spaces' "$LAUNCH"
-grep -q '^load-buffer ' "$LOG"
-grep -q '^paste-buffer ' "$LOG"
-grep -q '^send-keys ' "$LOG"
+assert_no_input
+cmp "$PROMPT" "$FAKE_QUEUED_TASK"
+[[ "$(<"$FAKE_QUEUE_THREAD")" == 01a07050-1111-7222-8333-444444444444 ]]
 
 # Dialog text in restored history does not mask a valid composer.
 : > "$LOG"
 run_spawn codex-ready-with-old-dialog >/dev/null
-grep -q '^paste-buffer ' "$LOG"
+assert_no_input
+cmp "$PROMPT" "$FAKE_QUEUED_TASK"
 
 # The update suppression is scoped to every Codex spawned here, not only
 # forks. The modal detector remains covered below as a backstop.
@@ -292,6 +326,7 @@ resolved=$(env -u TMUX PATH="$TEST_DIR/bin:$PATH" FAKE_TMUX_LOG="$LOG" \
         FAKE_LAUNCH_FILE="$LAUNCH" FAKE_LAST_BUFFER="$LAST_BUFFER" \
         FAKE_COMPOSER="$COMPOSER" \
         FAKE_PANE_MODE=codex-ready FAKE_ROLLOUT="$ROLLOUT" \
+        SPAWN_PROC_ROOT="$PROC_ROOT" \
         "$SPAWN" test:relative codex 'repo with spaces' \
         --fork-session 01a0702a-7b5e-71e0-bb62-287d55a7f9ba \
         --prompt-file "$PROMPT" >/dev/null
@@ -317,7 +352,11 @@ if grep -Fq 'Keep decisions and contracts' "$LAUNCH"; then
 fi
 FAKE_CODEX_ARGS="$TEST_DIR/codex.args" PATH="$TEST_DIR/bin:$PATH" \
     bash -c "$(<"$LAUNCH")"
-grep -Fxq 'experimental_compact_prompt_file="'"$COMPACT_PROMPT"'"' "$TEST_DIR/codex.args"
+grep -Fq 'experimental_compact_prompt_file=' "$TEST_DIR/codex.args"
+grep -Fq 'Keep decisions and contracts' "$FAKE_COMPACT_COPY"
+grep -Fq 'Design the step, then recap it.' "$FAKE_COMPACT_COPY"
+# Running the child command through its shell cleans its generated prompt.
+[[ ! -e "$(tail -n 1 "$FAKE_COMPACT_PATHS")" ]]
 mapfile -t codex_args < "$TEST_DIR/codex.args"
 for index in "${!codex_args[@]}"; do
     if [[ "${codex_args[index]}" == experimental_compact_prompt_file=* ]]; then
@@ -327,15 +366,14 @@ done
 [[ "$(<"$ROLLOUT_OUT")" == "$ROLLOUT" ]]
 [[ "$(<"$CURSOR_OUT")" -eq $(wc -c < "$ROLLOUT") ]]
 mapfile -t loaded_buffers < <(awk '$1 == "load-buffer" { print $3 }' "$LOG")
-[[ ${#loaded_buffers[@]} -eq 2 ]]
+[[ ${#loaded_buffers[@]} -eq 1 ]]
 [[ "${loaded_buffers[0]}" == spawn-agent-compact-* ]]
-[[ "${loaded_buffers[1]}" == spawn-agent-task-* ]]
-grep -Fq "$PROMPT" "$LOG"
+cmp "$PROMPT" "$FAKE_QUEUED_TASK"
 
 # If structured compaction completion never arrives, fail with the task still
 # unsent. The only loaded input is the explicitly-authorized /compact command.
 : > "$LOG"
-printf '%s\n' '{"type":"session_meta","payload":{"id":"01a07050-1111-7222-8333-444444444444"}}' > "$ROLLOUT"
+printf '%s\n' '{"type":"session_meta","payload":{"id":"01a07050-1111-7222-8333-444444444444","forked_from_id":"01a0702a-7b5e-71e0-bb62-287d55a7f9ba"}}' > "$ROLLOUT"
 if FAKE_COMPACTION_MODE=none run_spawn codex-ready \
     --compact-prompt-file "$COMPACT_PROMPT" --compact-timeout 1 \
     >/dev/null 2>"$STDERR"; then
@@ -352,7 +390,7 @@ fi
 # Loading the tmux buffer is not proof that paste reached the composer. A
 # swallowed paste must never cause the later Enter to submit stale text.
 : > "$LOG"
-printf '%s\n' '{"type":"session_meta","payload":{"id":"01a07050-1111-7222-8333-444444444444"}}' > "$ROLLOUT"
+printf '%s\n' '{"type":"session_meta","payload":{"id":"01a07050-1111-7222-8333-444444444444","forked_from_id":"01a0702a-7b5e-71e0-bb62-287d55a7f9ba"}}' > "$ROLLOUT"
 if FAKE_PASTE_MODE=swallow run_spawn codex-ready \
     --compact-prompt-file "$COMPACT_PROMPT" \
     >/dev/null 2>"$STDERR"; then
@@ -365,6 +403,47 @@ if grep -q '^send-keys ' "$LOG"; then
     echo 'FAIL: Enter was sent after /compact failed to reach the composer' >&2
     exit 1
 fi
+
+# Queue failures never become a pasted fallback or a success report.
+for mode in unavailable rejected; do
+    : > "$LOG"
+    : > "$FAKE_QUEUED_TASK"
+    if FAKE_QUEUE_MODE="$mode" run_spawn codex-ready >"$TEST_DIR/stdout" 2>"$STDERR"; then
+        echo "FAIL: $mode queue reported success" >&2; exit 1
+    fi
+    assert_no_input
+    [[ ! -s "$FAKE_QUEUED_TASK" ]]
+    ! grep -q '^Spawned ' "$TEST_DIR/stdout"
+    if [[ "$mode" == unavailable ]]; then [[ ! -s "$LOG" ]]; fi
+done
+
+# Reject parent identity, unrelated forks, and partial metadata before sending.
+cp "$ROLLOUT" "$TEST_DIR/saved-rollout"
+for meta in \
+    '{"id":"01a0702a-7b5e-71e0-bb62-287d55a7f9ba","forked_from_id":"01a0702a-7b5e-71e0-bb62-287d55a7f9ba"}' \
+    '{"id":"01a07050-1111-7222-8333-444444444444","forked_from_id":"00000000-0000-0000-0000-000000000000"}'; do
+    printf '{"type":"session_meta","payload":%s}\n' "$meta" > "$ROLLOUT"
+    : > "$LOG"
+    if run_spawn codex-ready >/dev/null 2>"$STDERR"; then
+        echo 'FAIL: unrelated or parent session accepted' >&2; exit 1
+    fi
+    assert_no_input
+done
+printf '{"type":"session_meta"' > "$ROLLOUT"
+if run_spawn codex-ready >/dev/null 2>"$STDERR"; then exit 1; fi
+cp "$TEST_DIR/saved-rollout" "$ROLLOUT"
+
+# Exact multiline UTF-8 bytes and trailing newlines survive argv delivery.
+cp "$PROMPT" "$TEST_DIR/saved-prompt"
+printf 'Quotes " and shell $() `text`; café\nsecond line\n\n' > "$PROMPT"
+run_spawn codex-ready --codex-bin "$TEST_DIR/bin/codex" --model 'chosen-model' >/dev/null
+cmp "$PROMPT" "$FAKE_QUEUED_TASK"
+grep -Fq -- '-m chosen-model' "$LAUNCH"
+python3 -c 'import sys; print("x" * 32768, end="")' > "$PROMPT"
+: > "$LOG"
+if run_spawn codex-ready >/dev/null 2>"$STDERR"; then exit 1; fi
+[[ ! -s "$LOG" ]]
+cp "$TEST_DIR/saved-prompt" "$PROMPT"
 
 # The JSONL watcher ignores prompt/user/commentary/non-prefix matches. A valid
 # final assistant record is invisible until its terminating newline arrives,

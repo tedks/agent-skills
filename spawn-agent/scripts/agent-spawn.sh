@@ -13,12 +13,15 @@
 #       --compact-timeout <seconds>   Compaction timeout (default: 600)
 #       --rollout-path-file <file>    Record the child Codex rollout path
 #       --recap-cursor-file <file>    Record where recap watching should begin
+#       --codex-bin <executable>     Codex executable (default: codex on PATH)
+#       --model <model>              Codex model (default: Codex configuration)
 #
 # Automatically targets the correct tmux server socket when run inside tmux.
 # Override with SPAWN_TMUX_SOCKET or SPAWN_TMUX_LABEL env vars.
 #
-# The prompt is delivered via tmux load-buffer/paste-buffer after the agent
-# starts, so it never appears in any execve(2) argument list.
+# Fork tasks use native codex queue after readiness/compaction. Other launches
+# retain tmux load-buffer/paste-buffer delivery. Queue takes one bounded argv
+# message; do not put credentials in task prompts.
 #
 # Examples:
 #   agent-spawn.sh chaos:review claude ./project "Review auth module"
@@ -75,6 +78,8 @@ usage() {
     echo "  --compact-timeout: seconds to wait for structured compaction completion" >&2
     echo "  --rollout-path-file: atomically write the child Codex rollout path" >&2
     echo "  --recap-cursor-file: atomically write the safe JSONL recap start offset" >&2
+    echo "  --codex-bin: executable path/name (or SPAWN_CODEX_BIN; default codex)" >&2
+    echo "  --model: Codex model (or SPAWN_CODEX_MODEL; default Codex config)" >&2
     exit 1
 }
 
@@ -98,10 +103,14 @@ compact_timeout=600
 compact_timeout_set=""
 rollout_path_file=""
 recap_cursor_file=""
+codex_bin="${SPAWN_CODEX_BIN:-codex}"
+codex_model="${SPAWN_CODEX_MODEL:-}"
+codex_options_set=""
 _cleanup_prompt_file=""
 _cleanup_command_file=""
 _cleanup_rollout_output=""
 _cleanup_cursor_output=""
+_cleanup_compact_file=""
 
 # Trap to clean up temp files on exit/interrupt (only files we created).
 # Set early so failure paths during parsing don't leak temp files.
@@ -114,6 +123,7 @@ cleanup() {
     if [[ -n "$_cleanup_command_file" ]]; then rm -f "$_cleanup_command_file" || true; fi
     if [[ -n "$_cleanup_rollout_output" ]]; then rm -f "$_cleanup_rollout_output" || true; fi
     if [[ -n "$_cleanup_cursor_output" ]]; then rm -f "$_cleanup_cursor_output" || true; fi
+    if [[ -n "$_cleanup_compact_file" ]]; then rm -f "$_cleanup_compact_file" || true; fi
     return 0
 }
 trap cleanup EXIT
@@ -121,6 +131,15 @@ trap cleanup EXIT
 positional=()
 while [[ $# -gt 0 ]]; do
     case "$1" in
+        --codex-bin|--model)
+            if [[ $# -lt 2 || -z "$2" ]]; then
+                echo "Error: $1 requires a value" >&2
+                exit 1
+            fi
+            if [[ "$1" == --codex-bin ]]; then codex_bin="$2"; else codex_model="$2"; fi
+            codex_options_set=1
+            shift 2
+            ;;
         --trust)
             trust_directory=1
             shift
@@ -221,6 +240,22 @@ case "$agent" in
         ;;
 esac
 
+if [[ -n "$codex_options_set" && "$agent" != codex ]]; then
+    echo "Error: --codex-bin and --model apply to codex only" >&2
+    exit 1
+fi
+if [[ "$agent" == codex ]]; then
+    codex_bin=$(command -v -- "$codex_bin") || {
+        echo "Error: Codex executable not found" >&2
+        exit 1
+    }
+    if [[ ! -f "$codex_bin" || ! -x "$codex_bin" ]]; then
+        echo "Error: --codex-bin must resolve to an executable file" >&2
+        exit 1
+    fi
+    codex_bin="$(CDPATH='' cd -- "$(dirname -- "$codex_bin")" && pwd)/$(basename -- "$codex_bin")"
+fi
+
 if [[ "$trust_directory" -eq 1 && "$agent" != "claude" ]]; then
     echo "Error: --trust applies to claude only; agy and codex keep their own trust stores." >&2
     exit 1
@@ -269,12 +304,6 @@ if [[ -n "$compact_timeout_set" && -z "$compact_prompt_file" ]]; then
     exit 1
 fi
 
-# Ensure session exists
-if ! "${TMUX_CMD[@]}" has-session -t "$session" 2>/dev/null; then
-    echo "Creating tmux session: $session" >&2
-    "${TMUX_CMD[@]}" new-session -d -s "$session"
-fi
-
 # Normalize prompt to a file if provided as positional arg
 if [[ -n "$prompt" && -z "$prompt_file" ]]; then
     prompt_file=$(mktemp /tmp/spawn-agent-prompt.XXXXXX)
@@ -287,6 +316,10 @@ if [[ -n "$prompt_file" ]]; then
     prompt_file="$(CDPATH='' cd -- "$(dirname -- "$prompt_file")" && pwd)/$(basename -- "$prompt_file")"
 fi
 
+if [[ -n "$fork_session" && -n "$prompt_file" ]]; then
+    python3 "$SCRIPT_DIR/codex-fork-task.py" preflight "$codex_bin" "$prompt_file"
+fi
+
 if [[ -n "$compact_prompt_file" ]]; then
     compact_dir=$(CDPATH='' cd -- "$(dirname -- "$compact_prompt_file")" && pwd) || {
         echo "Error: compaction prompt directory does not exist: $(dirname -- "$compact_prompt_file")" >&2
@@ -297,6 +330,12 @@ if [[ -n "$compact_prompt_file" ]]; then
         echo "Error: compaction prompt path cannot contain control characters" >&2
         exit 1
     fi
+    # Snapshot the policy + task before the child starts. Its shell owns this
+    # private file for the child's entire lifetime, including later compactions.
+    _cleanup_compact_file=$(mktemp /tmp/spawn-agent-compact.XXXXXX)
+    python3 "$SCRIPT_DIR/codex-fork-task.py" compact \
+        "$compact_prompt_file" "$prompt_file" "$_cleanup_compact_file"
+    compact_prompt_file="$_cleanup_compact_file"
 fi
 
 if [[ -n "$rollout_path_file" ]]; then
@@ -325,10 +364,12 @@ if [[ "$agent" == "codex" ]]; then
     # Managed agent windows must not stop at an update chooser. Keep this a
     # process-local override: ordinary Codex launches still perform their
     # normal update check, and no global configuration is changed.
-    agent_command=(codex -c check_for_update_on_startup=false)
+    agent_command=("$codex_bin" -c check_for_update_on_startup=false)
+    if [[ -n "$codex_model" ]]; then agent_command+=(-m "$codex_model"); fi
 fi
 if [[ -n "$fork_session" ]]; then
-    agent_command=(codex fork -c check_for_update_on_startup=false)
+    agent_command=("$codex_bin" fork -c check_for_update_on_startup=false)
+    if [[ -n "$codex_model" ]]; then agent_command+=(-m "$codex_model"); fi
     if [[ -n "$compact_prompt_file" ]]; then
         # Pass only the path in argv, never the prompt body. TOML basic-string
         # escaping handles spaces, quotes, and backslashes without touching
@@ -340,6 +381,11 @@ if [[ -n "$fork_session" ]]; then
     agent_command+=(-C "$directory" "$fork_session")
 fi
 printf -v agent_shell_command '%q ' "${agent_command[@]}"
+if [[ -n "$_cleanup_compact_file" ]]; then
+    printf -v compact_cleanup 'rm -f -- %q' "$_cleanup_compact_file"
+    printf -v compact_trap 'trap %q EXIT; ' "$compact_cleanup"
+    agent_shell_command="$compact_trap$agent_shell_command"
+fi
 
 # Granting workspace trust happens here, before launch, and only because the
 # caller asked for it -- never by answering a modal after the fact.
@@ -350,10 +396,13 @@ if [[ "$trust_directory" -eq 1 ]]; then
     fi
 fi
 
-# Start the agent in a new tmux window, then deliver the prompt via
-# load-buffer/paste-buffer. This avoids ARG_MAX at every boundary:
-# the tmux command, the shell inside tmux, and the agent's execve.
+# Start the agent only after options, task size and queue support are checked.
+if ! "${TMUX_CMD[@]}" has-session -t "$session" 2>/dev/null; then
+    echo "Creating tmux session: $session" >&2
+    "${TMUX_CMD[@]}" new-session -d -s "$session"
+fi
 "${TMUX_CMD[@]}" new-window -t "$session" -n "$window" -c "$directory" "$agent_shell_command"
+_cleanup_compact_file="" # child shell now owns cleanup, including failed delivery
 
 if [[ -n "$prompt_file" ]]; then
     # Wait for the actual composer before sending anything. In particular,
@@ -458,13 +507,14 @@ if [[ -n "$prompt_file" ]]; then
     else
         sleep 2
     fi
-    if [[ "$agent" == "codex" && ( -n "$compact_prompt_file" || -n "$rollout_path_file" ) ]]; then
+    if [[ "$agent" == "codex" && -n "$fork_session" ]]; then
         rollout_path=$("$SCRIPT_DIR/codex-rollout-path.sh" \
             --exclude-session "$fork_session" "$target") || {
             echo "Error: could not resolve the child rollout; task prompt not sent." >&2
             echo "  The child remains running and un-tasked in $target." >&2
             exit 1
         }
+        python3 "$SCRIPT_DIR/codex-fork-task.py" child "$rollout_path" "$fork_session" >/dev/null
         if [[ -n "$rollout_path_file" ]]; then
             _cleanup_rollout_output=$(mktemp "$rollout_dir/.codex-rollout.XXXXXX")
             chmod 600 "$_cleanup_rollout_output"
@@ -560,6 +610,16 @@ if [[ -n "$prompt_file" ]]; then
         printf '%s\n' "$recap_after" > "$_cleanup_cursor_output"
         mv -f -- "$_cleanup_cursor_output" "$recap_cursor_file"
         _cleanup_cursor_output=""
+    fi
+
+    if [[ "$agent" == codex && -n "$fork_session" ]]; then
+        child_session=$(python3 "$SCRIPT_DIR/codex-fork-task.py" queue \
+            "$codex_bin" "$rollout_path" "$fork_session" "$prompt_file") || {
+            echo "Error: task delivery was not confirmed; inspect $target before retrying." >&2
+            exit 1
+        }
+        echo "Spawned $agent in $target (dir: $directory); task queued to $child_session"
+        exit 0
     fi
 
     # Codex needs time to finish paste-burst handling for large task files.

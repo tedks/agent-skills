@@ -36,6 +36,10 @@ fan-out workflows where you want multiple agents working simultaneously.
 - `--recap-cursor-file <file>`: Atomically record the byte offset immediately
   before task delivery, avoiding a normal rescan of inherited history
 - `--compact-timeout <seconds>`: Override the 600-second compaction wait
+- `--codex-bin <executable>`: Select the installed Codex executable, also
+  configurable with `SPAWN_CODEX_BIN`; defaults to `codex` on PATH
+- `--model <model>`: Select a Codex model, also configurable with
+  `SPAWN_CODEX_MODEL`; defaults to the user's Codex configuration
 
 ## Instructions
 
@@ -59,7 +63,7 @@ socket, sessions, and windows. This ensures you're targeting the right server.
 
 ```bash
 # 1. Write prompt to a temp file
-prompt_file=$(mktemp /tmp/spawn-agent-prompt.XXXXXX)
+prompt_file=$(mktemp)
 cat << 'PROMPT_DELIM' > "$prompt_file"
 <your prompt here>
 PROMPT_DELIM
@@ -93,6 +97,8 @@ can steer a context-rich child directly:
    Write a compact prompt that names the durable product decisions and current
    step state to preserve, and repetitive logs or obsolete launch attempts to
    discard. Omit compaction for a short parent or when verbatim history matters.
+   The launcher combines this policy with the task automatically, so the
+   compactor sees the assignment before it summarizes the inherited context.
 4. Spawn `codex` with `--fork-session`, `--rollout-path-file`, and, when
    appropriate, `--compact-prompt-file`. This invokes interactive `codex fork`,
    not headless `codex exec fork`.
@@ -104,7 +110,7 @@ can steer a context-rich child directly:
 
 ```bash
 set -e
-step_dir=$(mktemp -d /tmp/spawn-agent-step.XXXXXX)
+step_dir=$(mktemp -d)
 prompt_file="$step_dir/prompt"
 compact_file="$step_dir/compact-prompt"
 rollout_file="$step_dir/rollout-path"
@@ -134,7 +140,8 @@ COMPACT_DELIM
 
 ~/.claude/skills/spawn-agent/scripts/agent-spawn.sh \
   ide:design codex ./project \
-  --fork-session 01a0702a-7b5e-71e0-bb62-287d55a7f9ba \
+  --fork-session "$PARENT_SESSION_ID" \
+  --model "$CHILD_MODEL" \
   --compact-prompt-file "$compact_file" \
   --rollout-path-file "$rollout_file" \
   --recap-cursor-file "$cursor_file" \
@@ -150,20 +157,40 @@ The fork is a snapshot taken when it starts. Later parent messages do not flow
 into it; steer the child in its tmux window. Do not use `--resume`: resuming
 would append to and contend with the parent instead of creating a child.
 
+Set `PARENT_SESSION_ID` to the session you want to fork and `CHILD_MODEL` to
+your chosen model (or omit `--model`). Use `--codex-bin` when the desired
+installed executable is not the one on PATH.
+
 Codex `/compact` accepts no inline argument. The launcher supplies the
-step-specific policy through the process-local
+step-specific policy **and task** through a private, process-local
 `experimental_compact_prompt_file` config override, submits bare `/compact`,
-and waits for the rollout's `context_compacted` event before it places the task
-in the composer. A missing event, vanished process, or startup modal fails with
-the task unsent. The launcher never edits global Codex configuration.
+and waits for the rollout's `context_compacted` event. It then sends the exact
+task through **native `codex queue`**, addressed to the verified child UUID.
+This avoids the TUI's swallowed-Enter race. The launcher checks the child's
+`forked_from_id` and rejects parent or unrelated session identities.
 
-This config/event sequence was integration-tested with `codex-cli 0.146.0`.
-Re-run the real fork smoke when upgrading across a Codex release that changes
-compaction configuration or rollout schemas.
+A missing compaction event, vanished process, startup modal, or queue rejection
+returns failure without falling back to pasted task input. After a delivery
+error, inspect the existing child before retrying; never blindly spawn or send
+again. Rollout/cursor files identify the child even if task delivery fails;
+they are not success receipts. A success message says the task was **queued**;
+the marker-qualified recap tells you when the step is finished.
 
-Keep `compact_file` in place for as long as the child remains open: the Codex
-process retains that file-backed config for any later compaction. After closing
-the child window, remove `step_dir`.
+Fork tasks must be nonempty UTF-8, contain no NUL, and be under 32 KiB. Queue
+currently takes the task as one process argument; do not put credentials in
+it. Ordinary nonfork/Claude/agy prompts still use file-backed tmux paste.
+Queue support is checked before creating a window; older Codex versions without
+`queue --thread/--message` are explicitly unsupported for tasked forks.
+
+The queue CLI was inspected on `codex-cli 0.153.4`; automated fake-CLI/TUI tests
+cover this launcher protocol. Earlier compaction-only testing on `0.146.0`
+does not establish queue support. Recheck the real fork workflow after a Codex
+upgrade changes these interfaces.
+
+The launcher creates its own mode-600 combined compaction file; the child shell
+removes it when the child exits. Original caller files are never edited or
+deleted. Keep the rollout/cursor files for your watcher, then remove `step_dir`
+when finished. ROOT compaction and child compaction remain separate operations.
 
 ### 4. Report success
 
@@ -214,10 +241,10 @@ This prints the current socket, server PID, all sessions, and all windows.
 
 # Recommended for a large inherited session: compact first and expose JSONL
 /spawn-agent chaos:design codex ./project --fork-session <uuid> \
-  --compact-prompt-file /tmp/step/compact-prompt \
-  --rollout-path-file /tmp/step/rollout-path \
-  --recap-cursor-file /tmp/step/recap-cursor \
-  --prompt-file /tmp/step/task-prompt
+  --compact-prompt-file ./step/compact-prompt \
+  --rollout-path-file ./step/rollout-path \
+  --recap-cursor-file ./step/recap-cursor \
+  --prompt-file ./step/task-prompt
 
 # Spawn without initial prompt (interactive from start)
 /spawn-agent chaos:helper claude .
@@ -382,6 +409,11 @@ of waiting for user input. To detect when agents are ready:
 - Use claude-send.sh to send messages to running agents
 - Socket detection is automatic -- you don't need to think about `-L` or `-S`
 - Prompts are passed via temp files to avoid ARG_MAX limits
+
+## Reusing the surrounding tools
+
+Read [the reusable-tools inventory](references/reusable-tools.md) when deciding
+which orchestration helpers belong in this skill versus an IDE/project tool.
 
 ## Claude Code and the workspace trust prompt
 
