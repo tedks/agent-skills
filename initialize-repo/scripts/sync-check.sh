@@ -53,13 +53,10 @@ TEMPLATES="$(cd "$TEMPLATES" && pwd)"
 VERBATIM=(
   "create-worktree|create-worktree|create-worktree.sh|../create-worktree|../create-worktree.sh"
   "PLANS.md|.planning/PLANS.md|PLANS.md"
-  "github-workflows/claude.yml|.github/workflows/claude.yml"
-  "github-workflows/claude-code-review.yml|.github/workflows/claude-code-review.yml"
 )
 
 # Skeleton templates: repo-specific by design, so only presence is checked.
 SKELETON=(
-  "github-workflows/ci-nix.yml|.github/workflows/ci.yml"
   "AGENTS.md|AGENTS.md"
 )
 

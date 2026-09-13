@@ -43,11 +43,10 @@ Set up a new project from scratch with the full development environment: bare gi
 |----------|-------------------------|------|
 | `templates/create-worktree` | `~/Projects/<project-name>/create-worktree` (project root, next to the bare `.git/`) | verbatim |
 | `templates/PLANS.md` | `.planning/PLANS.md` | verbatim |
-| `templates/github-workflows/claude.yml` | `.github/workflows/claude.yml` | verbatim |
-| `templates/github-workflows/claude-code-review.yml` | `.github/workflows/claude-code-review.yml` | verbatim |
-| `templates/github-workflows/ci-nix.yml` | `.github/workflows/ci.yml` | skeleton — replace the TODO build/test steps |
 | `templates/AGENTS.md` | `AGENTS.md` | skeleton — fill `{{PROJECT_NAME}}`, `{{PROJECT_DESCRIPTION}}` and the TODO sections |
 | `templates/flake-snippets/playwright.nix` | spliced into `flake.nix` | snippet — copy the pieces into the dev shell |
+
+There are deliberately **no GitHub Actions templates**: new repos get no CI, Claude, or other automated-review workflows. Actions is reserved for deploys and releases a project adds itself; tests run locally.
 
 **Verbatim** templates work as-is and should stay byte-identical to the template until a repo has a real reason to diverge. **Skeleton** templates are starting points that every repo customizes; only their shared structure is canonical. The Playwright **snippet** is for repos that run browser tests under Nix.
 
@@ -75,7 +74,6 @@ When "landing the plane" in a repo that was scaffolded by this skill, it's worth
 ├── create-worktree                # Worktree helper (from templates/)
 └── master/                        # Primary worktree
     ├── .claude/skills/            # Agent skills (copied from dotfiles)
-    ├── .github/workflows/         # claude.yml, claude-code-review.yml (from templates/)
     ├── .gitignore                 # Standard ignores
     ├── .planning/
     │   └── PLANS.md               # ExecPlan format guide (from templates/)
@@ -280,21 +278,11 @@ All from `~/.claude/skills/initialize-repo/templates/` (see [Templates](#templat
 
 ```bash
 cd ~/Projects/<project-name>/master
-mkdir -p .github/workflows
 T=~/.claude/skills/initialize-repo/templates
-cp "$T/github-workflows/claude.yml" "$T/github-workflows/claude-code-review.yml" .github/workflows/
 cp "$T/create-worktree" ~/Projects/<project-name>/create-worktree
 ```
 
 `create-worktree` lives at the project root (next to the bare `.git/`), untracked or tracked per project taste; it derives the remote, worktree prefix, and base branch from its surroundings, so it needs no editing.
-
-**For types with a Nix flake**, also seed CI:
-
-```bash
-cp "$T/github-workflows/ci-nix.yml" .github/workflows/ci.yml
-```
-
-Then replace the TODO build/test steps below the end-of-preamble marker with the type-specific commands (the same ones listed in the type's AGENTS.md sections).
 
 ---
 
