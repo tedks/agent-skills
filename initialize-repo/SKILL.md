@@ -763,19 +763,24 @@ git commit -m "Initial project scaffold: <project-name>
 
 ```bash
 gh repo create tedks/<project-name> --private --description "<description>"
+```
+
+New GitHub repos start with Actions enabled, and anything in `.github/workflows/` would run on the first push. So **before pushing**, turn Actions off, unless this scaffold intentionally includes a deploy or release workflow (the templates here add none):
+
+```bash
+gh api -X PUT repos/tedks/<project-name>/actions/permissions -F enabled=false
+gh api repos/tedks/<project-name>/actions/permissions --jq .enabled   # must print false
+```
+
+If the read-back does not print `false`, stop and resolve that before pushing. Don't push and plan to fix it afterwards.
+
+```bash
 cd ~/Projects/<project-name>/master
 git remote add origin git@github.com:tedks/<project-name>.git
 git push -u origin master
 ```
 
 Note: `gh repo create --source` does not work from a worktree. Create the repo without `--source`, then add the remote manually.
-
-New GitHub repos start with Actions enabled. Turn it off right away. Only turn it back on if the project later adds a deploy or release workflow.
-
-```bash
-gh api -X PUT repos/tedks/<project-name>/actions/permissions -F enabled=false
-gh api repos/tedks/<project-name>/actions/permissions --jq .enabled   # must print false
-```
 
 ### Step F7: Initialize ditz
 
