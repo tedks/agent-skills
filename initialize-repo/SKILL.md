@@ -770,6 +770,13 @@ git push -u origin master
 
 Note: `gh repo create --source` does not work from a worktree. Create the repo without `--source`, then add the remote manually.
 
+New GitHub repos start with Actions enabled. Turn it off right away. Only turn it back on if the project later adds a deploy or release workflow.
+
+```bash
+gh api -X PUT repos/tedks/<project-name>/actions/permissions -F enabled=false
+gh api repos/tedks/<project-name>/actions/permissions --jq .enabled   # must print false
+```
+
 ### Step F7: Initialize ditz
 
 `ditz` is installed via Nix — `nix run github:tedks/ditz -- <cmd>`, or
