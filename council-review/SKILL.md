@@ -144,14 +144,20 @@ the same prompt behind a "do not run commands" opener for the foreign seats:
 # that call's exit is gone, and `cat ""` fails quietly into a prompt that has
 # no diff in it. So: no `trap ... EXIT`, the context command runs HERE (not
 # "saved from Step 1"), the result is size-checked, and the literal paths this
-# prints are what every launch uses. rm them after Step 4.
+# prints are what every launch uses. This machine runs many concurrent
+# council-review invocations at once, so everything is staged inside one
+# mktemp -d directory, never as flat files directly under /tmp — that is what
+# lets cleanup rm -rf just this invocation's directory instead of glob-deleting
+# across /tmp and catching another session's in-flight files. rm -rf the
+# printed $WORK dir after Step 4.
 TARGET='pr'        # what Step 1 decided: pr | staged | branch | file | worktree
 PR='N'             # pr:     the PR number
 DEFAULT='master'   # branch: the default branch Step 1 detected
 FILE='path'        # file:   the path — keep the quotes, paths can contain spaces
-PROMPT_FILE=$(mktemp /tmp/council-prompt.XXXXXX)
-FOREIGN_FILE=$(mktemp /tmp/council-foreign.XXXXXX)
-fail() { rm -f "$PROMPT_FILE" "$FOREIGN_FILE"; echo "council: $1 — not launching" >&2; exit 1; }
+WORK=$(mktemp -d /tmp/council.XXXXXX)
+PROMPT_FILE="$WORK/prompt.txt"
+FOREIGN_FILE="$WORK/foreign.txt"
+fail() { rm -rf "$WORK"; echo "council: $1 — not launching" >&2; exit 1; }
 cat << 'REVIEW_EOF' > "$PROMPT_FILE"
 <the review prompt from step 2>
 REVIEW_EOF
@@ -181,7 +187,7 @@ esac
   echo
   cat "$PROMPT_FILE"
 } > "$FOREIGN_FILE"
-echo "$PROMPT_FILE $FOREIGN_FILE"
+echo "$WORK $PROMPT_FILE $FOREIGN_FILE"
 ```
 
 The opener goes to every foreign seat and **only** to foreign seats. It is
@@ -282,8 +288,11 @@ is a **prioritisation signal, not a filter**: with two seats it means both
 agreed, with one seat there is no consensus section at all — and every
 Critical/Important still gets triaged regardless.
 
-Then remove the two staged files (`rm -f` the literal paths Step 3 printed)
-— there is no trap doing it for you.
+Then remove the staged directory (`rm -rf` the `$WORK` path Step 3 printed)
+— there is no trap doing it for you. Removing that one directory is safe even
+with dozens of concurrent council-review invocations on the same machine,
+because `mktemp -d` gave it a unique name — unlike a glob-delete over `/tmp`,
+which would also catch other sessions' in-flight files.
 
 ## Notes
 
