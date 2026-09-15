@@ -135,8 +135,9 @@ provider, one `/ask-agent` per foreign provider. Start every seat
 host supports; the native subagent and the `/ask-agent` shell calls are
 different mechanisms, and "launch together" never means "put your own provider
 in the `/ask-agent` batch". Every seat gets the **same review prompt with the
-diff inline**, staged in two files — the bare prompt for your own seat, and
-the same prompt behind a "do not run commands" opener for the foreign seats:
+diff inline**, staged in two files inside one per-invocation directory — the
+bare prompt for your own seat, and the same prompt behind a "do not run
+commands" opener for the foreign seats:
 
 ```bash
 # ONE tool call, start to finish. Every shell tool call is a fresh process:
@@ -154,10 +155,10 @@ TARGET='pr'        # what Step 1 decided: pr | staged | branch | file | worktree
 PR='N'             # pr:     the PR number
 DEFAULT='master'   # branch: the default branch Step 1 detected
 FILE='path'        # file:   the path — keep the quotes, paths can contain spaces
-WORK=$(mktemp -d /tmp/council.XXXXXX)
+WORK=$(mktemp -d /tmp/council.XXXXXX) || { echo "council: mktemp -d failed — not launching" >&2; exit 1; }
 PROMPT_FILE="$WORK/prompt.txt"
 FOREIGN_FILE="$WORK/foreign.txt"
-fail() { rm -rf "$WORK"; echo "council: $1 — not launching" >&2; exit 1; }
+fail() { rm -rf -- "$WORK"; echo "council: $1 — not launching" >&2; exit 1; }
 cat << 'REVIEW_EOF' > "$PROMPT_FILE"
 <the review prompt from step 2>
 REVIEW_EOF
@@ -292,7 +293,13 @@ Then remove the staged directory (`rm -rf` the `$WORK` path Step 3 printed)
 — there is no trap doing it for you. Removing that one directory is safe even
 with dozens of concurrent council-review invocations on the same machine,
 because `mktemp -d` gave it a unique name — unlike a glob-delete over `/tmp`,
-which would also catch other sessions' in-flight files.
+which would also catch other sessions' in-flight files. If the literal
+`$WORK` path is lost (e.g. to context compaction) before cleanup, **never**
+fall back to a pattern or prefix delete over `/tmp` (including
+`/tmp/council.*`) to find it — that reproduces the same class of bug one
+level up, deleting other sessions' directories instead of just their files.
+Leave the orphaned directory; it is one `mktemp -d`'d directory, not a leak
+worth another session's files.
 
 ## Notes
 
