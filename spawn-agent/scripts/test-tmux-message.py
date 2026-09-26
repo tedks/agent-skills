@@ -159,6 +159,68 @@ class DeliveryTests(unittest.TestCase):
         f = screen(history='› [Pasted text #1 +20 lines]\n\n')
         self.assertEqual(m.records(f, m.composer(f))[('submitted', 'hello')], 0)
 
+    def test_new_receipt_wins_over_stale_composer(self):
+        t = Terminal(queued=True)
+        original = t.keys
+        def keys(*keys):
+            original(*keys)
+            if t.accepted_at is not None:
+                t.draft = t.payload
+        t.keys = keys
+        self.assertEqual(deliver(t)['receipt'], 'queued')
+        self.assertEqual(t.enters, 1)
+
+    def test_collapsed_marker_cannot_duplicate_visible_payload(self):
+        for text in ['[Pasted text #1 +20 lines]hello', 'hello[Pasted text]hello']:
+            self.assertFalse(m.paste_evidence(m.Input('text', text), 'hello'))
+
+    def test_archived_input_box_is_not_receipt(self):
+        for harness in ['codex', 'claude']:
+            archived = screen('hello', harness=harness).raw
+            f = screen(history=archived)
+            self.assertEqual(m.records(f, m.composer(f))[('submitted', 'hello')], 0)
+
+    def test_collapsed_history_matches_observed_paste(self):
+        t = Terminal(collapsed=True)
+        original = t.frame
+        def frame():
+            f = original()
+            if t.accepted_at is not None:
+                f.history = f.history.replace('› hello', '› [Pasted text #1 +20 lines]')
+            return f
+        t.frame = frame
+        self.assertEqual(deliver(t)['status'], 'delivered')
+
+    def test_compact_command_completion(self):
+        t = Terminal(payload='/compact')
+        original = t.frame
+        def frame():
+            f = original()
+            if t.accepted_at is not None:
+                f.history = f.history.replace('› /compact', '• Context compacted · 14s')
+            return f
+        t.frame = frame
+        self.assertEqual(deliver(t)['receipt'], 'command')
+
+    def test_empty_then_old_input_reappears_never_reenters(self):
+        t = Terminal(dropped=99)
+        original = t.frame
+        def frame():
+            if t.enters == 1 and 4.25 <= t.now < 4.75:
+                return screen()
+            return original()
+        t.frame = frame
+        with self.assertRaisesRegex(m.DeliveryError, 'receipt-timeout'):
+            deliver(t)
+        self.assertEqual(t.enters, 1)
+
+    def test_recorded_composers_without_model_specific_positions(self):
+        fixtures = Path(__file__).with_name('fixtures') / 'claude-send'
+        for name in ['codex-fork-empty', 'codex-generating-queue', 'codex-context-queue']:
+            x, y = map(int, (fixtures / (name + '.cursor')).read_text().strip().split(':'))
+            f = m.Frame((fixtures / (name + '.ansi')).read_text(), x, y)
+            self.assertEqual(m.composer(f).kind, 'empty' if name == 'codex-fork-empty' else 'text', name)
+
     def test_suggestion_probe_empty(self):
         t = Terminal()
         original_frame, original_keys = t.frame, t.keys

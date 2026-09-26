@@ -159,7 +159,8 @@ def paste_evidence(inp, payload):
     m = matches[0]
     before, after = normalized(inp.text[:m.start()]), normalized(inp.text[m.end():])
     wanted = normalized(payload)
-    return wanted.startswith(before) and wanted.endswith(after)
+    return (len(before) + len(after) < len(wanted)
+            and wanted.startswith(before) and wanted.endswith(after))
 
 
 class DeliveryError(Exception):
@@ -315,7 +316,7 @@ class Sender:
             # A collapsed receipt is usable only if the same marker was seen
             # in this attempt's input. Existing marker history is in baseline.
             for kind in ("submitted", "queued"):
-                if self.enters and not paste_evidence(current, self.payload) and any(receipt[(kind, form)] > baseline[(kind, form)] for form in accepted_forms):
+                if self.enters and any(receipt[(kind, form)] > baseline[(kind, form)] for form in accepted_forms):
                     return {"status": "delivered", "receipt": kind, "enters": self.enters}
             if current.kind == "modal":
                 raise DeliveryError("modal-after-paste", 3)
@@ -334,7 +335,7 @@ class Sender:
                     confirm, live = self.sample()
                     fresh = records(confirm, live)
                     for kind in ("submitted", "queued"):
-                        if self.enters and not paste_evidence(live, self.payload) and any(fresh[(kind, form)] > baseline[(kind, form)] for form in accepted_forms):
+                        if self.enters and any(fresh[(kind, form)] > baseline[(kind, form)] for form in accepted_forms):
                             return {"status": "delivered", "receipt": kind, "enters": self.enters}
                     if live.fingerprint() != owned or not paste_evidence(live, self.payload):
                         raise DeliveryError("input-changed-before-enter", 3)
