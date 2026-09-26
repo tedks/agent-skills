@@ -294,7 +294,7 @@ class Sender:
         self.pasted = False
         self.enters = 0
         self.typed = getattr(options, "typed_command", False)
-        if self.typed and (len(payload.encode("utf-8")) > 200 or payload.endswith((" ", ";"))):
+        if self.typed and (len(payload.encode("utf-8")) > 200 or payload != payload.rstrip() or payload.endswith(";")):
             raise DeliveryError("unsupported-typed-command")
         if self.typed and not re.fullmatch(r"/[A-Za-z][A-Za-z0-9_-]*(?: [^\r\n\x00-\x1f\x7f]*)?", payload):
             raise DeliveryError("unsupported-typed-command")

@@ -68,7 +68,7 @@ literal characters with `tmux send-keys -l` rather than bracketed paste. The
 same lock, empty-composer checks, input verification, settling delay, and NEW
 receipt requirements apply. A command has an ASCII letter name (letters, digits, `_`
 and `-`), optionally followed by a space and arguments. Controls, newlines,
-leading whitespace, trailing spaces or semicolons, commands over 200 UTF-8 bytes,
+leading whitespace, trailing Unicode whitespace or semicolons, commands over 200 UTF-8 bytes,
 and ordinary prose are rejected. These limits avoid tmux argument loss and
 ambiguous wrapped or trimmed composer evidence. Ordinary messages retain
 bracketed paste. Typed

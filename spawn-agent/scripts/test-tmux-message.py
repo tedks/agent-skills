@@ -235,7 +235,7 @@ class DeliveryTests(unittest.TestCase):
             self.assertEqual(t.actions, [])
 
     def test_typed_command_rejects_unrenderable_tail_and_length(self):
-        for command in ('/model x ', '/model x;', '/model ' + 'x' * 194):
+        for command in ('/model x ', '/model x;', '/model x\u3000', '/model x\u2003', '/model ' + 'x' * 194):
             t = Terminal(payload=command)
             with self.assertRaisesRegex(m.DeliveryError, 'unsupported-typed-command'):
                 deliver(t, typed_command=True)
@@ -514,7 +514,7 @@ def typed_mutations():
     root = Path(__file__).parent
     original = (root / 'tmux-message.py').read_text()
     cases = [
-        ('typed_length_tail', 'if self.typed and (len(payload.encode("utf-8")) > 200 or payload.endswith((" ", ";"))):', 'if False:'),
+        ('typed_length_tail', 'if self.typed and (len(payload.encode("utf-8")) > 200 or payload != payload.rstrip() or payload.endswith(";")):', 'if False:'),
         ('typed_failure_method', '"typed" if o.typed_command else "paste"', '"typed" if sender and sender.typed else "paste"'),
         ('typed_dispatch', 'self.tmux.type_command(self.payload)', 'self.tmux.paste(self.path)'),
         ('typed_scope', 'if self.typed and not re.fullmatch(r"/[A-Za-z][A-Za-z0-9_-]*(?: [^\\r\\n\\x00-\\x1f\\x7f]*)?", payload):', 'if False:'),
