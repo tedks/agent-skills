@@ -189,7 +189,7 @@ def terminal(directory, mode):
                         else:
                             history += '• Accepted\r\n'
                             if payload != '/exit' and mode != 'composer':
-                                disposition = 'DECLINED' if mode == 'decline' else 'DONE'
+                                disposition = 'DECLINED' if mode.startswith('decline') else 'DONE'
                                 if mode == 'quoted':
                                     history += 'RETIRE-DONE-' + event + '\r\n'
                                 elif mode == 'old':
@@ -200,6 +200,10 @@ def terminal(directory, mode):
                                     due = time.monotonic() + .2
                                 else:
                                     history += '● RETIRE-' + disposition + '-' + event + '\r\n'
+                                    if mode.endswith('suffix'):
+                                        history += '  Do not retire yet; recovery still needs correction.\r\n'
+                                    elif mode.endswith('later-assistant'):
+                                        history += '● Recovery still needs correction.\r\n'
                         draft = ('● RETIRE-DONE-' + event).encode() if mode == 'composer' else b''
                         pasted_payload = False
                     else:
@@ -1030,10 +1034,14 @@ class Tests(unittest.TestCase):
         self.git('push')
         (self.directory / 'human-independent-exit').touch()
         self.wait_for(lambda: not Path('/proc/' + str(state['identity']['process']['pid'])).exists())
-        result = self.invoke('--handoff', 'codex', 'model', '--roles', str(self.roles), '--resume', str(path))
-        self.assertEqual(result.returncode, 2, result.stderr)
-        self.assertIn('does not establish handoff', result.stderr)
-        self.assertFalse((self.directory / 'spawn.json').exists())
+        tampered = self.git('show', 'origin/master:' + state['handoff_receipt'])
+        for _ in range(2):
+            result = self.invoke('--handoff', 'codex', 'model', '--roles', str(self.roles), '--resume', str(path))
+            self.assertEqual(result.returncode, 2, result.stderr)
+            self.assertIn('does not establish handoff', result.stderr)
+            self.assertFalse((self.directory / 'spawn.json').exists())
+            self.assertEqual(self.git('show', 'origin/master:' + state['handoff_receipt']), tampered)
+            self.assertEqual(receipt.read_text(), json.dumps(data))
 
     def test_resume_rereads_state_after_event_lock(self):
         self.actor('waiting-bad')
@@ -1051,6 +1059,55 @@ class Tests(unittest.TestCase):
             result = self.invoke('--waiting', '--resume', str(path))
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertTrue(self.state()[1].get('after_lock_fixture'))
+
+    def test_remote_bad_commit_receipt_never_self_heals(self):
+        self.actor('hold')
+        self.invoke('--handoff', 'codex', 'model', '--roles', str(self.roles))
+        path, state = self.state()
+        receipt = self.repo / state['handoff_receipt']
+        data = json.loads(receipt.read_text())
+        data['commit'] = self.git('rev-list', '--max-parents=0', 'HEAD')
+        receipt.write_text(json.dumps(data))
+        self.git('add', '--', state['handoff_receipt'])
+        self.git('commit', '-m', 'fixture mismatched commit')
+        self.git('push')
+        (self.directory / 'human-independent-exit').touch()
+        self.wait_for(lambda: not Path('/proc/' + str(state['identity']['process']['pid'])).exists())
+        tampered = self.git('show', 'origin/master:' + state['handoff_receipt'])
+        for _ in range(2):
+            result = self.invoke('--handoff', 'codex', 'model', '--roles', str(self.roles), '--resume', str(path))
+            self.assertEqual(result.returncode, 2, result.stderr)
+            self.assertIn('command failed: git', result.stderr)
+            self.assertFalse((self.directory / 'spawn.json').exists())
+            self.assertEqual(self.git('show', 'origin/master:' + state['handoff_receipt']), tampered)
+            self.assertEqual(receipt.read_text(), json.dumps(data))
+
+    def assert_completion_block_pending(self, mode):
+        self.actor(mode)
+        result = self.invoke()
+        self.assertEqual(result.returncode, 2, result.stderr)
+        self.assertIn('DONE not observed', result.stderr)
+        self.assertEqual(self.observed()['pastes'], 1)
+        path, state = self.state()
+        self.assertIsNone(state['disposition'])
+        self.assertNotIn('handoff_receipt', state)
+        self.assertFalse((self.directory / 'exit-order.json').exists())
+        self.assertTrue(Path('/proc/' + str(state['identity']['process']['pid'])).exists())
+
+    def test_codex_marker_suffix_is_not_completion(self):
+        self.assert_completion_block_pending('done-suffix')
+
+    def test_claude_marker_suffix_is_not_completion(self):
+        self.assert_completion_block_pending('claude-suffix')
+
+    def test_codex_later_assistant_invalidates_marker(self):
+        self.assert_completion_block_pending('done-later-assistant')
+
+    def test_claude_later_assistant_invalidates_marker(self):
+        self.assert_completion_block_pending('claude-later-assistant')
+
+    def test_decline_suffix_is_not_disposition(self):
+        self.assert_completion_block_pending('decline-suffix')
 
 
 if __name__ == '__main__':

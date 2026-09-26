@@ -11,7 +11,11 @@ send into a modal. The agent can decline, letting the authorized caller write
 the recovery shard through the deliberate caller continuation.
 A completion is a fresh assistant response row `RETIRE-DONE-<event>` after
 writing the shard; a decline is `RETIRE-DECLINED-<event>`. The marker must be
-the agent's entire final reply, without prose before or after it. The observed terminal
+the agent's entire final reply, without prose before or after it. The terminal
+must show that marker as the final assistant block; trailing continuation text
+or a later assistant response keeps completion pending. Blank rows and the
+pure horizontal Claude composer separator are the only permitted suffix rows.
+The observed terminal
 must render an assistant `●` or `•` row marker. Bare wrapped user text and
 live composer text do not count. Unsupported response layouts stay pending.
 The controller never accepts a reported alternate shard path.
@@ -102,6 +106,10 @@ or successor. If the original ended independently after that verified handoff,
 record `exit-not-needed` and continue without sending into its shell. A
 replacement actor still blocks succession. Malformed private records stop
 with their bytes preserved for operator reconciliation.
+After a failed immutable-shard or receipt revalidation, failure handling only
+records the private attempt audit; it does not publish a handoff-authorizing
+receipt from cached state. Repeated resumes preserve the rejected evidence
+until the operator reconciles it deliberately.
 The ledger records pending handoff, pending exit and retired;
 its index preserves all steward-owned legacy metadata outside the bounded
 generated section. A legacy filename matching the same session ID prefix

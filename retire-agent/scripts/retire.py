@@ -296,13 +296,19 @@ class Retirement:
             return None
         # Archived redraws can contain former UNSENT input; only current
         # rendered assistant rows can establish a new completion.
-        result = '\n'.join(rows)
         event = self.state['id']
-        # Entire assistant response only; shared layout detector excludes input.
-        for kind in ('DONE', 'DECLINED'):
-            if re.search(r'^[●•] RETIRE-' + kind + '-' + event + r'\s*$', result, re.M):
-                return kind
-        return None
+        # Only the final assistant block can establish disposition. The shared
+        # API already excludes input; a Claude upper composer rule can remain.
+        candidates = [i for i, row in enumerate(rows) if re.match(r'^[●•] ', row)]
+        if not candidates:
+            return None
+        position = candidates[-1]
+        marker = re.fullmatch(r'[●•] RETIRE-(DONE|DECLINED)-' + event, rows[position])
+        if not marker:
+            return None
+        if any(row.strip() and not (len(row.strip()) >= 3 and set(row.strip()) == {'─'}) for row in rows[position + 1:]):
+            return None
+        return marker[1]
 
     def validate_shard(self, path):
         if path.is_symlink() or not path.is_file() or path.resolve() != self.path.parent / (self.state['id'] + '.shard'):
@@ -627,6 +633,7 @@ class Retirement:
                 raise Stop('private receipt does not establish handoff')
             if self.git('rev-parse', record['commit'] + ':' + self.state['shard']) != self.state['shard_hash']:
                 raise Stop('private receipt does not identify verified shard bytes')
+            self.evidence_verified = True  # Current execution, never cached state authority.
         if not self.state.get('exit'):
             if self.ended():
                 self.state['exit'] = {'status': 'not-needed', 'reason': 'original-already-ended'}
@@ -682,6 +689,8 @@ class Retirement:
     def record_pending(self):
         if not self.state or not getattr(self, 'event_owned', False):
             return
+        if self.state.get('handoff_receipt') and not getattr(self, 'evidence_verified', False):
+            return  # Revalidation failure must not launder cached handoff into a new receipt.
         receipt = self.repo / 'receipts' / (self.state['id'] + '.json')
         if receipt.exists():
             record = receipt_record(receipt.read_text())
