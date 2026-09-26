@@ -7,8 +7,63 @@ cursor coordinates. Wrapped layouts the parser cannot compare exactly become
 unknown. The helper never prints composer content.
 """
 import pathlib
+import re
 import sys
 import unicodedata
+
+CSI_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
+
+
+def strip_ansi(text: str) -> str:
+    return CSI_RE.sub("", text)
+
+
+def dim_span(raw_line: str, needle: str) -> bool:
+    """Return true only when every visible character in needle has SGR dim."""
+    chars = []
+    dim_flags = []
+    dim = False
+    offset = 0
+    for match in CSI_RE.finditer(raw_line):
+        chunk = raw_line[offset : match.start()]
+        chars.extend(chunk)
+        dim_flags.extend([dim] * len(chunk))
+        code = match.group(0)
+        if code.endswith("m"):
+            params = code[2:-1]
+            try:
+                values = [int(item) if item else 0 for item in params.split(";")] if params else [0]
+            except ValueError:
+                return False
+            index = 0
+            while index < len(values):
+                value = values[index]
+                if value in {0, 22}:
+                    dim = False
+                elif value == 2:
+                    dim = True
+                elif value in {38, 48, 58}:
+                    # Extended foreground/background/underline colors have
+                    # numeric payloads that can themselves contain 2. Skip
+                    # the mode and its color components instead of treating
+                    # them as attributes.
+                    if index + 1 >= len(values):
+                        return False
+                    mode = values[index + 1]
+                    if mode == 5 and index + 2 < len(values):
+                        index += 2
+                    elif mode == 2 and index + 4 < len(values):
+                        index += 4
+                    else:
+                        return False
+                index += 1
+        offset = match.end()
+    tail = raw_line[offset:]
+    chars.extend(tail)
+    dim_flags.extend([dim] * len(tail))
+    visible = "".join(chars)
+    start = visible.find(needle)
+    return start >= 0 and all(dim_flags[start : start + len(needle)])
 
 
 def cell_width(text: str) -> int:
@@ -23,9 +78,9 @@ def cell_width(text: str) -> int:
 def state(screen: str, payload: str, cx: int, cy: int) -> str:
     if any(ord(ch) < 32 and ch not in "\n\t" for ch in payload):
         return "unknown"
-    lines = screen.splitlines()
+    lines = strip_ansi(screen).splitlines()
     if "Context " in screen and "›" in screen:
-        return codex_state(lines, payload, cx, cy)
+        return codex_state(lines, screen.splitlines(), payload, cx, cy)
     # Current Claude Code renders the live composer between two horizontal
     # rules, with no side gutters. Require that exact frame around the last
     # prompt marker; a transcript line containing ❯ is not sufficient.
@@ -60,19 +115,19 @@ def state(screen: str, payload: str, cx: int, cy: int) -> str:
     observed = observed.rstrip("\n")
     if observed == "":
         return "empty" if cy == idx and cx == 2 else "busy"
-    # Claude currently paints a suggestion in an empty composer. Only accept
-    # its explicit suggestion prefix as empty; a human can still race between
-    # polls, and a typed literal suggestion is an unavoidable screen-only
-    # ambiguity. The caller requires two stable observations and the cursor
-    # check before relying on this state.
-    if observed.startswith('Try "'):
-        return "empty" if cy == idx and cx == 2 else "busy"
     expected_y = idx + payload.count("\n")
     expected_x = 2 + cell_width(payload.rsplit("\n", 1)[-1])
-    return "own" if observed == wanted and (cy, cx) == (expected_y, expected_x) else "busy"
+    if observed == wanted and (cy, cx) == (expected_y, expected_x):
+        return "own"
+    # Claude paints a suggestion in an empty composer without a distinct style.
+    # A human can type that exact text and Home the cursor, producing the same
+    # capture. Therefore a suggestion is never evidence of an empty composer.
+    if observed.startswith('Try "'):
+        return "unknown"
+    return "busy"
 
 
-def codex_state(lines: list[str], payload: str, cx: int, cy: int) -> str:
+def codex_state(lines: list[str], raw_lines: list[str], payload: str, cx: int, cy: int) -> str:
     # Match the live prompt/context/footer shape. A Working row is allowed
     # between prompt and context because generation can continue while the
     # composer stays empty. Known shortcut, agent, and warning footer text may follow.
@@ -102,14 +157,23 @@ def codex_state(lines: list[str], payload: str, cx: int, cy: int) -> str:
         else:
             return "unknown"
     observed = "\n".join([fragment.rstrip(), *continuations]).rstrip("\n")
-    if observed == "Ask Codex to do anything":
+    if observed == "":
         return "empty" if cy == idx and cx == 2 else "busy"
     expected_y = idx + payload.count("\n")
     expected_x = 2 + cell_width(payload.rsplit("\n", 1)[-1])
-    return "own" if observed == payload.rstrip("\n") and (cy, cx) == (expected_y, expected_x) else "busy"
+    if observed == payload.rstrip("\n") and (cy, cx) == (expected_y, expected_x):
+        return "own"
+    if observed == "Ask Codex to do anything":
+        if cy == idx and cx == 2 and idx < len(raw_lines) and dim_span(raw_lines[idx], observed):
+            return "empty"
+        return "busy"
+    return "busy"
 
 
 def main() -> int:
+    if len(sys.argv) == 2 and sys.argv[1] == "--strip-ansi":
+        sys.stdout.write(strip_ansi(sys.stdin.read()))
+        return 0
     if len(sys.argv) != 4:
         return 64
     try:

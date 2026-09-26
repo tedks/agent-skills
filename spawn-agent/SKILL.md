@@ -367,11 +367,14 @@ aliases of the same server/pane. Human or unknown unsent text and modals defer
 delivery; unrelated agent output can continue while the empty composer accepts
 a pending message. After paste, the visible composer must match the outgoing
 payload throughout the wait and immediately before a single Enter.
+After paste, only a stale empty composer gets up to one second to repaint; an
+unknown, busy, or modal screen immediately becomes ambiguous, and every later
+check after ownership is first visible must remain an exact match.
 
 Options before the message or `--prompt-file`:
 
 - `--submit-delay <seconds>`: integer 0-30, default 8, paste-to-Enter pause.
-- `--max-wait <seconds>`: integer 0-600, default 30, composer wait budget.
+- `--max-wait <seconds>`: integer 1-600, default 30, composer wait budget.
 - `--poll-interval <seconds>`: decimal 0.1-2, default 0.5. Composer deferral
   backs off to at most 8 seconds; payload verification uses this cadence.
 
@@ -379,6 +382,15 @@ Requires Bash, Python 3.9+, tmux, flock, and GNU command-line utilities.
 Payloads must be nonblank UTF-8 text, with no control characters except
 newlines and no trailing spaces or tabs on a line. Wrapped or collapsed
 composers may be unverifiable and produce an ambiguous outcome.
+
+There is no reliable screen-only way to tell Claude Code's rotating `Try …`
+suggestion from a person who typed the same text and moved the cursor Home;
+tmux captures show identical text, cursor position, and no style distinction.
+The sender treats that Claude frame as unknown and defers with the payload
+preserved. Codex's empty `Ask Codex to do anything` suggestion is accepted only
+when `capture-pane -e` exposes SGR dim styling over the full suggestion. If that
+style evidence is absent or unparseable, the sender defers. Neither signal
+inspection nor cursor position excludes typing between screen observations.
 
 The lock directory defaults to the checked private `/tmp/claude-send-locks-$UID`,
 independent of desktop/SSH environment. `CLAUDE_SEND_LOCK_DIR` can override it
@@ -390,8 +402,9 @@ The separate alias lock wait is bounded to 90 seconds. Output reports
 further input is safe. Deferred/ambiguous outcomes report `pending_file=...`
 with the exact outgoing payload in a private directory (mode 700, file 600).
 If state storage fails, `retention=...` reports the existing mode-600 temporary
-snapshot retained instead. Interrupted sends retain the same payload and report
-ambiguity while keeping the signal exit code (129/130/143).
+snapshot retained instead. Signals before any paste attempt report deferred;
+signals during or after a paste attempt report ambiguity. Both retain the exact
+payload and keep the conventional signal exit code (129/130/143).
 Keep that file for deliberate retry and remove it when resolved. The sender
 never clears mixed input or automatically repastes/retries Enter.
 

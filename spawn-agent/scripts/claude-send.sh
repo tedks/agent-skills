@@ -16,7 +16,7 @@ usage() {
     echo "Usage: claude-send.sh <window> [--submit-delay SEC] [--max-wait SEC] [--poll-interval SEC] <message>" >&2
     echo "       claude-send.sh <window> [options] --prompt-file FILE" >&2
     echo "  --submit-delay SEC  seconds after paste before submit (integer 0-30; default 8)" >&2
-    echo "  --max-wait SEC      maximum wait for an empty composer (integer 0-600; default 30)" >&2
+    echo "  --max-wait SEC      maximum wait for an empty composer (integer 1-600; default 30)" >&2
     echo "  --poll-interval SEC base poll interval (decimal 0.1-2; default 0.5); backoff caps at 8s" >&2
 }
 if (($# < 2)); then usage; exit 1; fi
@@ -36,8 +36,8 @@ while (($#)); do
                     if ((10#$value > 30)); then echo 'Error: --submit-delay requires an integer from 0 to 30' >&2; exit 1; fi
                     submit_delay=$((10#$value));;
                 --max-wait)
-                    [[ "$value" =~ ^[0-9]+$ && ${#value} -le 3 ]] || { echo 'Error: --max-wait requires an integer from 0 to 600' >&2; exit 1; }
-                    if ((10#$value > 600)); then echo 'Error: --max-wait requires an integer from 0 to 600' >&2; exit 1; fi
+                    [[ "$value" =~ ^[0-9]+$ && ${#value} -le 3 ]] || { echo 'Error: --max-wait requires an integer from 1 to 600' >&2; exit 1; }
+                    if ((10#$value < 1 || 10#$value > 600)); then echo 'Error: --max-wait requires an integer from 1 to 600' >&2; exit 1; fi
                     max_wait=$((10#$value));;
                 --poll-interval)
                     [[ "$value" =~ ^([0-9]+([.][0-9]+)?|[.][0-9]+)$ && ${#value} -le 5 ]] || { echo 'Error: --poll-interval requires a decimal from 0.1 to 2' >&2; exit 1; }
@@ -93,22 +93,6 @@ if any(line != line.rstrip(" \t") for line in text.splitlines()):
     raise SystemExit("Error: prompt lines may not end in spaces or tabs")
 PY
 
-identity=$("${TMUX_CMD[@]}" display-message -p -t "$window" '#{pid}:#{pane_id}') || { echo 'Error: failed to resolve tmux target' >&2; exit 1; }
-[[ "$identity" =~ ^[0-9]+:%[0-9]+$ ]] || { echo 'Error: tmux returned an invalid target identity' >&2; exit 1; }
-pane_id=${identity#*:}
-lock_key=$(printf '%s' "$identity" | sha256sum | cut -d' ' -f1)
-# The default must not depend on the caller's XDG environment: desktop, SSH,
-# and systemd invocations that resolve to one pane share one lock namespace.
-# Tests may supply a private directory, but all cooperating callers must use
-# the same override.
-lock_dir="${CLAUDE_SEND_LOCK_DIR:-/tmp/claude-send-locks-${UID}}"
-umask 077
-mkdir -p -- "$(dirname -- "$lock_dir")"
-mkdir -m 700 -- "$lock_dir" 2>/dev/null || true
-[[ -d "$lock_dir" && ! -L "$lock_dir" && "$(stat -c %u "$lock_dir")" == "$UID" ]] || { echo 'Error: unsafe lock directory' >&2; exit 1; }
-chmod 700 "$lock_dir"
-exec {lock_fd}>"$lock_dir/$lock_key.lock"
-
 # Preserve the exact outgoing payload privately if delivery is deferred or its
 # state becomes ambiguous. The path is reported; the payload is never printed.
 preserve_pending() {
@@ -135,26 +119,50 @@ preserve_pending() {
     fi
     printf 'status=%s reason=%s pending_file=%s\n' "$status" "$reason" "$pending_dir/message" >&2
 }
+signal_handled=0
+handle_signal() {
+    local name=$1 code=$2 status=deferred
+    signal_handled=1
+    ((paste_started)) && status=ambiguous
+    preserve_pending "$status" "signal-$name"
+    exit "$code"
+}
+trap 'handle_signal HUP 129' HUP
+trap 'handle_signal INT 130' INT
+trap 'handle_signal TERM 143' TERM
+identity=$("${TMUX_CMD[@]}" display-message -p -t "$window" '#{pid}:#{pane_id}') || { echo 'Error: failed to resolve tmux target' >&2; exit 1; }
+[[ "$identity" =~ ^[0-9]+:%[0-9]+$ ]] || { echo 'Error: tmux returned an invalid target identity' >&2; exit 1; }
+pane_id=${identity#*:}
+lock_key=$(printf '%s' "$identity" | sha256sum | cut -d' ' -f1)
+# The default must not depend on the caller's XDG environment: desktop, SSH,
+# and systemd invocations that resolve to one pane share one lock namespace.
+# Tests may supply a private directory, but all cooperating callers must use
+# the same override.
+lock_dir="${CLAUDE_SEND_LOCK_DIR:-/tmp/claude-send-locks-${UID}}"
+umask 077
+mkdir -p -- "$(dirname -- "$lock_dir")"
+mkdir -m 700 -- "$lock_dir" 2>/dev/null || true
+[[ -d "$lock_dir" && ! -L "$lock_dir" && "$(stat -c %u "$lock_dir")" == "$UID" ]] || { echo 'Error: unsafe lock directory' >&2; exit 1; }
+chmod 700 "$lock_dir"
+exec {lock_fd}>"$lock_dir/$lock_key.lock"
 if ! flock -w 90 "$lock_fd"; then
     preserve_pending deferred target-lock-timeout
     exit 2
 fi
 cleanup_after_send() {
     local rc=$?
-    if ((paste_started && rc != 0)) && [[ -z "$pending_dir" ]]; then
+    if ((paste_started && rc != 0 && !signal_handled)) && [[ -z "$pending_dir" ]]; then
         preserve_pending ambiguous interrupted-or-failed-after-paste || true
     fi
     cleanup
     return "$rc"
 }
 trap cleanup_after_send EXIT
-trap 'exit 129' HUP
-trap 'exit 130' INT
-trap 'exit 143' TERM
 
 screen_state() {
-    local screen cursor cursor_x cursor_y last_nonempty
-    screen=$("${TMUX_CMD[@]}" capture-pane -p -t "$pane_id" 2>/dev/null) || return 1
+    local screen screen_raw cursor cursor_x cursor_y last_nonempty
+    screen_raw=$("${TMUX_CMD[@]}" capture-pane -e -p -t "$pane_id" 2>/dev/null) || return 1
+    screen=$(printf '%s' "$screen_raw" | python3 "$SCRIPT_DIR/claude-send-screen.py" --strip-ansi) || return 1
     cursor=$("${TMUX_CMD[@]}" display-message -p -t "$pane_id" '#{cursor_x}:#{cursor_y}' 2>/dev/null) || return 1
     [[ "$cursor" =~ ^([0-9]+):([0-9]+)$ ]] || { printf unknown; return; }
     cursor_x=${BASH_REMATCH[1]}; cursor_y=${BASH_REMATCH[2]}
@@ -164,12 +172,12 @@ screen_state() {
         printf modal; return
     fi
     if [[ "$screen" == *'Context '* && "$screen" == *'› '* ]]; then
-        printf '%s' "$screen" | python3 "$SCRIPT_DIR/claude-send-screen.py" "$prompt_file" "$cursor_x" "$cursor_y"
+        printf '%s' "$screen_raw" | python3 "$SCRIPT_DIR/claude-send-screen.py" "$prompt_file" "$cursor_x" "$cursor_y"
         return
     fi
     if claude_trust_modal_active "$screen"; then printf modal; return; fi
     claude_composer_ready "$screen" || { printf unknown; return; }
-    printf '%s' "$screen" | python3 "$SCRIPT_DIR/claude-send-screen.py" "$prompt_file" "$cursor_x" "$cursor_y"
+    printf '%s' "$screen_raw" | python3 "$SCRIPT_DIR/claude-send-screen.py" "$prompt_file" "$cursor_x" "$cursor_y"
 }
 
 # A bounded deadline avoids granting extra time after slow capture calls.
@@ -195,6 +203,9 @@ done
 
 # Recheck under the alias-shared lock immediately before paste.
 state=$(screen_state 2>/dev/null || printf unknown)
+elapsed=$(python3 -c 'import time,sys; print((time.monotonic_ns()-int(sys.argv[1]))/1e9)' "$wait_start_ns")
+remaining=$(awk -v d="$max_wait" -v e="$elapsed" 'BEGIN { printf "%.3f",d-e }')
+awk -v r="$remaining" 'BEGIN { exit !(r > 0) }' || { preserve_pending deferred final-pre-paste-timeout; exit 2; }
 if [[ "$state" != empty ]]; then preserve_pending deferred "pre-paste-$state"; exit 2; fi
 
 buffer_loaded=1
@@ -211,6 +222,33 @@ buffer_loaded=0
 # or press Enter in that case. Agent generation outside the composer is allowed.
 delay=$poll_interval
 start_ns=$(python3 -c 'import time; print(time.monotonic_ns())')
+# Tolerate only a brief stale-empty capture immediately after paste. An unknown
+# frame or any nonempty mismatch is ambiguous at once; after exact ownership is
+# first observed, every later transition must remain exact.
+render_grace_ns=1000000000
+own_seen=0
+grace_used=0
+while ((own_seen == 0)); do
+    state=$(screen_state 2>/dev/null || printf unknown)
+    if [[ "$state" == own ]]; then
+        if ((grace_used)); then
+            elapsed_ns=$(python3 -c 'import time,sys; print(time.monotonic_ns()-int(sys.argv[1]))' "$start_ns")
+            ((elapsed_ns < render_grace_ns)) || { preserve_pending ambiguous post-paste-render-timeout; exit 3; }
+        fi
+        own_seen=1
+        break
+    fi
+    if [[ "$state" != empty ]]; then
+        preserve_pending ambiguous "post-paste-$state"
+        exit 3
+    fi
+    elapsed_ns=$(python3 -c 'import time,sys; print(time.monotonic_ns()-int(sys.argv[1]))' "$start_ns")
+    ((elapsed_ns < render_grace_ns)) || { preserve_pending ambiguous post-paste-empty-timeout; exit 3; }
+    grace_used=1
+    remaining_ns=$((render_grace_ns - elapsed_ns))
+    sleep_for=$(awk -v d="$poll_interval" -v r="$remaining_ns" 'BEGIN { r=r/1000000000; if (d>r) d=r; printf "%.3f",d }')
+    sleep "$sleep_for"
+done
 while :; do
     state=$(screen_state 2>/dev/null || printf unknown)
     [[ "$state" == own ]] || { preserve_pending ambiguous "post-paste-$state"; exit 3; }

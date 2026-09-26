@@ -1,6 +1,7 @@
 #!/bin/bash
 # Fake-tmux regression tests for human-composer-safe claude-send delivery.
 set -euo pipefail
+export PYTHONDONTWRITEBYTECODE=1
 
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 FIXTURES="$SCRIPT_DIR/fixtures/claude-send"
@@ -83,7 +84,9 @@ case "$cmd" in
   display-message)
     if [[ "${*: -1}" == '#{pid}:#{pane_id}' ]]; then printf '4242:%%7\n'
     elif [[ "${*: -1}" == '#{cursor_x}:#{cursor_y}' ]]; then
-      if [[ -s "$FAKE_STATE/composer" ]]; then
+      if [[ "$(<"$FAKE_STATE/mode")" == persistent-empty-after-paste && -s "$FAKE_STATE/pasted" ]]; then cursor='2:1'
+      elif [[ "$(<"$FAKE_STATE/mode")" == render-stale-empty && -s "$FAKE_STATE/pasted" && $(<"$FAKE_STATE/captures") -eq 4 ]]; then cursor='2:1'
+      elif [[ -s "$FAKE_STATE/composer" ]]; then
         cursor=$(python3 - "$FAKE_STATE/composer" <<'PY'
 from pathlib import Path
 import sys
@@ -101,6 +104,12 @@ PY
     n=0; [[ -f "$FAKE_STATE/captures" ]] && n=$(<"$FAKE_STATE/captures")
     n=$((n + 1)); printf '%s' "$n" > "$FAKE_STATE/captures"
     mode=$(<"$FAKE_STATE/mode")
+    if [[ "$mode" == interrupt-before-paste && $n -eq 1 ]]; then
+      while [[ ! -s "$FAKE_STATE/sender-pid" ]]; do /usr/bin/sleep 0.01; done
+      kill -TERM "$(<"$FAKE_STATE/sender-pid")"
+      exit 143
+    fi
+    if [[ "$mode" == slow-third-empty && $n -eq 3 ]]; then /usr/bin/sleep 1.2; fi
     if [[ "$mode" == slow-second-empty && $n -eq 2 ]]; then /usr/bin/sleep 1.2; fi
     if [[ "$mode" == human-before-paste && $n -ge 3 ]]; then
       printf 'human text before paste\n' > "$FAKE_STATE/composer"
@@ -108,6 +117,13 @@ PY
     if [[ "$mode" == human-during-delay && -s "$FAKE_STATE/pasted" && $n -ge 5 ]]; then
       printf 'a human began typing\n' > "$FAKE_STATE/composer"
     fi
+    if [[ -s "$FAKE_STATE/pasted" && "$mode" == render-stale-empty && $n -eq 4 ]]; then
+      cat "$FAKE_STATE/empty" > "$FAKE_STATE/last-screen"
+    elif [[ -s "$FAKE_STATE/pasted" && "$mode" == persistent-empty-after-paste ]]; then
+      cat "$FAKE_STATE/empty" > "$FAKE_STATE/last-screen"
+    elif [[ -s "$FAKE_STATE/pasted" && "$mode" == unknown-after-paste ]]; then
+      printf 'Starting Claude Code\n' > "$FAKE_STATE/last-screen"
+    else
     case "$mode" in
       modal) cat "$FAKE_STATE/modal" ;;
       unknown) printf 'Starting Claude Code\n';;
@@ -126,10 +142,11 @@ PY
           if [[ "$mode" == slash ]]; then printf '────────────────────────────────────────\n❯ /compact\n────────────────────────────────────────\n'
           else printf '────────────────────────────────────────\n❯ human draft\n────────────────────────────────────────\n'; fi
         elif [[ "$mode" == streaming ]]; then
-          printf 'Assistant is thinking…\n────────────────────────────────────────\n❯ Try "how do I log an error?"\n────────────────────────────────────────\n'
+          printf 'Assistant is thinking…\n────────────────────────────────────────\n❯ \n────────────────────────────────────────\n'
         else cat "$FAKE_STATE/empty"; fi
         ;;
     esac > "$FAKE_STATE/last-screen"
+    fi
     cat "$FAKE_STATE/last-screen"
     ;;
   load-buffer)
@@ -182,11 +199,21 @@ reset_case() {
   : > "$FAKE_STATE/tmux-calls"
   : > "$FAKE_STATE/tmux-trace"
   : > "$FAKE_STATE/parser-trace"
+  : > "$FAKE_STATE/sender-pid"
   printf '%s\n' "${1:-empty}" > "$FAKE_STATE/mode"
-  cp "$FIXTURES/empty.txt" "$FAKE_STATE/empty"
+  cp "$FIXTURES/claude-blank.ansi" "$FAKE_STATE/empty"
   cp "$FIXTURES/modal.txt" "$FAKE_STATE/modal"
 }
-run_sender() { bash "$SCRIPT_DIR/claude-send.sh" "$@"; }
+run_sender() {
+  if [[ "$(<"$FAKE_STATE/mode")" == interrupt-before-paste ]]; then
+    bash "$SCRIPT_DIR/claude-send.sh" "$@" &
+    local sender_pid=$!
+    printf '%s' "$sender_pid" > "$FAKE_STATE/sender-pid"
+    wait "$sender_pid"
+  else
+    bash "$SCRIPT_DIR/claude-send.sh" "$@"
+  fi
+}
 run_sender_without_xdg_runtime() { env -u XDG_RUNTIME_DIR bash "$SCRIPT_DIR/claude-send.sh" "$@"; }
 assert_pending() {
   local status=$1 output=$2 path
@@ -235,6 +262,11 @@ for option in --submit-delay --max-wait --poll-interval; do
   fi
   [[ ! -s "$FAKE_STATE/tmux-calls" ]]
 done
+reset_case empty
+if run_sender target --max-wait 0 --prompt-file "$prompt_file" 2>"$TEST_DIR/zero-max-wait.err"; then
+  echo 'FAIL: zero max-wait was accepted' >&2; exit 1
+fi
+[[ ! -s "$FAKE_STATE/tmux-calls" ]]
 python3 - "$SCRIPT_DIR/claude-send-screen.py" "$FIXTURES" "$prompt_file" <<'PY'
 from pathlib import Path
 import subprocess, sys
@@ -242,12 +274,12 @@ parser, fixtures, payload = sys.argv[1:]
 def classify(frame, text, x='2', y='1'):
     Path(payload).write_text(text)
     return subprocess.check_output([sys.executable, parser, payload, x, y], input=(Path(fixtures) / frame).read_bytes()).decode().strip()
-assert classify('empty.txt', 'outgoing') == 'empty'
+assert classify('claude-blank.ansi', 'outgoing') == 'empty'
 assert classify('multiline.txt', 'first harmless line\nsecond harmless line', str(2 + len('second harmless line')), '2') == 'own'
 assert classify('multiline.txt', 'different') == 'busy'
 assert classify('modal.txt', 'outgoing') == 'unknown'
-assert classify('empty.txt', 'different') == 'empty'
-codex = ('\n' * 26 + '› Ask Codex to do anything\nWorking (12s • esc to interrupt)\n'
+assert classify('claude-blank.ansi', 'different') == 'empty'
+codex = ('\n' * 26 + '\x1b[1m›\x1b[0m \x1b[2mAsk Codex to do anything\x1b[0m\nWorking (12s • esc to interrupt)\n'
          '  GPT-6-Astra · Context 100% left · disposable\n'
          '  ← for agents · ? for shortcuts\n')
 Path(payload).write_text('unused')
@@ -255,6 +287,30 @@ assert subprocess.check_output([sys.executable, parser, payload, '2', '26'], inp
 Path(payload).write_text('harmless draft')
 codex_own = codex.replace('Ask Codex to do anything', 'harmless draft').replace('Working (12s • esc to interrupt)\n', '')
 assert subprocess.check_output([sys.executable, parser, payload, '16', '26'], input=codex_own.encode()).decode().strip() == 'own'
+
+def classify_fixture(name, text, x, y):
+    Path(payload).write_text(text)
+    return subprocess.check_output(
+        [sys.executable, parser, payload, str(x), str(y)],
+        input=(Path(fixtures) / name).read_bytes(),
+    ).decode().strip()
+assert classify_fixture('claude-blank.ansi', 'outgoing', 2, 1) == 'empty'
+empty_suggestion = (Path(fixtures) / 'claude-suggestion-empty.ansi').read_bytes()
+typed_home_suggestion = (Path(fixtures) / 'claude-suggestion-typed-home.ansi').read_bytes()
+assert empty_suggestion == typed_home_suggestion
+# Claude emits no ANSI style distinction for this exact cursor-home collision;
+# both frames must be deferred as occupied after transport updates.
+assert classify_fixture('claude-suggestion-empty.ansi', 'outgoing', 2, 1) == 'unknown'
+assert classify_fixture('claude-suggestion-typed-home.ansi', 'outgoing', 2, 1) == 'unknown'
+assert classify_fixture('claude-try-prefix-typed.ansi', 'outgoing', 16, 1) == 'unknown'
+assert classify_fixture('codex-empty-dim.ansi', 'outgoing', 2, 26) == 'empty'
+assert classify_fixture('codex-typed-home.ansi', 'outgoing', 2, 26) == 'busy'
+codex_dim = (Path(fixtures) / 'codex-empty-dim.ansi').read_text()
+for color_sgr in ('\x1b[38;5;2m', '\x1b[38;2;2;2;2m', '\x1b[38:2:2:2:2m'):
+    color_only = codex_dim.replace('\x1b[2mAsk Codex to do anything', color_sgr + 'Ask Codex to do anything')
+    assert subprocess.check_output(
+        [sys.executable, parser, payload, '2', '26'], input=color_only.encode()
+    ).decode().strip() == 'busy'
 PY
 printf 'alpha\nbeta' > "$prompt_file"
 
@@ -269,12 +325,61 @@ pending=$(assert_pending deferred "$TEST_DIR/slow-capture.err")
 [[ $(grep -c '^enter$' "$FAKE_LOG" || true) -eq 0 ]]
 rm -rf "$(dirname "$pending")"
 
+# The immediate pre-paste recheck is the third capture and must share max-wait.
+reset_case slow-third-empty
+if run_sender target --submit-delay 0 --max-wait 1 --poll-interval 0.1 --prompt-file "$prompt_file" 2>"$TEST_DIR/slow-third.err"; then
+  echo 'FAIL: slow third empty observation was delivered after max-wait' >&2; exit 1
+else rc=$?; [[ $rc -eq 2 ]]; fi
+pending=$(assert_pending deferred "$TEST_DIR/slow-third.err")
+[[ $(grep -c '^paste-start$' "$FAKE_LOG" || true) -eq 0 ]]
+[[ $(grep -c '^enter$' "$FAKE_LOG" || true) -eq 0 ]]
+rm -rf "$(dirname "$pending")"
+
+# A signal while waiting before any paste must still retain the outgoing payload.
+reset_case interrupt-before-paste
+if FAKE_INTERRUPT_BEFORE_PASTE=1 run_sender target --submit-delay 0 --max-wait 3 --poll-interval 0.1 --prompt-file "$prompt_file" 2>"$TEST_DIR/pre-paste-signal.err"; then
+  echo 'FAIL: pre-paste interruption returned success' >&2; exit 1
+else rc=$?; [[ $rc -eq 143 ]]; fi
+pending=$(assert_pending deferred "$TEST_DIR/pre-paste-signal.err")
+[[ $(<"$pending") == $'alpha\nbeta' ]]
+[[ $(grep -c '^paste-start$' "$FAKE_LOG" || true) -eq 0 ]]
+[[ $(grep -c '^enter$' "$FAKE_LOG" || true) -eq 0 ]]
+rm -rf "$(dirname "$pending")"
+
 # Empty composer plus unrelated generation output still accepts queued input.
 reset_case streaming
 out=$(run_sender target --submit-delay 0 --max-wait 3 --poll-interval 0.1 --prompt-file "$prompt_file")
 [[ "$out" == 'status=sent receipt=unverified' ]]
 [[ $(grep -c '^enter$' "$FAKE_LOG") -eq 1 ]]
 [[ $(grep -c '^paste-start$' "$FAKE_LOG") -eq 1 ]]
+
+# A single stale empty frame after paste is tolerated until the paste renders exactly.
+reset_case render-stale-empty
+out=$(run_sender target --submit-delay 0 --max-wait 3 --poll-interval 0.1 --prompt-file "$prompt_file")
+[[ "$out" == 'status=sent receipt=unverified' ]]
+[[ $(grep -c '^paste-start$' "$FAKE_LOG") -eq 1 ]]
+[[ $(grep -c '^enter$' "$FAKE_LOG") -eq 1 ]]
+
+# Persistently stale empty rendering times out ambiguously; it never presses Enter.
+reset_case persistent-empty-after-paste
+if run_sender target --submit-delay 0 --max-wait 3 --poll-interval 0.1 --prompt-file "$prompt_file" 2>"$TEST_DIR/persistent-empty.err"; then
+  echo 'FAIL: persistent stale empty rendering was submitted' >&2; exit 1
+else rc=$?; [[ $rc -eq 3 ]]; fi
+pending=$(assert_pending ambiguous "$TEST_DIR/persistent-empty.err")
+[[ $(grep -c '^paste-start$' "$FAKE_LOG") -eq 1 ]]
+[[ $(grep -c '^enter$' "$FAKE_LOG" || true) -eq 0 ]]
+[[ $(<"$FAKE_STATE/composer") == $'alpha\nbeta' ]]
+rm -rf "$(dirname "$pending")"
+
+# An unreadable post-paste frame is immediately ambiguous and is never submitted.
+reset_case unknown-after-paste
+if run_sender target --submit-delay 0 --max-wait 3 --poll-interval 0.1 --prompt-file "$prompt_file" 2>"$TEST_DIR/unknown-after-paste.err"; then
+  echo 'FAIL: unknown post-paste frame was submitted' >&2; exit 1
+else rc=$?; [[ $rc -eq 3 ]]; fi
+pending=$(assert_pending ambiguous "$TEST_DIR/unknown-after-paste.err")
+[[ $(grep -c '^paste-start$' "$FAKE_LOG") -eq 1 ]]
+[[ $(grep -c '^enter$' "$FAKE_LOG" || true) -eq 0 ]]
+rm -rf "$(dirname "$pending")"
 
 # Existing human text, slash commands, and modal screens time out without paste/Enter.
 for mode in human slash modal; do
