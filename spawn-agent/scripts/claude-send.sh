@@ -97,7 +97,11 @@ identity=$("${TMUX_CMD[@]}" display-message -p -t "$window" '#{pid}:#{pane_id}')
 [[ "$identity" =~ ^[0-9]+:%[0-9]+$ ]] || { echo 'Error: tmux returned an invalid target identity' >&2; exit 1; }
 pane_id=${identity#*:}
 lock_key=$(printf '%s' "$identity" | sha256sum | cut -d' ' -f1)
-lock_dir="${XDG_RUNTIME_DIR:-$HOME/.cache}/claude-send-locks"
+# The default must not depend on the caller's XDG environment: desktop, SSH,
+# and systemd invocations that resolve to one pane share one lock namespace.
+# Tests may supply a private directory, but all cooperating callers must use
+# the same override.
+lock_dir="${CLAUDE_SEND_LOCK_DIR:-/tmp/claude-send-locks-${UID}}"
 umask 077
 mkdir -p -- "$(dirname -- "$lock_dir")"
 mkdir -m 700 -- "$lock_dir" 2>/dev/null || true

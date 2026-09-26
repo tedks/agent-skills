@@ -380,6 +380,9 @@ Payloads must be nonblank UTF-8 text, with no control characters except
 newlines and no trailing spaces or tabs on a line. Wrapped or collapsed
 composers may be unverifiable and produce an ambiguous outcome.
 
+The lock directory defaults to the checked private `/tmp/claude-send-locks-$UID`,
+independent of desktop/SSH environment. `CLAUDE_SEND_LOCK_DIR` can override it
+for testing; all cooperating senders must use the same override when configured.
 The separate alias lock wait is bounded to 90 seconds. Output reports
 `status=sent receipt=unverified` on transport submission (exit 0).
 `status=deferred` (exit 2) means no paste was attempted;
