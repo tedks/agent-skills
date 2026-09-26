@@ -75,7 +75,7 @@ bracketed paste. Typed
 input requires exact visible command text; a collapsed paste marker cannot
 authorize its Enter. Failure JSON distinguishes `input_attempted` from
 `paste_attempted` and labels `input_method`; an ambiguous typed attempt must
-never be blindly replayed.
+never be blindly replayed. `--typed-command` and `--literal-exit` cannot be combined.
 
 Payloads are nonblank UTF-8 with no control characters except newlines. Message
 bytes, including trailing whitespace/newlines, are preserved in the paste.
@@ -83,7 +83,9 @@ bytes, including trailing whitespace/newlines, are preserved in the paste.
 Exit 0 emits delivered JSON on stdout. Failures emit JSON on stderr. Exit 2
 means deferred before input. Exit 3 means ambiguous after an input attempt.
 Use `input_attempted` to determine whether any input may have occurred;
-`paste_attempted` applies only to bracketed paste, not literal typing. Signals retain conventional 128+signal exit
+`paste_attempted` applies to bracketed paste, except that the legacy
+`--literal-exit` mode retains its compatibility meaning of any input attempt.
+Both literal modes report `input_method: "typed"`. Signals retain conventional 128+signal exit
 codes. Unsuccessful attempts retain the outgoing message in a private temporary
 directory (700) with a private file (600). Remove that file/directory after
 resolving it. No human draft or pane contents are logged automatically.

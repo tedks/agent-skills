@@ -294,6 +294,8 @@ class Sender:
         self.pasted = False
         self.enters = 0
         self.typed = getattr(options, "typed_command", False)
+        if self.typed and getattr(options, "literal_exit", False):
+            raise DeliveryError("conflicting-input-modes")
         if self.typed and (len(payload.encode("utf-8")) > 200 or payload != payload.rstrip() or payload.endswith(";")):
             raise DeliveryError("unsupported-typed-command")
         if self.typed and not re.fullmatch(r"/[A-Za-z][A-Za-z0-9_-]*(?: [^\r\n\x00-\x1f\x7f]*)?", payload):
@@ -502,7 +504,7 @@ def main():
         result = {"status": "ambiguous" if pasted else "deferred", "reason": reason,
                   "pending_file": str(path), "needs_review": pasted or reason in {"unsupported-layout", "modal"},
                   "paste_attempted": pasted and not sender.typed,
-                  "input_attempted": pasted, "input_method": "typed" if o.typed_command else "paste",
+                  "input_attempted": pasted, "input_method": "typed" if o.typed_command or o.literal_exit else "paste",
                   "enters": sender.enters if sender else 0}
         if sender:
             result["pane"] = sender.tmux.pane

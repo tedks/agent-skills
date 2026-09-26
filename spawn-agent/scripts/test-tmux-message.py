@@ -12,7 +12,6 @@ from pathlib import Path
 from types import SimpleNamespace
 import sys
 import unittest
-from unittest.mock import patch
 sys.dont_write_bytecode = True
 spec = importlib.util.spec_from_file_location('delivery', Path(__file__).with_name('tmux-message.py'))
 m = importlib.util.module_from_spec(spec)
@@ -106,6 +105,12 @@ def deliver(t, **kw):
 
 
 class DeliveryTests(unittest.TestCase):
+    def test_literal_and_typed_modes_conflict_before_input(self):
+        t = ClaudeExitTerminal()
+        with self.assertRaisesRegex(m.DeliveryError, 'conflicting-input-modes'):
+            deliver(t, literal_exit=True, typed_command=True)
+        self.assertEqual((t.pastes, t.typed, t.enters), (0, 0, 0))
+
     def test_response_rows_exclude_live_composer_and_archive(self):
         for harness in ('codex', 'claude'):
             f = screen('● RETIRE-DONE-in-draft', history='● archived marker\n',
@@ -514,8 +519,9 @@ def typed_mutations():
     root = Path(__file__).parent
     original = (root / 'tmux-message.py').read_text()
     cases = [
+        ('conflicting_modes', 'if self.typed and getattr(options, "literal_exit", False):', 'if False:'),
         ('typed_length_tail', 'if self.typed and (len(payload.encode("utf-8")) > 200 or payload != payload.rstrip() or payload.endswith(";")):', 'if False:'),
-        ('typed_failure_method', '"typed" if o.typed_command else "paste"', '"typed" if sender and sender.typed else "paste"'),
+        ('typed_failure_method', '"typed" if o.typed_command or o.literal_exit else "paste"', '"typed" if sender and sender.typed else "paste"'),
         ('typed_dispatch', 'self.tmux.type_command(self.payload)', 'self.tmux.paste(self.path)'),
         ('typed_scope', 'if self.typed and not re.fullmatch(r"/[A-Za-z][A-Za-z0-9_-]*(?: [^\\r\\n\\x00-\\x1f\\x7f]*)?", payload):', 'if False:'),
         ('literal', 'self.pane, "-l", "--", text', 'self.pane, "--", text'),
