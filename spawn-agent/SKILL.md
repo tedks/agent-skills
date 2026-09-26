@@ -361,15 +361,47 @@ Send a message to a running Claude instance:
 ~/.claude/skills/spawn-agent/scripts/claude-send.sh chaos:review "run the tests"
 ```
 
-Uses tmux load-buffer/paste-buffer for the message body (avoids ARG_MAX),
-then sends Enter after an 8 second delay by default. Override the pause with
-`--submit-delay <seconds>` (integer 0-30); for example:
-`claude-send.sh chaos:review --submit-delay 10 "run the tests"`.
-Targets are resolved to a server and pane identity before locking, so aliases
-for the same pane serialize together. Lock waits are bounded to 90 seconds.
-Submission is sent once. Tmux command success confirms the key was sent to the
-pane, not that the application accepted the message; inspect the pane before
-any manual retry to avoid duplicating a message that was accepted.
+Uses tmux load-buffer/paste-buffer for the message body (avoids ARG_MAX).
+It observes a stable empty composer and rechecks under a lock shared by all
+aliases of the same server/pane. Human or unknown unsent text and modals defer
+delivery; unrelated agent output can continue while the empty composer accepts
+a pending message. After paste, the visible composer must match the outgoing
+payload throughout the wait and immediately before a single Enter.
+
+Options before the message or `--prompt-file`:
+
+- `--submit-delay <seconds>`: integer 0-30, default 8, paste-to-Enter pause.
+- `--max-wait <seconds>`: integer 0-600, default 30, composer wait budget.
+- `--poll-interval <seconds>`: decimal 0.1-2, default 0.5. Composer deferral
+  backs off to at most 8 seconds; payload verification uses this cadence.
+
+Requires Bash, Python 3.9+, tmux, flock, and GNU command-line utilities.
+Payloads must be nonblank UTF-8 text, with no control characters except
+newlines and no trailing spaces or tabs on a line. Wrapped or collapsed
+composers may be unverifiable and produce an ambiguous outcome.
+
+The separate alias lock wait is bounded to 90 seconds. Output reports
+`status=sent receipt=unverified` on transport submission (exit 0).
+`status=deferred` (exit 2) means no paste was attempted;
+`status=ambiguous` (exit 3) means paste may have changed the composer and no
+further input is safe. Deferred/ambiguous outcomes report `pending_file=...`
+with the exact outgoing payload in a private directory (mode 700, file 600).
+If state storage fails, `retention=...` reports the existing mode-600 temporary
+snapshot retained instead. Interrupted sends retain the same payload and report
+ambiguity while keeping the signal exit code (129/130/143).
+Keep that file for deliberate retry and remove it when resolved. The sender
+never clears mixed input or automatically repastes/retries Enter.
+
+Inspect application history or its explicit pending-message queue for the
+exact message before claiming receipt. If the composer still contains only
+the exact outgoing payload, inspect it before any deliberate Enter-only retry.
+Never use a fresh send to retry an ambiguous attempt blindly.
+
+Screen polling is a conservative guard, not atomic human-input exclusion.
+Invisible input, cursor movement, clipped/collapsed pasted blocks, and TUI
+layout changes limit what can be verified. Unsupported surfaces fail closed.
+See [the delivery boundaries](../../../docs/control-delivery.md) and the
+fixture-based regression suite `scripts/test-claude-send.sh`.
 
 ### claude-trust-dir.sh
 

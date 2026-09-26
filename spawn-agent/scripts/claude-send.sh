@@ -1,112 +1,223 @@
 #!/bin/bash
-# claude-send.sh - Send a message to a Claude Code instance in tmux
+# claude-send.sh - Send one message to a Claude/Codex agent tmux pane.
 #
-# Usage: claude-send.sh <window> [--submit-delay <seconds>] <message>
-#        claude-send.sh <window> [--submit-delay <seconds>] --prompt-file <file>
+# Uses tmux screen polling as a conservative guard against composing human text.
+# This is not atomic exclusion: a person can type between any two observations.
 #
-# Automatically targets the correct tmux server socket when run inside tmux.
-# Override with SPAWN_TMUX_SOCKET or SPAWN_TMUX_LABEL env vars.
-#
-# Uses tmux load-buffer/paste-buffer with a named buffer to avoid ARG_MAX
-# limits. A per-target lock serializes paste, delay, and submit across callers.
-
-set -e
+# Usage: claude-send.sh <window> [--submit-delay SEC] [--max-wait SEC]
+#        [--poll-interval SEC] <message|--prompt-file FILE>
+set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPT_DIR/tmux-ctx.sh"
+source "$SCRIPT_DIR/claude-pane-detect.sh"
 
-if [[ $# -lt 2 ]]; then
-    echo "Usage: claude-send.sh <window> [--submit-delay <seconds>] <message>" >&2
-    echo "       claude-send.sh <window> [--submit-delay <seconds>] --prompt-file <file>" >&2
-    echo "  window: tmux window target (e.g., 'chaos:newchan-review')" >&2
-    echo "  message: the prompt to send to Claude" >&2
-    echo "  --prompt-file: read message from file (avoids ARG_MAX)" >&2
-    echo "  --submit-delay: seconds between paste and Enter (integer 0-30; default 8)" >&2
-    exit 1
-fi
+usage() {
+    echo "Usage: claude-send.sh <window> [--submit-delay SEC] [--max-wait SEC] [--poll-interval SEC] <message>" >&2
+    echo "       claude-send.sh <window> [options] --prompt-file FILE" >&2
+    echo "  --submit-delay SEC  seconds after paste before submit (integer 0-30; default 8)" >&2
+    echo "  --max-wait SEC      maximum wait for an empty composer (integer 0-600; default 30)" >&2
+    echo "  --poll-interval SEC base poll interval (decimal 0.1-2; default 0.5); backoff caps at 8s" >&2
+}
+if (($# < 2)); then usage; exit 1; fi
 
-window="$1"
-shift
-
+window=$1; shift
 submit_delay=8
-if [[ "${1:-}" == "--submit-delay" ]]; then
-    if [[ $# -lt 2 || ! "$2" =~ ^[0-9]+$ ]]; then
-        echo "Error: --submit-delay requires an integer from 0 to 30" >&2
-        exit 1
-    fi
-    submit_delay=$((10#$2))
-    if (( submit_delay > 30 )); then
-        echo "Error: --submit-delay requires an integer from 0 to 30" >&2
-        exit 1
-    fi
-    shift 2
-fi
-if [[ $# -lt 1 ]]; then
-    echo "Error: message or --prompt-file is required" >&2
-    exit 1
-fi
+max_wait=30
+poll_interval=0.5
+while (($#)); do
+    case "$1" in
+        --submit-delay|--max-wait|--poll-interval)
+            (($# >= 2)) || { echo "Error: $1 requires a value" >&2; exit 1; }
+            option=$1; value=$2; shift 2
+            case "$option" in
+                --submit-delay)
+                    [[ "$value" =~ ^[0-9]+$ && ${#value} -le 2 ]] || { echo 'Error: --submit-delay requires an integer from 0 to 30' >&2; exit 1; }
+                    if ((10#$value > 30)); then echo 'Error: --submit-delay requires an integer from 0 to 30' >&2; exit 1; fi
+                    submit_delay=$((10#$value));;
+                --max-wait)
+                    [[ "$value" =~ ^[0-9]+$ && ${#value} -le 3 ]] || { echo 'Error: --max-wait requires an integer from 0 to 600' >&2; exit 1; }
+                    if ((10#$value > 600)); then echo 'Error: --max-wait requires an integer from 0 to 600' >&2; exit 1; fi
+                    max_wait=$((10#$value));;
+                --poll-interval)
+                    [[ "$value" =~ ^([0-9]+([.][0-9]+)?|[.][0-9]+)$ && ${#value} -le 5 ]] || { echo 'Error: --poll-interval requires a decimal from 0.1 to 2' >&2; exit 1; }
+                    awk -v n="$value" 'BEGIN { exit !(n >= 0.1 && n <= 2) }' || { echo 'Error: --poll-interval requires a decimal from 0.1 to 2' >&2; exit 1; }
+                    poll_interval=$value;;
+            esac;;
+        --prompt-file|-f)
+            break;;
+        *) break;;
+    esac
+done
+if (($# < 1)); then echo 'Error: message or --prompt-file is required' >&2; exit 1; fi
 
-# Get message from --prompt-file or positional args
-prompt_file=""
-_cleanup_prompt_file=""
-
-# Trap to clean up temp files on exit/interrupt.
-# Set before any temp file creation so failure paths don't leak.
+prompt_file=''
+cleanup_prompt=0
+pending_dir=''
+paste_started=0
+buffer_loaded=0
+buf_name="claude-send-$$"
 cleanup() {
-    [[ -n "$_cleanup_prompt_file" ]] && rm -f "$_cleanup_prompt_file"
+    if ((buffer_loaded)); then
+        "${TMUX_CMD[@]}" delete-buffer -b "$buf_name" 2>/dev/null || true
+    fi
+    ((cleanup_prompt)) && rm -f -- "$prompt_file"
+    [[ -n "$pending_dir" ]] && rmdir -- "$pending_dir" 2>/dev/null || true
 }
 trap cleanup EXIT
-
-if [[ "$1" == "--prompt-file" || "$1" == "-f" ]]; then
-    prompt_file="$2"
-    if [[ -z "$prompt_file" ]]; then
-        echo "Error: --prompt-file requires a file path" >&2
-        exit 1
-    fi
-    if [[ ! -f "$prompt_file" ]]; then
-        echo "Error: prompt file not found: $prompt_file" >&2
-        exit 1
-    fi
-    if [[ ! -s "$prompt_file" ]]; then
-        echo "Error: prompt file is empty: $prompt_file" >&2
-        exit 1
-    fi
+if [[ "$1" == --prompt-file || "$1" == -f ]]; then
+    (($# == 2)) || { echo 'Error: --prompt-file requires exactly one path' >&2; exit 1; }
+    input_file=$2
+    [[ -f "$input_file" && -s "$input_file" ]] || { echo 'Error: prompt file must exist and be nonempty' >&2; exit 1; }
+    prompt_file=$(mktemp /tmp/claude-send-prompt.XXXXXX)
+    chmod 600 "$prompt_file"
+    cleanup_prompt=1
+    cp -- "$input_file" "$prompt_file"
 else
     message="$*"
-    if [[ -z "$message" ]]; then
-        echo "Error: message is empty" >&2
-        exit 1
-    fi
-    # Write positional args to temp file to avoid ARG_MAX on send-keys
+    [[ -n "$message" ]] || { echo 'Error: message is empty' >&2; exit 1; }
     prompt_file=$(mktemp /tmp/claude-send-prompt.XXXXXX)
-    _cleanup_prompt_file="$prompt_file"
+    chmod 600 "$prompt_file"
+    cleanup_prompt=1
     printf '%s' "$message" > "$prompt_file"
 fi
+python3 - "$prompt_file" <<'PY'
+import pathlib, sys, unicodedata
+try:
+    text = pathlib.Path(sys.argv[1]).read_bytes().decode("utf-8")
+except (OSError, UnicodeError):
+    raise SystemExit("Error: prompt must be UTF-8 text")
+if not text.strip() or any(unicodedata.category(ch) == "Cc" and ch != "\n" for ch in text):
+    raise SystemExit("Error: prompt must be nonblank text without control characters")
+if any(line != line.rstrip(" \t") for line in text.splitlines()):
+    raise SystemExit("Error: prompt lines may not end in spaces or tabs")
+PY
 
-identity=$("${TMUX_CMD[@]}" display-message -p -t "$window" '#{pid}:#{pane_id}') || {
-    echo "Error: failed to resolve tmux target: $window" >&2
-    exit 1
-}
-if [[ ! "$identity" =~ ^[0-9]+:%[0-9]+$ ]]; then
-    echo "Error: tmux returned an invalid target identity" >&2
-    exit 1
-fi
-pane_id="${identity#*:}"
+identity=$("${TMUX_CMD[@]}" display-message -p -t "$window" '#{pid}:#{pane_id}') || { echo 'Error: failed to resolve tmux target' >&2; exit 1; }
+[[ "$identity" =~ ^[0-9]+:%[0-9]+$ ]] || { echo 'Error: tmux returned an invalid target identity' >&2; exit 1; }
+pane_id=${identity#*:}
 lock_key=$(printf '%s' "$identity" | sha256sum | cut -d' ' -f1)
-exec {lock_fd}>"/tmp/claude-send-${UID}-${lock_key}.lock"
-if ! flock -w 90 "$lock_fd"; then
-    echo "Error: timed out waiting to send to $window" >&2
-    exit 1
-fi
+lock_dir="${XDG_RUNTIME_DIR:-$HOME/.cache}/claude-send-locks"
+umask 077
+mkdir -p -- "$(dirname -- "$lock_dir")"
+mkdir -m 700 -- "$lock_dir" 2>/dev/null || true
+[[ -d "$lock_dir" && ! -L "$lock_dir" && "$(stat -c %u "$lock_dir")" == "$UID" ]] || { echo 'Error: unsafe lock directory' >&2; exit 1; }
+chmod 700 "$lock_dir"
+exec {lock_fd}>"$lock_dir/$lock_key.lock"
 
-# The named buffer (keyed by PID) avoids buffer collisions. The -d flag
-# deletes it after paste; clean up explicitly if paste fails.
-buf_name="claude-send-$$"
-"${TMUX_CMD[@]}" load-buffer -b "$buf_name" "$prompt_file"
-if ! "${TMUX_CMD[@]}" paste-buffer -p -r -d -t "$pane_id" -b "$buf_name"; then
-    "${TMUX_CMD[@]}" delete-buffer -b "$buf_name" 2>/dev/null || true
-    echo "Error: failed to paste to $window (window may not exist)" >&2
-    exit 1
+# Preserve the exact outgoing payload privately if delivery is deferred or its
+# state becomes ambiguous. The path is reported; the payload is never printed.
+preserve_pending() {
+    local status=$1 reason=$2
+    if [[ -z "$pending_dir" ]]; then
+        state_dir="${XDG_STATE_HOME:-$HOME/.local/state}"
+        if ! mkdir -p -- "$state_dir"; then
+            cleanup_prompt=0
+            printf 'status=%s reason=%s pending_file=%s retention=state-directory-failed\n' "$status" "$reason" "$prompt_file" >&2
+            return 0
+        fi
+        pending_dir=$(mktemp -d "$state_dir/claude-send-pending.XXXXXX") || {
+            cleanup_prompt=0
+            printf 'status=%s reason=%s pending_file=%s retention=directory-create-failed\n' "$status" "$reason" "$prompt_file" >&2
+            return 0
+        }
+        if ! chmod 700 "$pending_dir" || ! cp -- "$prompt_file" "$pending_dir/message" || ! chmod 600 "$pending_dir/message"; then
+            rmdir -- "$pending_dir" 2>/dev/null || true
+            pending_dir=''
+            cleanup_prompt=0
+            printf 'status=%s reason=%s pending_file=%s retention=copy-failed\n' "$status" "$reason" "$prompt_file" >&2
+            return 0
+        fi
+    fi
+    printf 'status=%s reason=%s pending_file=%s\n' "$status" "$reason" "$pending_dir/message" >&2
+}
+if ! flock -w 90 "$lock_fd"; then
+    preserve_pending deferred target-lock-timeout
+    exit 2
 fi
-sleep "$submit_delay"
+cleanup_after_send() {
+    local rc=$?
+    if ((paste_started && rc != 0)) && [[ -z "$pending_dir" ]]; then
+        preserve_pending ambiguous interrupted-or-failed-after-paste || true
+    fi
+    cleanup
+    return "$rc"
+}
+trap cleanup_after_send EXIT
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
+screen_state() {
+    local screen cursor cursor_x cursor_y last_nonempty
+    screen=$("${TMUX_CMD[@]}" capture-pane -p -t "$pane_id" 2>/dev/null) || return 1
+    cursor=$("${TMUX_CMD[@]}" display-message -p -t "$pane_id" '#{cursor_x}:#{cursor_y}' 2>/dev/null) || return 1
+    [[ "$cursor" =~ ^([0-9]+):([0-9]+)$ ]] || { printf unknown; return; }
+    cursor_x=${BASH_REMATCH[1]}; cursor_y=${BASH_REMATCH[2]}
+    last_nonempty=$(printf '%s\n' "$screen" | awk 'NF { line=$0 } END { print line }')
+    if [[ "$screen" == *'Update available!'* && "$last_nonempty" == *'Press enter to continue'* ]] || \
+       [[ "$screen" == *'Do you trust the contents of this project?'* ]]; then
+        printf modal; return
+    fi
+    if [[ "$screen" == *'Context '* && "$screen" == *'› '* ]]; then
+        printf '%s' "$screen" | python3 "$SCRIPT_DIR/claude-send-screen.py" "$prompt_file" "$cursor_x" "$cursor_y"
+        return
+    fi
+    if claude_trust_modal_active "$screen"; then printf modal; return; fi
+    claude_composer_ready "$screen" || { printf unknown; return; }
+    printf '%s' "$screen" | python3 "$SCRIPT_DIR/claude-send-screen.py" "$prompt_file" "$cursor_x" "$cursor_y"
+}
+
+# A bounded deadline avoids granting extra time after slow capture calls.
+wait_start_ns=$(python3 -c 'import time; print(time.monotonic_ns())')
+delay=$poll_interval
+empty_seen=0
+while :; do
+    state=$(screen_state 2>/dev/null || printf unknown)
+    stable_empty=0
+    if [[ "$state" == empty ]]; then
+        if ((empty_seen)); then stable_empty=1; else empty_seen=1; fi
+    else
+        empty_seen=0
+    fi
+    elapsed=$(python3 -c 'import time,sys; print((time.monotonic_ns()-int(sys.argv[1]))/1e9)' "$wait_start_ns")
+    remaining=$(awk -v d="$max_wait" -v e="$elapsed" 'BEGIN { printf "%.3f",d-e }')
+    awk -v r="$remaining" 'BEGIN { exit !(r > 0) }' || { preserve_pending deferred "composer-$state"; exit 2; }
+    ((stable_empty)) && break
+    sleep_for=$(awk -v d="$delay" -v r="$remaining" 'BEGIN { if (d>r) d=r; printf "%.3f",d }')
+    sleep "$sleep_for"
+    delay=$(awk -v d="$delay" 'BEGIN { n=d*2; if (n>8) n=8; printf "%.3f",n }')
+done
+
+# Recheck under the alias-shared lock immediately before paste.
+state=$(screen_state 2>/dev/null || printf unknown)
+if [[ "$state" != empty ]]; then preserve_pending deferred "pre-paste-$state"; exit 2; fi
+
+buffer_loaded=1
+"${TMUX_CMD[@]}" load-buffer -b "$buf_name" "$prompt_file"
+paste_started=1
+if ! "${TMUX_CMD[@]}" paste-buffer -p -r -d -t "$pane_id" -b "$buf_name"; then
+    preserve_pending ambiguous paste-command-failed
+    exit 3
+fi
+buffer_loaded=0
+
+# Require exact visible ownership throughout the delay and again immediately
+# before Enter. A changed/unreadable frame is ambiguous; never clear, repaste,
+# or press Enter in that case. Agent generation outside the composer is allowed.
+delay=$poll_interval
+start_ns=$(python3 -c 'import time; print(time.monotonic_ns())')
+while :; do
+    state=$(screen_state 2>/dev/null || printf unknown)
+    [[ "$state" == own ]] || { preserve_pending ambiguous "post-paste-$state"; exit 3; }
+    elapsed=$(python3 -c 'import time,sys; print((time.monotonic_ns()-int(sys.argv[1]))/1e9)' "$start_ns")
+    remaining=$(awk -v d="$submit_delay" -v e="$elapsed" 'BEGIN { printf "%.3f",d-e }')
+    awk -v r="$remaining" 'BEGIN { exit !(r > 0) }' || break
+    sleep_for=$(awk -v d="$poll_interval" -v r="$remaining" 'BEGIN { if (d>r) d=r; printf "%.3f",d }')
+    sleep "$sleep_for"
+done
+state=$(screen_state 2>/dev/null || printf unknown)
+[[ "$state" == own ]] || { preserve_pending ambiguous "pre-submit-$state"; exit 3; }
 "${TMUX_CMD[@]}" send-keys -t "$pane_id" Enter
+paste_started=0
+printf 'status=sent receipt=unverified\n'
