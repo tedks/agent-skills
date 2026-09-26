@@ -47,15 +47,23 @@ current PureSky checkpoint (the original controller/quiescence.md path has moved
 The owning lane confirms completeness; missing/unreadable records disable all
 eligibility. Incomplete remote project-root/compose scans disable Docker eligibility
 while independent Nix dead-graph/root checks remain usable.
-Reference scans have a 60s budget and reject symlink/nonregular compose files;
-an incomplete scan retains Docker/cache entries. All compose files below
-`projects_root`, including paused worktrees, conservatively
-protect references. Add other project roots' compose/lane information as local
+Reference scans have a 60s budget, reject symlink/nonregular compose files,
+and fail closed on symlink directories instead of silently missing external
+worktree references. Review external references explicitly and declare complete
+coverage in the policy; do not blindly follow arbitrary links or loops.
+An incomplete scan retains Docker/cache entries. Compose files below
+`projects_root`, including paused worktrees, conservatively protect references,
+except intentionally excluded `.git`, `.bare`, `node_modules` and `.venv` trees.
+The owner must provide relevant compose/lane references from excluded trees or
+other unscanned coverage in `records`; exclusions do not establish absence of
+references. Add other project roots' compose/lane information as local
 records; the owning lane must confirm the declared root covers its host's worktrees.
 `protected` adds exact names, full IDs, tags or paths from peer leases and records.
 Paused is not abandoned: their images, volumes, unrooted store paths and caches
 must be named in records or `protected`; do not grant their ownership to yourself.
 `claims` are affirmative owner-confirmed idle assertions, not inferred from age.
+Conflicting claims for one resource, including a peer's non-idle claim, retain it;
+one lane's idle claim cannot borrow another lane's tag-release authorization.
 For images, `released_tags` is an explicit release of every current tag by its
 owner; shared tags may not be released by this lane.
 

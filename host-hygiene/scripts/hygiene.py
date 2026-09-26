@@ -31,7 +31,13 @@ def run(*args):
 
 
 def timestamp(value):
-    return dt.datetime.fromisoformat(value.replace("Z", "+00:00")).timestamp()
+    match = re.fullmatch(r"(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})(?:\.(\d{1,9}))?(Z|[+-]\d{2}:\d{2})", value)
+    if not match:
+        raise ValueError("invalid timezone-qualified Docker timestamp")
+    base, fraction, zone = match.groups()
+    fraction = "." + fraction[:6].ljust(6, "0") if fraction else ""
+    zone = "+00:00" if zone == "Z" else zone
+    return dt.datetime.fromisoformat(base + fraction + zone).timestamp()
 
 
 def size(path):
@@ -68,7 +74,7 @@ def protections(policy):
 def worktrees(policy):
     """Conservatively protect every compose file under the declared project root."""
     root = Path(policy.get("projects_root", str(Path.home() / "Projects")))
-    if not root.is_absolute() or not root.is_dir():
+    if not root.is_absolute() or root.is_symlink() or not root.is_dir():
         raise RuntimeError(f"project root unreadable: {root}")
     texts = []
     deadline = time.monotonic() + 60
@@ -77,6 +83,9 @@ def worktrees(policy):
     for directory, dirs, files in os.walk(root, followlinks=False, onerror=failed):
         if time.monotonic() > deadline:
             raise RuntimeError("project reference scan exceeded 60s; retain Docker/cache; choose a complete narrower project root")
+        for name in dirs:
+            if (Path(directory) / name).is_symlink():
+                raise RuntimeError(f"symlink directory leaves project reference coverage incomplete: {Path(directory) / name}; review external references explicitly and declare a complete root")
         if ".git" in files or ".git" in dirs:
             texts.append(str(Path(directory)))
         dirs[:] = [d for d in dirs if d not in ("node_modules", ".git", ".bare", ".venv")]
@@ -107,9 +116,9 @@ def inventory(policy, record_text, record_errors):
         return any(token and token in refs for token in tokens)
     claims = policy.get("claims", [])
     def owner(kind, ident):
-        matches = [c for c in claims if c.get("kind") == kind and c.get("id") == ident
-                   and c.get("idle") is True and c.get("owner")]
-        return matches[0]["owner"] if len(matches) == 1 else None
+        matches = [c for c in claims if c.get("kind") == kind and c.get("id") == ident]
+        # Conflicting claims, including a peer's non-idle claim, never confer ownership.
+        return matches[0]["owner"] if len(matches) == 1 and matches[0].get("idle") is True and matches[0].get("owner") else None
     def add(kind, ident, name, bytes_, identity, eligible, reason, tokens):
         valid_size = type(bytes_) is int and bytes_ >= 0
         if not valid_size:
