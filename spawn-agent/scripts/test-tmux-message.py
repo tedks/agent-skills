@@ -96,8 +96,6 @@ def deliver(t, **kw):
 
 class DeliveryTests(unittest.TestCase):
     def test_response_rows_exclude_live_composer_and_archive(self):
-        f = screen('● RETIRE-DONE-in-draft', history='● archived marker\n',
-                   prefix='● visible response\n\n')
         for harness in ('codex', 'claude'):
             f = screen('● RETIRE-DONE-in-draft', history='● archived marker\n',
                        prefix='● visible response\n\n', harness=harness)
@@ -117,17 +115,21 @@ class DeliveryTests(unittest.TestCase):
         with patch.object(m, 'Tmux', side_effect=OSError('private detail')):
             with self.assertRaisesRegex(m.DeliveryError, 'observation-read-failed'):
                 m.read_response_rows('%1', '/tmp/test-socket')
+        with patch.object(m, 'Tmux') as t, patch.object(m, 'composer', side_effect=TypeError('private frame detail')):
+            with self.assertRaisesRegex(m.DeliveryError, 'observation-read-failed'):
+                m.read_response_rows('%1', '/tmp/test-socket')
         with self.assertRaisesRegex(m.DeliveryError, 'invalid-observation-target'):
             m.read_response_rows('session:window', 'relative')
 
     def test_observation_socket_is_explicit_without_global_env_change(self):
         import os
         before = dict(os.environ)
-        with patch.object(m.subprocess, 'run') as run:
+        with patch.dict(os.environ, {'SPAWN_TMUX_LABEL': 'stale-server'}), patch.object(m.subprocess, 'run') as run:
             run.return_value.stdout = '123:%1'
             t = m.Tmux('%1', socket='/tmp/pinned-socket')
             self.assertEqual(t.base, ['tmux', '-S', '/tmp/pinned-socket'])
             self.assertEqual(run.call_args.kwargs['env']['SPAWN_TMUX_SOCKET'], '/tmp/pinned-socket')
+            self.assertNotIn('SPAWN_TMUX_LABEL', run.call_args.kwargs['env'])
         self.assertEqual(dict(os.environ), before)
 
     def test_literal_claude_exit_fresh_resume_receipt(self):

@@ -123,7 +123,8 @@ and use `read_response_rows(pane, socket)` with a stable `%PANE_ID` and absolute
 verified socket path. Register the imported module in `sys.modules` before
 executing it, as required for dataclasses. This read-only API returns
 ANSI-stripped visible rows strictly above a recognized composer. It returns
-`None` for modal, unknown or unstable surfaces, and raises `DeliveryError`
+`None` for modal or unknown layouts, including a frame whose cursor or size
+changes during capture, and raises `DeliveryError`
 with a sanitized `reason` for invalid targets or server/read failure.
 It never types, pastes, probes, returns archived redraw history, or changes
 global environment variables. Missing read evidence is not process-end proof.
@@ -134,3 +135,9 @@ with its cursor at the input start counts as idle, as authorized for retirement.
 Unquoted suggestions, multiline input, and a cursor in actual draft text still
 defer. Ordinary messages retain the probe-and-defer rule. This distinction is
 screen evidence and cannot exclude a human typing between observations.
+
+Observation checks cursor and size around one capture; it does not establish a
+multi-sample typing-stability interval. The send path performs its own stable
+input checks. Literal-exit unit and disposable-terminal tests do not model every
+real Claude slash-command menu layout. An unrecognized menu remains a safe
+deferral; do not infer compatibility or retry an ambiguous exit from these tests.

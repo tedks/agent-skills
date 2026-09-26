@@ -190,6 +190,7 @@ class Tmux:
         if socket is not None:
             self.base += ["-S", socket]
             resolver_env = dict(os.environ, SPAWN_TMUX_SOCKET=socket)
+            resolver_env.pop("SPAWN_TMUX_LABEL", None)
         elif os.environ.get("SPAWN_TMUX_SOCKET"):
             self.base += ["-S", os.environ["SPAWN_TMUX_SOCKET"]]
         elif os.environ.get("SPAWN_TMUX_LABEL"):
@@ -242,7 +243,7 @@ def read_response_rows(pane, socket):
     """Read visible response rows above recognized input, never send keys.
 
     This is the supported Python observation API. Unknown, modal, or moving
-    surfaces return None; target/read failures are sanitized DeliveryError.
+    frames return None; target/read failures are sanitized DeliveryError.
     """
     if (not isinstance(pane, str) or not re.fullmatch(r"%\d+", pane)
             or not isinstance(socket, str) or not Path(socket).is_absolute()):
@@ -253,7 +254,7 @@ def read_response_rows(pane, socket):
         if inp.kind in {"unknown", "modal"}:
             return None
         return styles.strip_ansi(frame.raw).splitlines()[:inp.start]
-    except (subprocess.SubprocessError, OSError, ValueError) as error:
+    except (subprocess.SubprocessError, OSError, ValueError, TypeError, AttributeError) as error:
         raise DeliveryError("observation-read-failed") from error
 
 
