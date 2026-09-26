@@ -3,7 +3,8 @@
 # Send forwards actual text/options to the installed guarded transport.
 # Read shows terminal history; it does not infer delivery from transport success.
 set -euo pipefail
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SCRIPT_PATH="$(readlink -f -- "${BASH_SOURCE[0]}")"
+SCRIPT_DIR="$(dirname "$SCRIPT_PATH")"
 source "$SCRIPT_DIR/tmux-ctx.sh"
 usage() {
     echo 'Usage: tmux-message.sh send TARGET [sender options] MESSAGE' >&2
