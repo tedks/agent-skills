@@ -27,7 +27,7 @@ def terminal(state):
     pastes = enters = 0
     history = ''
     def draw():
-        collapsed = '[Pasted text #1 +4 lines]' if draft else ''
+        collapsed = f'[Pasted Content {len(draft.decode(errors="replace"))} chars]' if draft else ''
         sys.stdout.write('\x1b[?2004h\x1b[2J\x1b[H' + history + '\r\n› ' + collapsed + '\r\n\r\n  Test model · branch\r\n')
         row = history.count('\n') + 2
         sys.stdout.write(f'\x1b[{row};{3 + len(collapsed)}H')

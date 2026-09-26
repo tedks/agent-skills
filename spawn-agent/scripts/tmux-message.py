@@ -152,6 +152,13 @@ def paste_evidence(inp, payload):
         return False
     if normalized(inp.text) == normalized(payload):
         return True
+    # Codex also collapses a whole paste into a character-count marker.
+    # Require the entire input to be that marker: surrounding text is mixed.
+    content = re.fullmatch(r"\[Pasted Content ([0-9]+) chars\]", inp.text.strip(), re.I)
+    if content:
+        # Terminal clients count either Unicode code points or UTF-16 units.
+        counts = {str(len(payload)), str(len(payload.encode("utf-16-le")) // 2)}
+        return content.group(1) in counts
     # A newly introduced collapsed marker is sufficient evidence of our paste.
     # Any visible text surrounding it must be consistent with this payload.
     matches = list(PASTE.finditer(inp.text))

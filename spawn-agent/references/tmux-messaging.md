@@ -34,6 +34,12 @@ input; a marker found only in history is insufficient. Ordinary assistant prose
 is not a receipt. `/compact` may instead be confirmed by a new visible
 `Context compacted` completion event. Receipt and task completion remain distinct.
 
+The observed Codex `[Pasted Content N chars]` form is supported when it is the
+whole input and N matches the payload's Unicode code-point or UTF-16-unit
+length. Visible text outside this whole-paste marker is mixed input and stops
+submission. Existing `[Pasted text …]` markers retain their surrounding-text
+checks. A retained file alone never establishes which paste is on screen.
+
 ## Options
 
 Options precede actual message text or `--prompt-file FILE`:

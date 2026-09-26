@@ -196,6 +196,25 @@ class DeliveryTests(unittest.TestCase):
         self.assertEqual(deliver(t)['receipt'], 'queued')
         self.assertEqual(t.enters, 1)
 
+    def test_content_character_count_marker(self):
+        for payload in ['x' * 1034, 'hello\nworld', 'emoji 😀']:
+            for count in {len(payload), len(payload.encode('utf-16-le')) // 2}:
+                marker = f'[Pasted Content {count} chars]'
+                self.assertTrue(m.paste_evidence(m.Input('text', marker), payload))
+                self.assertFalse(m.paste_evidence(m.Input('text', marker + ' human'), payload))
+                self.assertFalse(m.paste_evidence(m.Input('text', 'human ' + marker), payload))
+        self.assertFalse(m.paste_evidence(m.Input('text', '[Pasted Content 1034 chars]'), 'short'))
+
+    def test_content_marker_drop_enter_recovers_and_confirms(self):
+        t = Terminal(payload='x' * 1034, dropped=1)
+        original = t.paste
+        def paste(path):
+            original(path)
+            t.draft = '[Pasted Content 1034 chars]'
+        t.paste = paste
+        self.assertEqual(deliver(t)['status'], 'delivered')
+        self.assertEqual((t.pastes, t.enters), (1, 2))
+
     def test_collapsed_marker_cannot_duplicate_visible_payload(self):
         for text in ['[Pasted text #1 +20 lines]hello', 'hello[Pasted text]hello']:
             self.assertFalse(m.paste_evidence(m.Input('text', text), 'hello'))
