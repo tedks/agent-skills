@@ -45,6 +45,83 @@ def size(path):
     return int(run("du", "-s", "-B1", "--", path).split()[0])
 
 
+def directory_sizes(paths):
+    """Bounded GNU du batches; no partial or unrecognized sizes are trusted."""
+    if not paths:
+        return {}, {}
+    sizes, errors = {}, {}
+    deadline = time.monotonic() + 60
+    def mounts():
+        # -x alone does not exclude bind mounts or mounted root operands.
+        result = set()
+        for line in Path("/proc/self/mountinfo").read_bytes().splitlines():
+            fields = line.split()
+            if len(fields) < 7 or b" - " not in line:
+                raise RuntimeError("unsupported mountinfo record")
+            name = re.sub(rb"\\([0-7]{3})", lambda m: bytes([int(m[1], 8)]), fields[4])
+            if not name.startswith(b"/"):
+                raise RuntimeError("unsupported mountinfo path")
+            result.add(name)
+        return result
+    def identity(path):
+        st = path.lstat()
+        if not stat.S_ISDIR(st.st_mode):
+            raise RuntimeError("directory replaced with nondirectory")
+        return st.st_dev, st.st_ino, st.st_mode, st.st_mtime_ns, st.st_ctime_ns, st.st_uid
+    try:
+        original_mounts = mounts()
+    except (OSError, RuntimeError) as exc:
+        return {}, {str(p): "directory measurement unavailable: " + str(exc) for p in paths}
+    for offset in range(0, len(paths), 256):
+        batch, before = [], {}
+        for path in paths[offset:offset + 256]:
+            name = os.fsencode(path)
+            try:
+                if any(m == name or m.startswith(name + b"/") for m in original_mounts):
+                    raise RuntimeError("directory is or contains a mount; no traversal")
+                before[name] = identity(path)
+                batch.append(name)
+            except (OSError, RuntimeError) as exc:
+                errors[str(path)] = "directory measurement unavailable: " + str(exc)
+        if not batch:
+            continue
+        try:
+            if mounts() != original_mounts:
+                raise RuntimeError("mount inventory changed before directory measurement")
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise RuntimeError("directory measurement exceeded 60s budget")
+            result = subprocess.run(
+                ["du", "--summarize", "--block-size=1", "--null", "--no-dereference",
+                 "--one-file-system", "--count-links", "--files0-from=-"],
+                input=b"".join(name + b"\0" for name in batch), capture_output=True,
+                timeout=remaining)
+            if result.returncode or result.stderr:
+                raise RuntimeError("GNU du batch failed (exit " + str(result.returncode) +
+                                   "); partial sizes discarded; stderr=" + repr(os.fsdecode(result.stderr)) +
+                                   "; partial stdout (first 4096 bytes)=" + repr(result.stdout[:4096]))
+            if not result.stdout.endswith(b"\0"):
+                raise RuntimeError("unsupported GNU du output: missing NUL terminator")
+            measured = {}
+            for record in result.stdout[:-1].split(b"\0"):
+                amount, separator, name = record.partition(b"\t")
+                if (not separator or not re.fullmatch(rb"[0-9]+", amount)
+                        or name not in before or name in measured):
+                    raise RuntimeError("unsupported GNU du output: invalid/duplicate/unrequested record")
+                measured[name] = int(amount)
+            if set(measured) != set(batch):
+                raise RuntimeError("incomplete GNU du output: missing requested directory")
+            if mounts() != original_mounts:
+                raise RuntimeError("mount inventory changed during directory measurement")
+            for name in batch:
+                if identity(Path(os.fsdecode(name))) != before[name]:
+                    raise RuntimeError("directory identity changed during measurement")
+            sizes.update({os.fsdecode(name): amount for name, amount in measured.items()})
+        except (OSError, RuntimeError, ValueError, subprocess.TimeoutExpired) as exc:
+            for name in batch:
+                errors[os.fsdecode(name)] = "directory measurement unavailable: " + str(exc)
+    return sizes, errors
+
 def cache_size(value):
     # Older Buildx versions JSON-format human sizes rather than byte counts.
     text = str(value)
@@ -226,19 +303,39 @@ def inventory(policy, record_text, record_errors):
             if entry["kind"] == "cache":
                 entry["eligible"] = False
     try:
+        candidates = []
         for path in Path("/tmp").iterdir():
             try:
                 st = path.lstat()
-                if now - st.st_mtime <= 2 * DAY:
-                    continue
-                bytes_ = size(str(path)) if stat.S_ISDIR(st.st_mode) else st.st_blocks * 512
-                add("tmp", str(path), str(path), bytes_,
-                    [st.st_dev, st.st_ino, st.st_mtime_ns, st.st_uid, bytes_], False,
-                    "retain: unprivileged inventory cannot prove complete peer proc/mount/socket references; "
-                    "root-needed diagnostics: sudo lsof +D " + shlex.quote(str(path)) +
-                    "; sudo findmnt --target " + shlex.quote(str(path)), [str(path)])
-            except (OSError, ValueError, RuntimeError, subprocess.TimeoutExpired) as exc:
+                if now - st.st_mtime > 2 * DAY:
+                    candidates.append((path, st))
+            except OSError as exc:
                 diagnostics.append(f"/tmp entry {path}: retain: {exc}")
+        sizes, errors = directory_sizes([p for p, st in candidates if stat.S_ISDIR(st.st_mode)])
+        for path, st in candidates:
+            directory = stat.S_ISDIR(st.st_mode)
+            bytes_ = sizes.get(str(path)) if directory else st.st_blocks * 512
+            if directory:
+                try:
+                    current = path.lstat()
+                    if (current.st_dev, current.st_ino, current.st_mode, current.st_mtime_ns,
+                        current.st_ctime_ns, current.st_uid) != (st.st_dev, st.st_ino, st.st_mode,
+                        st.st_mtime_ns, st.st_ctime_ns, st.st_uid):
+                        raise RuntimeError("directory changed since enumeration")
+                except (OSError, RuntimeError) as exc:
+                    bytes_ = None
+                    errors[str(path)] = "directory measurement unavailable: " + str(exc)
+            reason = "retain: unprivileged inventory cannot prove complete peer proc/mount/socket references; "
+            if str(path) in errors:
+                reason += errors[str(path)] + "; "
+                diagnostics.append(f"/tmp entry {path}: retain: {errors[str(path)]}")
+            if directory:
+                reason += "directory allocated-byte estimate counts every hardlink; not freed bytes; "
+            reason += ("root-needed diagnostics: sudo lsof +D " + shlex.quote(str(path)) +
+                       "; sudo findmnt --target " + shlex.quote(str(path)))
+            add("tmp", str(path), str(path), bytes_,
+                [st.st_dev, st.st_ino, st.st_mtime_ns, st.st_uid, bytes_], False, reason, [str(path)])
+            entries[-1]["size_exact"] = not directory
     except OSError as exc:
         diagnostics.append(f"/tmp inventory inaccessible; retain: {exc}")
     return dict(version=1, machine=socket.gethostname(), uid=os.getuid(), created=now,
