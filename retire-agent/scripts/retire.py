@@ -305,7 +305,7 @@ class Retirement:
         if not candidates:
             return None
         position = candidates[-1]
-        marker = re.fullmatch(r'[●•] RETIRE-(DONE|DECLINED)-' + event, rows[position])
+        marker = re.fullmatch(r'[●•] RETIRE-(DONE|DECLINED)-' + event, rows[position].rstrip())
         if not marker:
             return None
         if any(row.strip() and not (len(row.strip()) >= 3 and set(row.strip()) == {'─'}) for row in rows[position + 1:]):
@@ -394,12 +394,11 @@ class Retirement:
                 if not isinstance(data, dict) or not isinstance(data.get('event'), str) or not re.fullmatch(r'[0-9a-f]{32}', data['event']):
                     continue
                 receipt = self.repo / 'receipts' / (data['event'] + '.json')
-                try:
-                    receipt_text = receipt.read_text() if receipt.exists() else '{}'
-                    claim = json.loads(receipt_text)
-                except ValueError:
+                if not receipt.exists():
                     continue
-                if not isinstance(claim, dict) or claim.get('event') != data['event'] or claim.get('shard') != 'waiting/' + path.name:
+                receipt_text = receipt.read_text()
+                claim = object_record(receipt_text, 'retirement receipt')
+                if claim.get('event') != data['event'] or claim.get('shard') != 'waiting/' + path.name:
                     continue  # Existing external/legacy metadata has another owner.
                 record = receipt_record(receipt_text)
                 if any(key in data and not isinstance(data[key], str) for key in ('harness', 'session_id', 'role')):
@@ -635,8 +634,11 @@ class Retirement:
                 raise Stop('private handoff receipt changed or missing')
             if record.get('status') not in ('handoff-verified', 'pending-exit', 'retired'):
                 raise Stop('private receipt does not establish handoff')
-            if self.git('rev-parse', record['commit'] + ':' + self.state['shard']) != self.state['shard_hash']:
-                raise Stop('private receipt does not identify verified shard bytes')
+            evidence = run(['git', '-C', self.repo, 'rev-parse', '--verify', record['commit'] + ':' + self.state['shard']])
+            if evidence.returncode:
+                raise Stop('private receipt commit lacks preserved shard path')
+            if evidence.stdout.strip() != self.state['shard_hash']:
+                raise Stop('private receipt commit contains different shard bytes')
             self.evidence_verified = True  # Current execution, never cached state authority.
         if not self.state.get('exit'):
             if self.ended():

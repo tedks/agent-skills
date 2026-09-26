@@ -28,7 +28,7 @@ mutations = [
     ('server failure', 'except PaneAbsent:', 'except Stop:', 'test_socket_failure_is_not_pane_disappearance'),
     ('steward index ownership', '(tracked and outside_section(original) != outside_section(baseline) and not owned_write)', 'False', 'test_steward_dirty_index_is_not_published'),
     ('commit ownership', '        self.require_owned_commits()', '        pass  # Push unowned commits.', 'test_unowned_local_commit_is_not_pushed'),
-    ('composer exclusion', ["rows = self.screen.read_response_rows(self.args.pane, self.state['socket'])", "if any(row.strip() and not (len(row.strip()) >= 3 and set(row.strip()) == {'─'}) for row in rows[position + 1:]):"], ["rows = checked(self.tmux + ['capture-pane', '-p', '-t', self.args.pane]).splitlines()", 'if False:'], 'test_composer_done_does_not_complete'),
+    ('composer exclusion', "rows = self.screen.read_response_rows(self.args.pane, self.state['socket'])", "rows = checked(self.tmux + ['capture-pane', '-p', '-t', self.args.pane]).splitlines()", 'test_claude_composer_done_does_not_complete'),
     ('last polling interval', 'disposition = self.observe()  # Include the final polling interval.', 'pass', 'test_last_poll_interval_is_observed'),
     ('recorded DONE', "if self.state.get('disposition') != 'DONE':", 'if True:', 'test_saved_done_survives_cleared_screen'),
     ('initial remote receipt', "self.publish(['receipts/' + receipt.name])  # Local presence is not a remote receipt.", 'pass', 'test_failed_initial_push_is_verified_before_resumed_offer'),
@@ -42,6 +42,10 @@ mutations = [
     ('index preflight ordering', ['self.publication_preflight()  # Preconditions before any INDEX write.', "        if self.git('diff', 'HEAD', '--', *paths)"], ['pass  # Preconditions delayed until after index write.', "        self.publication_preflight()\n        if self.git('diff', 'HEAD', '--', *paths)"], 'test_index_preflight_failure_preserves_legacy_then_resumes'),
     ('owned tracked index retry', "self.state['index_outside'] = hashlib.sha256(outside_section(updated).encode()).hexdigest()", 'pass  # Lose ownership of our tracked legacy index write.', 'test_own_legacy_index_write_recovers_after_commit_hook_failure'),
     ('tracked index deletion', 'if tracked and not index_path.exists():', 'if False:', 'test_tracked_deleted_index_is_not_recreated'),
+    ('padded completion marker', 'rows[position].rstrip()', 'rows[position]', 'test_padded_final_marker_completes'),
+    ('receipt missing path', ['if evidence.returncode:', "if evidence.stdout.strip() != self.state['shard_hash']:"], ['if False:', 'if False:'], 'test_remote_bad_commit_receipt_never_self_heals'),
+    ('receipt wrong blob', "if evidence.stdout.strip() != self.state['shard_hash']:", 'if False:', 'test_wrong_blob_receipt_never_self_heals'),
+    ('corrupt index receipt', "                claim = object_record(receipt_text, 'retirement receipt')", '                try:\n                    claim = json.loads(receipt_text)\n                except ValueError:\n                    continue\n                if not isinstance(claim, dict):\n                    continue', 'test_corrupt_other_receipt_preserves_generated_index'),
 ]
 for label, before, after, test in mutations:
     replacements = list(zip(before, after)) if isinstance(before, list) else [(before, after)]

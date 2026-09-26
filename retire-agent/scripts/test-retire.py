@@ -68,9 +68,11 @@ def terminal(directory, mode):
             if mode == 'claude-ghost' and event and not draft:
                 collapsed = 'Try "summarize the work"'
             body = history + '\r\n' + '─' * 80 + '\r\n❯ ' + collapsed + '\r\n' + '─' * 80 + '\r\n'
-        visible_marker = mode == 'composer' and draft.startswith('● RETIRE-DONE-'.encode())
+        visible_marker = mode in ('composer', 'claude-composer') and draft.startswith('● RETIRE-DONE-'.encode())
         if visible_marker:
             body = history + '\r\n› \r\n' + draft.decode() + '\r\n\r\n  Test model · branch\r\n'
+            if mode == 'claude-composer':
+                body = history + '\r\n' + '─' * 80 + '\r\n❯ \r\n' + draft.decode() + '\r\n' + '─' * 80 + '\r\n'
         if mode == 'modal':
             body = 'Do you trust the contents of this directory?\r\n  1. Yes\r\n  2. No\r\n'
         sys.stdout.write('\x1b[?2004h\x1b[2J\x1b[H' + body)
@@ -193,7 +195,7 @@ def terminal(directory, mode):
                             history = 'Assistant continues without acceptance evidence.\r\n'
                         else:
                             history += '• Accepted\r\n'
-                            if payload != '/exit' and mode != 'composer':
+                            if payload != '/exit' and mode not in ('composer', 'claude-composer'):
                                 disposition = 'DECLINED' if mode.startswith('decline') else 'DONE'
                                 if mode == 'quoted':
                                     history += 'RETIRE-DONE-' + event + '\r\n'
@@ -205,11 +207,13 @@ def terminal(directory, mode):
                                     due = time.monotonic() + .2
                                 else:
                                     history += '● RETIRE-' + disposition + '-' + event + '\r\n'
+                                    if mode == 'padded-marker':
+                                        history = history[:-2] + '   \t\r\n'
                                     if mode.endswith('suffix'):
                                         history += '  Do not retire yet; recovery still needs correction.\r\n'
                                     elif mode.endswith('later-assistant'):
                                         history += '● Recovery still needs correction.\r\n'
-                        draft = ('● RETIRE-DONE-' + event).encode() if mode == 'composer' else b''
+                        draft = ('● RETIRE-DONE-' + event).encode() if mode in ('composer', 'claude-composer') else b''
                         pasted_payload = False
                     else:
                         draft += char
@@ -492,8 +496,8 @@ class Tests(unittest.TestCase):
         self.assertEqual(self.observed()['pastes'], 1)
         self.assertFalse((self.directory / 'exit-order.json').exists())
 
-    def test_composer_done_does_not_complete(self):
-        self.actor('composer')
+    def assert_composer_marker_excluded(self, mode):
+        self.actor(mode)
         self.assertEqual(self.invoke().returncode, 2)
         self.assertEqual(self.observed()['pastes'], 1)
         self.assertFalse((self.directory / 'exit-order.json').exists())
@@ -509,6 +513,12 @@ class Tests(unittest.TestCase):
         self.assertIsNotNone(rows)  # A recognized input surface, not unknown-layout vacuity.
         self.assertIn('• Accepted', rows)
         self.assertFalse(any('RETIRE-DONE-' + state['id'] in row for row in rows))
+
+    def test_composer_done_does_not_complete(self):
+        self.assert_composer_marker_excluded('composer')
+
+    def test_claude_composer_done_does_not_complete(self):
+        self.assert_composer_marker_excluded('claude-composer')
 
     def test_agy_and_missing_launcher_preflight(self):
         self.actor()
@@ -1098,7 +1108,7 @@ class Tests(unittest.TestCase):
         for _ in range(2):
             result = self.invoke('--handoff', 'codex', 'model', '--roles', str(self.roles), '--resume', str(path))
             self.assertEqual(result.returncode, 2, result.stderr)
-            self.assertIn('command failed: git', result.stderr)
+            self.assertIn('private receipt commit lacks preserved shard path', result.stderr)
             self.assertFalse((self.directory / 'spawn.json').exists())
             self.assertEqual(self.git('show', 'origin/master:' + state['handoff_receipt']), tampered)
             self.assertEqual(receipt.read_text(), json.dumps(data))
@@ -1198,6 +1208,74 @@ class Tests(unittest.TestCase):
         self.assertFalse(index.exists())
         self.assertEqual(self.git('show', 'origin/master:waiting/INDEX.md'), original.strip())
         self.assertFalse((self.directory / 'exit-order.json').exists())
+
+    def test_padded_final_marker_completes(self):
+        self.actor('padded-marker')
+        result = self.invoke()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.state()[1]['disposition'], 'DONE')
+        self.assertTrue(json.loads((self.directory / 'exit-order.json').read_text())['receipt_before_exit'])
+
+    def test_wrong_blob_receipt_never_self_heals(self):
+        self.actor('hold')
+        self.invoke('--handoff', 'codex', 'model', '--roles', str(self.roles))
+        path, state = self.state()
+        canonical = self.repo / state['shard']
+        verified = canonical.read_bytes()
+        canonical.write_text('different shard bytes')
+        self.git('add', '--', state['shard'])
+        self.git('commit', '-m', 'fixture different shard snapshot')
+        wrong_commit = self.git('rev-parse', 'HEAD')
+        canonical.write_bytes(verified)
+        receipt = self.repo / state['handoff_receipt']
+        data = json.loads(receipt.read_text())
+        data['commit'] = wrong_commit
+        receipt.write_text(json.dumps(data))
+        self.git('add', '--', state['shard'], state['handoff_receipt'])
+        self.git('commit', '-m', 'fixture restored shard with wrong receipt')
+        self.git('push')
+        (self.directory / 'human-independent-exit').touch()
+        self.wait_for(lambda: not Path('/proc/' + str(state['identity']['process']['pid'])).exists())
+        tampered = self.git('show', 'origin/master:' + state['handoff_receipt'])
+        for _ in range(2):
+            result = self.invoke('--handoff', 'codex', 'model', '--roles', str(self.roles), '--resume', str(path))
+            self.assertEqual(result.returncode, 2, result.stderr)
+            self.assertIn('private receipt commit contains different shard bytes', result.stderr)
+            self.assertFalse((self.directory / 'spawn.json').exists())
+            self.assertEqual(self.git('show', 'origin/master:' + state['handoff_receipt']), tampered)
+            self.assertEqual(receipt.read_text(), json.dumps(data))
+
+    def test_corrupt_other_receipt_preserves_generated_index(self):
+        waiting = self.repo / 'waiting'
+        waiting.mkdir()
+        event = 'e' * 32
+        shard = waiting / 'other.md'
+        shard.write_text(json.dumps({'event': event, 'session_id': 'other-session', 'harness': 'claude', 'role': 'Utility'}))
+        receipt = self.repo / 'receipts' / (event + '.json')
+        receipt.parent.mkdir()
+        receipt.write_text(json.dumps({'event': event, 'shard': 'waiting/other.md', 'status': 'pending-exit'}))
+        self.git('add', '--', 'waiting', 'receipts')
+        self.git('commit', '-m', 'fixture other owned record')
+        self.git('push')
+        self.actor('hold')
+        self.invoke('--handoff', 'codex', 'model', '--roles', str(self.roles))
+        path, state = self.state()
+        index = waiting / 'INDEX.md'
+        original_index = index.read_text()
+        self.assertIn('[other.md]', original_index)
+        remote_index = self.git('show', 'origin/master:waiting/INDEX.md')
+        (self.directory / 'human-independent-exit').touch()
+        self.wait_for(lambda: not Path('/proc/' + str(state['identity']['process']['pid'])).exists())
+        for malformed in ('not JSON', '[]'):
+            receipt.write_text(malformed)
+            for _ in range(2):
+                result = self.invoke('--handoff', 'codex', 'model', '--roles', str(self.roles), '--resume', str(path))
+                self.assertEqual(result.returncode, 2, result.stderr)
+                self.assertIn('malformed retirement receipt', result.stderr)
+                self.assertEqual(receipt.read_text(), malformed)
+                self.assertEqual(index.read_text(), original_index)
+                self.assertEqual(self.git('show', 'origin/master:waiting/INDEX.md'), remote_index)
+                self.assertFalse((self.directory / 'spawn.json').exists())
 
 
 if __name__ == '__main__':
