@@ -1,6 +1,9 @@
 #!/usr/bin/env python3
 """Behavior tests with a virtual clock and a simulated terminal, no model calls."""
 import importlib.util
+import shutil
+import subprocess
+import tempfile
 from pathlib import Path
 from types import SimpleNamespace
 import sys
@@ -53,6 +56,10 @@ class Terminal:
         self.actions.append('paste')
         self.pastes += 1
         self.draft += '[Pasted text #1 +20 lines]' if self.collapsed else self.payload
+
+    def type_command(self, text):
+        self.actions.append("typed:" + text)
+        self.draft += text
 
     def keys(self, *keys):
         self.actions.extend(keys)
@@ -209,6 +216,48 @@ class DeliveryTests(unittest.TestCase):
         with self.assertRaisesRegex(m.DeliveryError, 'requires-claude-exit'):
             deliver(t, literal_exit=True)
         self.assertEqual((t.pastes, t.typed, t.enters), (0, 0, 0))
+    def test_typed_commands_never_paste(self):
+        for command in ('/compact', '/exit', '/status', '/model example'):
+            t = Terminal(payload=command)
+            self.assertEqual(deliver(t, typed_command=True)['status'], 'delivered')
+            self.assertEqual(t.pastes, 0)
+            self.assertEqual(t.actions, ['typed:' + command, 'Enter'])
+
+    def test_typed_command_rejects_multiline_and_noncommands(self):
+        for command in (' /exit', '/compact\n', 'hello', '/x\targument', '/x\n/exit'):
+            t = Terminal(payload=command)
+            with self.assertRaisesRegex(m.DeliveryError, 'unsupported-typed-command'):
+                deliver(t, typed_command=True)
+            self.assertEqual(t.actions, [])
+
+    def test_typed_command_preserves_draft_and_modal(self):
+        for modal in (False, True):
+            t = Terminal(payload='/exit', draft='human draft')
+            if modal:
+                t.frame = lambda: m.Frame('Would you like to proceed?\n› yes\n', 2, 1)
+            with self.assertRaises(m.DeliveryError):
+                deliver(t, typed_command=True)
+            self.assertEqual(t.actions, [])
+
+    def test_typed_command_rejects_mixed_or_collapsed_input(self):
+        for content in ('/exit human', '[Pasted text #1 +2 lines]'):
+            t = Terminal(payload='/exit')
+            def type_command(text):
+                t.actions.append('typed:' + text)
+                t.draft = content
+            t.type_command = type_command
+            with self.assertRaises(m.DeliveryError):
+                deliver(t, typed_command=True)
+            self.assertEqual(t.enters, 0)
+
+    def test_literal_tmux_command_argv(self):
+        t = object.__new__(m.Tmux)
+        t.pane = '%9'
+        calls = []
+        t.run = lambda *args: calls.append(args)
+        t.type_command('/compact')
+        self.assertEqual(calls, [('send-keys', '-t', '%9', '-l', '--', '/compact')])
+        self.assertTrue(m.options(['%1', '--typed-command', '/exit']).typed_command)
 
     def test_blocks_until_delayed_receipt_without_extra_enter(self):
         t = Terminal(delayed=5)
@@ -435,4 +484,35 @@ class DeliveryTests(unittest.TestCase):
         self.assertEqual(t.actions, ['Space', 'BSpace'])
 
 
-if __name__ == '__main__': unittest.main()
+def typed_mutations():
+    """Compile-valid changes must fail assertions, not merely fail to import."""
+    root = Path(__file__).parent
+    original = (root / 'tmux-message.py').read_text()
+    cases = [
+        ('typed_dispatch', 'self.tmux.type_command(self.payload)', 'self.tmux.paste(self.path)'),
+        ('typed_scope', 'if self.typed and not re.fullmatch(r"/[A-Za-z][A-Za-z0-9_-]*(?: [^\\r\\n\\x00-\\x1f\\x7f]*)?", payload):', 'if False:'),
+        ('literal', 'self.pane, "-l", "--", text', 'self.pane, "--", text'),
+        ('typed_evidence', 'return inp.kind == "text" and inp.text == self.payload',
+         'return paste_evidence(inp, self.payload)'),
+    ]
+    with tempfile.TemporaryDirectory(prefix='typed-command-mutations-') as tmp:
+        target = Path(tmp)
+        for name in ('test-tmux-message.py', 'claude-send-screen.py'):
+            shutil.copy2(root / name, target / name)
+        shutil.copytree(root / 'fixtures', target / 'fixtures')
+        for name, before, after in cases:
+            assert original.count(before) == 1, name
+            code = original.replace(before, after)
+            compile(code, name, 'exec')
+            (target / 'tmux-message.py').write_text(code)
+            result = subprocess.run([sys.executable, str(target / 'test-tmux-message.py')],
+                                    capture_output=True, text=True, timeout=30)
+            assert result.returncode != 0 and 'FAIL:' in result.stderr, (name, result.stderr)
+            print('killed:', name)
+
+
+if __name__ == '__main__':
+    if '--mutation-check' in sys.argv:
+        typed_mutations()
+    else:
+        unittest.main()

@@ -63,6 +63,18 @@ render + submit-delay + receipt-wait; operations also have subprocess timeouts.
 The launcher gives `/compact` its configured compaction timeout as the receipt
 budget, because some layouts show only completion rather than an initial user
 row. Receipt waits may exceed 600 seconds when explicitly configured.
+For slash commands such as `/compact` and `/exit`, use `--typed-command`: the sender inserts
+literal characters with `tmux send-keys -l` rather than bracketed paste. The
+same lock, empty-composer checks, input verification, settling delay, and NEW
+receipt requirements apply. A command has an ASCII letter name (letters, digits, `_`
+and `-`), optionally followed by a space and arguments. Controls, newlines,
+leading whitespace and ordinary prose are rejected. Ordinary messages retain
+bracketed paste. Typed
+input requires exact visible command text; a collapsed paste marker cannot
+authorize its Enter. Failure JSON distinguishes `input_attempted` from
+`paste_attempted` and labels `input_method`; an ambiguous typed attempt must
+never be blindly replayed.
+
 Payloads are nonblank UTF-8 with no control characters except newlines. Message
 bytes, including trailing whitespace/newlines, are preserved in the paste.
 

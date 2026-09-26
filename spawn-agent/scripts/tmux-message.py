@@ -227,6 +227,9 @@ class Tmux:
     def keys(self, *keys):
         self.run("send-keys", "-t", self.pane, *keys)
 
+    def type_command(self, text):
+        self.run("send-keys", "-t", self.pane, "-l", "--", text)
+
     def paste(self, path):
         name = "tmux-message-" + uuid.uuid4().hex
         self.run("load-buffer", "-b", name, str(path))
@@ -290,6 +293,14 @@ class Sender:
         self.clock, self.sleep = clock, sleep
         self.pasted = False
         self.enters = 0
+        self.typed = getattr(options, "typed_command", False)
+        if self.typed and not re.fullmatch(r"/[A-Za-z][A-Za-z0-9_-]*(?: [^\r\n\x00-\x1f\x7f]*)?", payload):
+            raise DeliveryError("unsupported-typed-command")
+
+    def input_evidence(self, inp):
+        if self.typed:
+            return inp.kind == "text" and inp.text == self.payload
+        return paste_evidence(inp, self.payload)
 
     def sample(self):
         frame = self.tmux.frame()
@@ -359,6 +370,8 @@ class Sender:
         self.pasted = True  # A failed paste command can still have changed input.
         if literal:
             self.tmux.keys("-l", self.payload)
+        elif self.typed:
+            self.tmux.type_command(self.payload)
         else:
             self.tmux.paste(self.path)
         start = self.clock()
@@ -392,7 +405,7 @@ class Sender:
                 raise DeliveryError("modal-after-paste", 3)
             if owned is not None and current.kind == "empty":
                 input_disappeared = True
-            evidence = paste_evidence(current, self.payload)
+            evidence = self.input_evidence(current)
             if evidence:
                 fp = current.fingerprint()
                 if owned is not None and fp != owned and self.enters:
@@ -410,7 +423,7 @@ class Sender:
                     for kind in ("submitted", "queued"):
                         if not literal and self.enters and any(fresh[(kind, form)] > baseline[(kind, form)] for form in accepted_forms):
                             return {"status": "delivered", "receipt": kind, "enters": self.enters}
-                    if live.fingerprint() != owned or not paste_evidence(live, self.payload):
+                    if live.fingerprint() != owned or not self.input_evidence(live):
                         raise DeliveryError("input-changed-before-enter", 3)
                     self.tmux.keys("Enter")
                     self.enters += 1
@@ -429,6 +442,7 @@ def options(argv=None):
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("target")
     p.add_argument("--prompt-file", "-f", type=Path)
+    p.add_argument("--typed-command", action="store_true", help="type one single-line slash command with literal keys; retain all composer/receipt guards")
     for name, default in (("stable-wait", 3), ("max-wait", 10), ("submit-delay", 8),
                           ("render-wait", 3), ("receipt-wait", 15), ("retry-wait", 3),
                           ("poll-interval", 0.25)):
@@ -485,7 +499,9 @@ def main():
         reason = error.reason if isinstance(error, DeliveryError) else "tmux-operation-failed"
         result = {"status": "ambiguous" if pasted else "deferred", "reason": reason,
                   "pending_file": str(path), "needs_review": pasted or reason in {"unsupported-layout", "modal"},
-                  "paste_attempted": pasted, "enters": sender.enters if sender else 0}
+                  "paste_attempted": pasted and not sender.typed,
+                  "input_attempted": pasted, "input_method": "typed" if sender and sender.typed else "paste",
+                  "enters": sender.enters if sender else 0}
         if sender:
             result["pane"] = sender.tmux.pane
         print(json.dumps(result), file=sys.stderr)

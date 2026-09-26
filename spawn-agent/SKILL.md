@@ -53,6 +53,7 @@ alias is `~/.bin/tmux-message`; the skill-local entrypoint is
 `~/.claude/skills/spawn-agent/scripts/tmux-message.sh`.
 
 ```bash
+tmux-message send chaos:review --typed-command /compact
 tmux-message read chaos:review
 tmux-message send chaos:review 'MSG-unique Please prioritize the failing test.'
 # A file is a way to pass the actual task bytes, not a filename-only message.
@@ -70,6 +71,12 @@ Use `--backoff --max-wait 60` to wait for the human to finish instead. A stable
 Claude suggestion may be probed once with Space/Backspace; if actual text
 remains, it is preserved. One pane lock prevents cooperating senders from
 pasting into the same input concurrently. It cannot lock out human typing.
+
+Use `--typed-command` for slash commands such as `/compact`, `/exit`, and
+`/status`: these are literal keys,
+with the same draft preservation and receipt checks. Claude may treat a pasted
+slash command as ordinary text. This option accepts one single-line slash command and optional arguments; it
+rejects control characters, newlines, leading whitespace, and ordinary prose.
 
 Results are JSON: exit 0 is `status=delivered` with a `submitted`, `queued`, or
 `command` receipt. Exit 2 is deferred before paste; exit 3 is ambiguous after
