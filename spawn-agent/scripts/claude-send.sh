@@ -8,10 +8,7 @@
 # Override with SPAWN_TMUX_SOCKET or SPAWN_TMUX_LABEL env vars.
 #
 # Uses tmux load-buffer/paste-buffer with a named buffer to avoid ARG_MAX
-# limits and race conditions with concurrent sends. The buffer is deleted
-# after pasting (-d flag), with a fallback delete-buffer on failure.
-# Handles the timing issue where Enter gets swallowed if sent too quickly
-# after the text (1.5 second delay).
+# limits. A per-target lock serializes paste, delay, and submit across callers.
 
 set -e
 
@@ -67,11 +64,16 @@ else
     printf '%s' "$message" > "$prompt_file"
 fi
 
-# Use tmux load-buffer + paste-buffer with a named buffer. The named
-# buffer (keyed by PID) avoids race conditions when multiple claude-send
-# instances run concurrently. The -d flag deletes the buffer after paste.
-# If paste-buffer fails (e.g., target window gone), delete-buffer ensures
-# the prompt doesn't linger in tmux's buffer list.
+# Serialize the full interaction. Buffer names prevent buffer collisions, but
+# without this lock two callers can paste into the same composer before either
+# submits. Include the socket identity so separate tmux servers do not block.
+socket_key="${TMUX_CMD[*]}"
+lock_key=$(printf '%s\0%s' "$socket_key" "$window" | sha256sum | cut -d' ' -f1)
+exec {lock_fd}>"/tmp/claude-send-${UID}-${lock_key}.lock"
+flock "$lock_fd"
+
+# The named buffer (keyed by PID) avoids buffer collisions. The -d flag
+# deletes it after paste; clean up explicitly if paste fails.
 buf_name="claude-send-$$"
 "${TMUX_CMD[@]}" load-buffer -b "$buf_name" "$prompt_file"
 if ! "${TMUX_CMD[@]}" paste-buffer -d -t "$window" -b "$buf_name"; then

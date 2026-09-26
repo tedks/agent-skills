@@ -363,6 +363,9 @@ Send a message to a running Claude instance:
 
 Uses tmux load-buffer/paste-buffer for the message body (avoids ARG_MAX),
 then sends Enter with a 1.5 second delay to avoid the swallowed-Enter issue.
+Concurrent calls to the same tmux target are serialized through submission.
+Submission is sent once; an ambiguous pane state must be checked by the caller
+before any manual retry, to avoid duplicating a message that was accepted.
 
 ### claude-trust-dir.sh
 
