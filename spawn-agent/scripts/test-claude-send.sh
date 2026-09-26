@@ -286,8 +286,12 @@ rm -rf "$(dirname "$pending")"
 
 # The default submit delay remains eight seconds, measured from paste to Enter.
 reset_case empty
-FAKE_REAL_SLEEP=1 out=$(run_sender target --max-wait 3 --poll-interval 0.1 --prompt-file "$prompt_file")
-[[ "$out" == 'status=sent receipt=unverified' ]]
+if out=$(FAKE_REAL_SLEEP=1 run_sender target --max-wait 3 --poll-interval 0.1 --prompt-file "$prompt_file"); then
+  [[ "$out" == 'status=sent receipt=unverified' ]]
+else
+  echo 'FAIL: successful prompt-file delivery returned nonzero' >&2
+  exit 1
+fi
 python3 - "$FAKE_STATE/times" <<'PY'
 from pathlib import Path
 import sys
