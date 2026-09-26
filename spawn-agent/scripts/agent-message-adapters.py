@@ -100,7 +100,18 @@ def receiver(pane_pid: int, harness: str) -> dict:
                 continue
             logs = {p for p in logs if "/sessions/" in p and Path(p).name.startswith("rollout-")}
         elif harness == "claude":
+            # Older npm installations use Node. Require the package entrypoint,
+            # then normalize argv for the same registry/interactive checks.
+            if executable in {"node", "nodejs"} and len(args) > 1 and args[1].endswith(
+                    b"/node_modules/@anthropic-ai/claude-code/cli.js"):
+                args = [b"claude", *args[2:]]
+                executable = "claude"
             if executable not in {"claude", "claude.exe"}:
+                continue
+            if (any(arg in {b"-p", b"--print"} for arg in args[1:])
+                    or len(args) > 1 and args[1] in {b"agents", b"logs", b"mcp", b"auth", b"doctor",
+                        b"gateway", b"import", b"install", b"plugin", b"plugins", b"project", b"respawn",
+                        b"rm", b"setup-token", b"stop", b"kill", b"ultrareview", b"update", b"upgrade"}):
                 continue
             registered = claude_registry_receiver(pid, args)
             found.append({"pid": pid, "start": stamp, **registered})

@@ -23,6 +23,7 @@ from contextlib import contextmanager
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
+sys.dont_write_bytecode = True
 
 
 def module(name: str):
@@ -247,9 +248,13 @@ def deliver(path: Path, record: dict, payload: str, continuation: bool, *, publi
         guarded = {"status=received receipt=received\n": "received",
                    "status=received receipt=pending-steer\n": "pending-steer"}
         result = guarded.get(completed.stdout) if completed.returncode == 0 else None
-        if result is None:
+        if result is None and completed.returncode == 0:
             result = wait_receipt(record, payload, record["receipt_wait"])
-        if result != "missing":
+        if completed.returncode != 0:
+            record.update(status="deferred" if completed.returncode == 2 else "ambiguous",
+                          reason=f"transport-exit-{completed.returncode}")
+            code = 2 if completed.returncode == 2 else 3
+        elif result != "missing":
             record.update(status="received", receipt=result, reason="")
             code = 0
         else:
@@ -304,7 +309,7 @@ def main() -> int:
                 raise adapters.EvidenceError("pointer does not fit receiving pane; shorten it before delivery")
             live = adapters.receiver(target["pane_pid"], args.harness)
             before = adapters.baseline(live["log"])
-            root = Path(os.environ.get("XDG_STATE_HOME", str(Path.home() / ".local/state"))) / "agent-message"
+            root = Path(os.environ.get("XDG_STATE_HOME") or str(Path.home() / ".local/state")) / "agent-message"
             root.mkdir(mode=0o700, parents=True, exist_ok=True)
             private(root, directory=True)
             attempt = Path(tempfile.mkdtemp(prefix=f"{unique}-", dir=root))
@@ -334,11 +339,13 @@ def main() -> int:
             return 0
         if args.command == "continue":
             return deliver(path, record, payload, True)
-        if record["status"] != "received":
-            result = observe(record, payload)
-            if result != "missing":
-                record.update(status="received", receipt=result, reason="")
-                atomic_json(path, record)
+        with attempt_lock(path):
+            record, payload = load_attempt(path)
+            if record["status"] != "received":
+                result = observe(record, payload)
+                if result != "missing":
+                    record.update(status="received", receipt=result, reason="")
+                    atomic_json(path, record)
         output(record, path)
         return 0 if record["status"] == "received" else 3
     except (adapters.EvidenceError, OSError, ValueError, KeyError, subprocess.SubprocessError) as error:

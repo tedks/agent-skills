@@ -519,7 +519,9 @@ out=$(run_sender target --submit-delay 0 --max-wait 3 --poll-interval 0.1 --prom
 # Initial unknown repaint may settle, but a known mixed composer stops.
 for mode in render-unknown render-late-unknown slow-first-own; do
   reset_case "$mode"
-  out=$(run_sender target --render-wait 2 --submit-delay 0 --max-wait 3 --poll-interval 0.1 --prompt-file "$prompt_file")
+  # Leave scheduling headroom above the injected 1.2s capture delay. The
+  # separate 1s failure cases below still verify the enforced deadline.
+  out=$(run_sender target --render-wait 5 --submit-delay 0 --max-wait 6 --poll-interval 0.1 --prompt-file "$prompt_file")
   [[ "$out" == 'status=sent receipt=unverified' ]]
   [[ $(grep -c '^enter$' "$FAKE_LOG") -eq 1 ]]
 done

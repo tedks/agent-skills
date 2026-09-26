@@ -129,6 +129,20 @@ class Attempts(unittest.TestCase):
             self.assertEqual(self.deliver(True), 0)
             self.assertEqual(transport.call_count, 1)
 
+    def test_transport_abort_preserved_without_wait_or_auto_continuation(self):
+        for rc in (2, 3, 1):
+            with self.subTest(rc=rc):
+                self.record.update(status="prepared", submissions=0)
+                m.atomic_json(self.path, self.record)
+                result = type("Result", (), {"returncode": rc, "stderr": "", "stdout": ""})()
+                with patch.object(m, "observe", return_value="missing"), patch.object(m, "wait_receipt") as wait, patch.object(m.subprocess, "run", return_value=result) as transport:
+                    self.assertEqual(self.deliver(), 2 if rc == 2 else 3)
+                    wait.assert_not_called()
+                    transport.assert_called_once()
+                record, _ = m.load_attempt(self.path)
+                self.assertEqual(record["reason"], f"transport-exit-{rc}")
+                self.assertNotEqual(record["reason"], "no-application-receipt")
+
     def test_pending_receipt_no_execution_wait(self):
         with patch.object(m, "observe", return_value="pending-steer"), patch.object(m.subprocess, "run") as transport:
             self.assertEqual(self.deliver(True), 0)
@@ -207,6 +221,59 @@ class PendingReceipt(unittest.TestCase):
     def test_remaining_own_composer_never_counts_as_queue(self):
         frame = self.frame("AM-new pointer").replace("Ask Codex to do anything", "AM-new pointer")
         self.assertEqual(self.check(frame, "AM-new pointer", "16:5"), "missing")
+
+
+class ClaudeRegistry(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name)
+        self.session = "12345678-1234-1234-1234-123456789abc"
+        logs = self.root / "projects" / "test-project"
+        logs.mkdir(parents=True)
+        (logs / f"{self.session}.jsonl").write_text("")
+
+    def lookup(self, rows, args):
+        with patch.dict(os.environ, {"CLAUDE_CONFIG_DIR": str(self.root)}), patch.object(a.subprocess, "check_output", return_value=json.dumps(rows)), patch.object(a, "process_stamp", return_value="live-start"):
+            return a.claude_registry_receiver(100, args)
+
+    def test_foreground_current_session_not_startup_resume(self):
+        row = {"kind": "interactive", "pid": 100, "sessionId": self.session}
+        result = self.lookup([row], [b"claude", b"--resume", b"old-startup-session"])
+        self.assertEqual(result["session"], self.session)
+        self.assertEqual(result["engine_pid"], 100)
+
+    def test_receiver_native_and_npm_only_interactive_entrypoints(self):
+        cases = [
+            ("claude.exe (deleted)", b"claude\0--resume\0old\0", True),
+            ("node", b"node\0/usr/lib/node_modules/@anthropic-ai/claude-code/cli.js\0--resume\0old\0", True),
+            ("node", b"node\0/tmp/unrelated/cli.js\0", False),
+            ("claude", b"claude\0agents\0--json\0", False),
+            ("claude", b"claude\0-p\0review\0", False),
+        ]
+        for executable, argv, accepted in cases:
+            with self.subTest(executable=executable, argv=argv), patch.object(a, "descendants", return_value=[100]), patch.object(Path, "read_bytes", return_value=argv), patch.object(a.os, "readlink", return_value="/bin/" + executable), patch.object(a, "process_stamp", return_value="live"), patch.object(a, "open_logs", return_value=set()), patch.object(a, "claude_registry_receiver", return_value={"log": "exact"}) as registry:
+                if accepted:
+                    self.assertEqual(a.receiver(100, "claude")["log"], "exact")
+                    self.assertEqual(registry.call_args.args[1][0], b"claude")
+                else:
+                    with self.assertRaises(a.EvidenceError):
+                        a.receiver(100, "claude")
+                    registry.assert_not_called()
+
+    def test_attach_binds_background_engine_and_exact_short_id(self):
+        row = {"kind": "background", "pid": 200, "id": "12345678", "sessionId": self.session}
+        result = self.lookup([row], [b"claude", b"attach", b"12345678"])
+        self.assertEqual(result["engine_pid"], 200)
+        self.assertEqual(result["engine_start"], "live-start")
+        with self.assertRaises(a.EvidenceError):
+            self.lookup([row], [b"claude", b"attach", b"1234567"])
+
+    def test_stale_unknown_duplicate_registry_fails_closed(self):
+        row = {"kind": "interactive", "pid": 100, "sessionId": self.session}
+        for rows in [[], [row, row], [{**row, "pid": 101}], [{**row, "sessionId": "invalid"}], [{**row, "pid": None}]]:
+            with self.assertRaises(a.EvidenceError):
+                self.lookup(rows, [b"claude"])
 
 
 if __name__ == "__main__":
