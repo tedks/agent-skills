@@ -91,6 +91,9 @@ type between observations; whitespace-only differences are not message identity;
 assistant output deliberately formatted like a user message can be ambiguous.
 History outside the captured 2000-row window and layouts that hide both input
 and acceptance can cause a timeout. Such cases require inspection, not replay.
+The Codex launcher uses `--no-alt-screen`: alternate-screen mode can discard a
+long receipt's first rows before the sender can sample them. Existing sessions
+retain their launch mode; the sender does not reconfigure or restart them.
 Unknown shells, modals and unsupported input surfaces do not authorize paste.
 
 Run `test-tmux-message.py` for behavior tests and `test-tmux-message-live.py`

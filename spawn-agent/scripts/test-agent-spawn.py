@@ -96,6 +96,7 @@ sys.exit(status)
                 self.assertIn('task delivery confirmed',result.stdout)
                 if agent=='codex':
                     self.assertIn('check_for_update_on_startup=false',(self.root/'launch').read_text())
+                    self.assertIn('--no-alt-screen',shlex.split((self.root/'launch').read_text()))
                 commands=[json.loads(line)[0] for line in (self.root/'tmux.jsonl').read_text().splitlines()]
                 self.assertFalse(set(commands)&{'load-buffer','paste-buffer','send-keys'})
 
@@ -126,6 +127,7 @@ sys.exit(status)
                                   '--startup-cursor-file',str(self.root/'startup-out'),'--compact-timeout','900'],env={'MUTATE_TASK':'1'})
         self.assertEqual(result.returncode,0,result.stderr)
         self.assertEqual([item['text'] for item in self.messages()],['/compact',original])
+        self.assertIn('--no-alt-screen',shlex.split((self.root/'launch').read_text()))
         self.assertEqual(self.messages()[0]['args'][4:6], ['--receipt-wait','900'])
         self.assertIn(original,(self.root/'compact-copy').read_text())
         self.assertEqual((self.root/'rollout-out').read_text().strip(),str(self.rollout))

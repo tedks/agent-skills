@@ -373,11 +373,12 @@ if [[ "$agent" == "codex" ]]; then
     # Managed agent windows must not stop at an update chooser. Keep this a
     # process-local override: ordinary Codex launches still perform their
     # normal update check, and no global configuration is changed.
-    agent_command=("$codex_bin" -c check_for_update_on_startup=false)
+    # Preserve tmux scrollback so long submitted messages remain observable.
+    agent_command=("$codex_bin" --no-alt-screen -c check_for_update_on_startup=false)
     if [[ -n "$codex_model" ]]; then agent_command+=(-m "$codex_model"); fi
 fi
 if [[ -n "$fork_session" ]]; then
-    agent_command=("$codex_bin" fork -c check_for_update_on_startup=false)
+    agent_command=("$codex_bin" fork --no-alt-screen -c check_for_update_on_startup=false)
     if [[ -n "$codex_model" ]]; then agent_command+=(-m "$codex_model"); fi
     if [[ -n "$compact_prompt_file" ]]; then
         # Pass only the path in argv, never the prompt body. TOML basic-string

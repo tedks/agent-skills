@@ -38,7 +38,10 @@ waiting for their turn to finish.
 
 Codex options: `--model MODEL`, `--codex-bin EXECUTABLE`, or environment
 `SPAWN_CODEX_MODEL` / `SPAWN_CODEX_BIN`. Its startup update check is suppressed
-for that process only. Claude `--trust` grants directory trust before launch;
+for that process only. Codex launches use `--no-alt-screen` to preserve tmux
+scrollback for receipts longer than the visible pane. Existing alternate-screen
+sessions can accept a message yet hide its receipt; ambiguity never permits replay.
+Claude `--trust` grants directory trust before launch;
 read [Claude trust](references/claude-trust.md) when using it or diagnosing a
 trust modal. Never answer a modal with a task's Enter.
 
