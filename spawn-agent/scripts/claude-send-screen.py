@@ -18,16 +18,16 @@ def strip_ansi(text: str) -> str:
     return CSI_RE.sub("", text)
 
 
-def dim_span(raw_line: str, needle: str) -> bool:
-    """Return true only when every visible character in needle has SGR dim."""
+def sgr_span(raw_line: str, needle: str, attribute: str) -> bool:
+    """Return true only when every visible character has the named SGR style."""
     chars = []
-    dim_flags = []
-    dim = False
+    flags = []
+    styles = {"bold": False, "dim": False}
     offset = 0
     for match in CSI_RE.finditer(raw_line):
         chunk = raw_line[offset : match.start()]
         chars.extend(chunk)
-        dim_flags.extend([dim] * len(chunk))
+        flags.extend([styles[attribute]] * len(chunk))
         code = match.group(0)
         if code.endswith("m"):
             params = code[2:-1]
@@ -39,9 +39,11 @@ def dim_span(raw_line: str, needle: str) -> bool:
             while index < len(values):
                 value = values[index]
                 if value in {0, 22}:
-                    dim = False
+                    styles = {"bold": False, "dim": False}
+                elif value == 1:
+                    styles["bold"] = True
                 elif value == 2:
-                    dim = True
+                    styles["dim"] = True
                 elif value in {38, 48, 58}:
                     # Extended foreground/background/underline colors have
                     # numeric payloads that can themselves contain 2. Skip
@@ -60,10 +62,14 @@ def dim_span(raw_line: str, needle: str) -> bool:
         offset = match.end()
     tail = raw_line[offset:]
     chars.extend(tail)
-    dim_flags.extend([dim] * len(tail))
+    flags.extend([styles[attribute]] * len(tail))
     visible = "".join(chars)
     start = visible.find(needle)
-    return start >= 0 and all(dim_flags[start : start + len(needle)])
+    return start >= 0 and all(flags[start : start + len(needle)])
+
+
+def dim_span(raw_line: str, needle: str) -> bool:
+    return sgr_span(raw_line, needle, "dim")
 
 
 def cell_width(text: str) -> int:
@@ -78,8 +84,9 @@ def cell_width(text: str) -> int:
 def state(screen: str, payload: str, cx: int, cy: int) -> str:
     if any(ord(ch) < 32 and ch not in "\n\t" for ch in payload):
         return "unknown"
-    lines = strip_ansi(screen).splitlines()
-    if "Context " in screen and "›" in screen:
+    clean_screen = strip_ansi(screen)
+    lines = clean_screen.splitlines()
+    if ("Context " in clean_screen or "tab to queue message" in clean_screen) and "›" in clean_screen:
         return codex_state(lines, screen.splitlines(), payload, cx, cy)
     # Current Claude Code renders the live composer between two horizontal
     # rules, with no side gutters. Require that exact frame around the last
@@ -135,6 +142,33 @@ def codex_state(lines: list[str], raw_lines: list[str], payload: str, cx: int, c
     if not matches:
         return "unknown"
     idx = matches[-1]
+    queue_rows = [
+        i for i in range(idx + 1, len(lines))
+        if re.fullmatch(r"  tab to queue message {2,}\d+% context left", lines[i])
+    ]
+    if queue_rows:
+        queue_row = queue_rows[0]
+        # This Codex busy-composer hint is a single measured footer shape. It
+        # must be the final nonblank row, separated from the prompt by exactly
+        # one blank row. This measured shape supports only a short single-line
+        # prompt; wrapped/multiline layouts remain unknown. Never infer key
+        # semantics from the hint.
+        if len(queue_rows) != 1 or queue_row - idx != 2 or "\n" in payload:
+            return "unknown"
+        if lines[idx + 1].strip():
+            return "unknown"
+        if any(line.strip() for line in lines[queue_row + 1 :]):
+            return "unknown"
+        if queue_row >= len(raw_lines) or not sgr_span(raw_lines[queue_row], "tab", "bold"):
+            return "unknown"
+        fragment = lines[idx].split("›", 1)[1]
+        if fragment.startswith(" "):
+            fragment = fragment[1:]
+        observed = fragment.rstrip()
+        expected_y = idx
+        expected_x = 2 + cell_width(payload.rsplit("\n", 1)[-1])
+        return "own" if observed == payload.rstrip("\n") and (cy, cx) == (expected_y, expected_x) else "busy"
+
     contexts = [i for i, line in enumerate(lines) if i > idx and "Context " in line]
     if not contexts:
         return "unknown"

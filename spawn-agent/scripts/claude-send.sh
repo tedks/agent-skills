@@ -55,6 +55,7 @@ prompt_file=''
 cleanup_prompt=0
 pending_dir=''
 paste_started=0
+pending_reported=0
 buffer_loaded=0
 buf_name="claude-send-$$"
 cleanup() {
@@ -97,6 +98,7 @@ PY
 # state becomes ambiguous. The path is reported; the payload is never printed.
 preserve_pending() {
     local status=$1 reason=$2
+    pending_reported=1
     if [[ -z "$pending_dir" ]]; then
         state_dir="${XDG_STATE_HOME:-$HOME/.local/state}"
         if ! mkdir -p -- "$state_dir"; then
@@ -119,14 +121,22 @@ preserve_pending() {
     fi
     printf 'status=%s reason=%s pending_file=%s\n' "$status" "$reason" "$pending_dir/message" >&2
 }
-signal_handled=0
 handle_signal() {
     local name=$1 code=$2 status=deferred
-    signal_handled=1
     ((paste_started)) && status=ambiguous
     preserve_pending "$status" "signal-$name"
     exit "$code"
 }
+handle_exit() {
+    local rc=$? status=deferred
+    if ((cleanup_prompt && rc != 0 && !pending_reported)); then
+        ((paste_started)) && status=ambiguous
+        preserve_pending "$status" "sender-exit-$rc" || true
+    fi
+    cleanup
+    return "$rc"
+}
+trap handle_exit EXIT
 trap 'handle_signal HUP 129' HUP
 trap 'handle_signal INT 130' INT
 trap 'handle_signal TERM 143' TERM
@@ -149,16 +159,6 @@ if ! flock -w 90 "$lock_fd"; then
     preserve_pending deferred target-lock-timeout
     exit 2
 fi
-cleanup_after_send() {
-    local rc=$?
-    if ((paste_started && rc != 0 && !signal_handled)) && [[ -z "$pending_dir" ]]; then
-        preserve_pending ambiguous interrupted-or-failed-after-paste || true
-    fi
-    cleanup
-    return "$rc"
-}
-trap cleanup_after_send EXIT
-
 screen_state() {
     local screen screen_raw cursor cursor_x cursor_y last_nonempty
     screen_raw=$("${TMUX_CMD[@]}" capture-pane -e -p -t "$pane_id" 2>/dev/null) || return 1
@@ -171,7 +171,7 @@ screen_state() {
        [[ "$screen" == *'Do you trust the contents of this project?'* ]]; then
         printf modal; return
     fi
-    if [[ "$screen" == *'Context '* && "$screen" == *'› '* ]]; then
+    if [[ ( "$screen" == *'Context '* || "$screen" == *'tab to queue message'* ) && "$screen" == *'› '* ]]; then
         printf '%s' "$screen_raw" | python3 "$SCRIPT_DIR/claude-send-screen.py" "$prompt_file" "$cursor_x" "$cursor_y"
         return
     fi

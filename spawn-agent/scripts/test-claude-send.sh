@@ -47,6 +47,10 @@ export PATH="$TEST_DIR/bin:$PATH"
 
 cat > "$TEST_DIR/bin/python3" <<'STUB'
 #!/bin/bash
+if [[ "${FAKE_FAIL_CLOCK_BEFORE_PASTE:-0}" == 1 && "$*" == *monotonic_ns* && ! -s "$FAKE_STATE/pasted" ]]; then
+  printf 'injected monotonic clock subprocess failure\n' >&2
+  exit 1
+fi
 if [[ "${1:-}" == */claude-send-screen.py ]]; then
   input=$(mktemp "$FAKE_STATE/parser-input.XXXXXX")
   output=$(mktemp "$FAKE_STATE/parser-output.XXXXXX")
@@ -84,7 +88,9 @@ case "$cmd" in
   display-message)
     if [[ "${*: -1}" == '#{pid}:#{pane_id}' ]]; then printf '4242:%%7\n'
     elif [[ "${*: -1}" == '#{cursor_x}:#{cursor_y}' ]]; then
-      if [[ "$(<"$FAKE_STATE/mode")" == persistent-empty-after-paste && -s "$FAKE_STATE/pasted" ]]; then cursor='2:1'
+      if [[ "$(<"$FAKE_STATE/mode")" == busyqueue && -s "$FAKE_STATE/pasted" ]]; then cursor='37:27'
+      elif [[ "$(<"$FAKE_STATE/mode")" == busyqueue ]]; then cursor='2:1'
+      elif [[ "$(<"$FAKE_STATE/mode")" == persistent-empty-after-paste && -s "$FAKE_STATE/pasted" ]]; then cursor='2:1'
       elif [[ "$(<"$FAKE_STATE/mode")" == render-stale-empty && -s "$FAKE_STATE/pasted" && $(<"$FAKE_STATE/captures") -eq 4 ]]; then cursor='2:1'
       elif [[ -s "$FAKE_STATE/composer" ]]; then
         cursor=$(python3 - "$FAKE_STATE/composer" <<'PY'
@@ -117,7 +123,9 @@ PY
     if [[ "$mode" == human-during-delay && -s "$FAKE_STATE/pasted" && $n -ge 5 ]]; then
       printf 'a human began typing\n' > "$FAKE_STATE/composer"
     fi
-    if [[ -s "$FAKE_STATE/pasted" && "$mode" == render-stale-empty && $n -eq 4 ]]; then
+    if [[ -s "$FAKE_STATE/pasted" && "$mode" == busyqueue ]]; then
+      cat "$FIXTURES/codex-generating-queue.ansi" > "$FAKE_STATE/last-screen"
+    elif [[ -s "$FAKE_STATE/pasted" && "$mode" == render-stale-empty && $n -eq 4 ]]; then
       cat "$FAKE_STATE/empty" > "$FAKE_STATE/last-screen"
     elif [[ -s "$FAKE_STATE/pasted" && "$mode" == persistent-empty-after-paste ]]; then
       cat "$FAKE_STATE/empty" > "$FAKE_STATE/last-screen"
@@ -305,6 +313,35 @@ assert classify_fixture('claude-suggestion-typed-home.ansi', 'outgoing', 2, 1) =
 assert classify_fixture('claude-try-prefix-typed.ansi', 'outgoing', 16, 1) == 'unknown'
 assert classify_fixture('codex-empty-dim.ansi', 'outgoing', 2, 26) == 'empty'
 assert classify_fixture('codex-typed-home.ansi', 'outgoing', 2, 26) == 'busy'
+queue_payload = 'Reply with exactly P141-QUEUED-TEST'
+queue_screen = (Path(fixtures) / 'codex-generating-queue.ansi').read_bytes()
+Path(payload).write_text(queue_payload)
+assert Path(fixtures, 'codex-generating-queue.cursor').read_text().strip() == '37:27'
+assert subprocess.check_output(
+    [sys.executable, parser, payload, '37', '27'], input=queue_screen
+).decode().strip() == 'own'
+unstyled_queue_hint = queue_screen.replace(b'\x1b[1mtab\x1b[0m', b'tab', 1)
+assert subprocess.check_output(
+    [sys.executable, parser, payload, '37', '27'], input=unstyled_queue_hint
+).decode().strip() == 'unknown'
+Path(payload).write_text('Reply with a different harmless payload')
+assert subprocess.check_output(
+    [sys.executable, parser, payload, '37', '27'], input=queue_screen
+).decode().strip() == 'busy'
+Path(payload).write_text(queue_payload)
+assert subprocess.check_output(
+    [sys.executable, parser, payload, '36', '27'], input=queue_screen
+).decode().strip() == 'busy'
+assert subprocess.check_output(
+    [sys.executable, parser, payload, '37', '26'], input=queue_screen
+).decode().strip() == 'busy'
+extra_queue_row = queue_screen.replace(
+    b'  \x1b[1mtab\x1b[0m to queue message',
+    b'  unrelated app row\n  \x1b[1mtab\x1b[0m to queue message', 1,
+)
+assert subprocess.check_output(
+    [sys.executable, parser, payload, '37', '27'], input=extra_queue_row
+).decode().strip() == 'unknown'
 codex_dim = (Path(fixtures) / 'codex-empty-dim.ansi').read_text()
 for color_sgr in ('\x1b[38;5;2m', '\x1b[38;2;2;2;2m', '\x1b[38:2:2:2:2m'):
     color_only = codex_dim.replace('\x1b[2mAsk Codex to do anything', color_sgr + 'Ask Codex to do anything')
@@ -313,6 +350,16 @@ for color_sgr in ('\x1b[38;5;2m', '\x1b[38;2;2;2;2m', '\x1b[38:2:2:2:2m'):
     ).decode().strip() == 'busy'
 PY
 printf 'alpha\nbeta' > "$prompt_file"
+
+# A measured Codex busy-queue composer accepts one exact short payload once.
+reset_case busyqueue
+queue_prompt="$TEST_DIR/queue-prompt"
+printf 'Reply with exactly P141-QUEUED-TEST' > "$queue_prompt"
+out=$(run_sender target --submit-delay 0 --max-wait 3 --poll-interval 0.1 --prompt-file "$queue_prompt")
+[[ "$out" == 'status=sent receipt=unverified' ]]
+[[ $(grep -c '^paste-start$' "$FAKE_LOG") -eq 1 ]]
+[[ $(grep -c '^enter$' "$FAKE_LOG") -eq 1 ]]
+[[ $(<"$FAKE_STATE/composer") == 'Reply with exactly P141-QUEUED-TEST' ]]
 
 # The stable-empty pair and pre-paste recheck must finish before max-wait.
 # Simulate a second capture that itself returns only after the deadline.
@@ -341,6 +388,17 @@ if FAKE_INTERRUPT_BEFORE_PASTE=1 run_sender target --submit-delay 0 --max-wait 3
   echo 'FAIL: pre-paste interruption returned success' >&2; exit 1
 else rc=$?; [[ $rc -eq 143 ]]; fi
 pending=$(assert_pending deferred "$TEST_DIR/pre-paste-signal.err")
+[[ $(<"$pending") == $'alpha\nbeta' ]]
+[[ $(grep -c '^paste-start$' "$FAKE_LOG" || true) -eq 0 ]]
+[[ $(grep -c '^enter$' "$FAKE_LOG" || true) -eq 0 ]]
+rm -rf "$(dirname "$pending")"
+
+# A clock subprocess failure after snapshot creation but before paste keeps a private deferred copy.
+reset_case empty
+if FAKE_FAIL_CLOCK_BEFORE_PASTE=1 run_sender target --submit-delay 0 --max-wait 3 --poll-interval 0.1 --prompt-file "$prompt_file" 2>"$TEST_DIR/clock-failure.err"; then
+  echo 'FAIL: injected pre-paste clock failure returned success' >&2; exit 1
+else rc=$?; [[ $rc -eq 1 ]]; fi
+pending=$(assert_pending deferred "$TEST_DIR/clock-failure.err")
 [[ $(<"$pending") == $'alpha\nbeta' ]]
 [[ $(grep -c '^paste-start$' "$FAKE_LOG" || true) -eq 0 ]]
 [[ $(grep -c '^enter$' "$FAKE_LOG" || true) -eq 0 ]]

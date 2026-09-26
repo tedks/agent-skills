@@ -370,6 +370,8 @@ payload throughout the wait and immediately before a single Enter.
 After paste, only a stale empty composer gets up to one second to repaint; an
 unknown, busy, or modal screen immediately becomes ambiguous, and every later
 check after ownership is first visible must remain an exact match.
+Slow captures or scheduler jitter can make a render miss that deadline; the
+sender stops as ambiguous and retains the payload even if it appears later.
 
 Options before the message or `--prompt-file`:
 
@@ -381,7 +383,10 @@ Options before the message or `--prompt-file`:
 Requires Bash, Python 3.9+, tmux, flock, and GNU command-line utilities.
 Payloads must be nonblank UTF-8 text, with no control characters except
 newlines and no trailing spaces or tabs on a line. Wrapped or collapsed
-composers may be unverifiable and produce an ambiguous outcome.
+composers may be unverifiable and produce an ambiguous outcome. During Codex
+generation, only the measured short, single-line composer followed by a blank
+row and styled `tab to queue message` hint is recognized; wrapped or multiline
+queue layouts remain ambiguous.
 
 There is no reliable screen-only way to tell Claude Code's rotating `Try …`
 suggestion from a person who typed the same text and moved the cursor Home;
@@ -404,7 +409,11 @@ with the exact outgoing payload in a private directory (mode 700, file 600).
 If state storage fails, `retention=...` reports the existing mode-600 temporary
 snapshot retained instead. Signals before any paste attempt report deferred;
 signals during or after a paste attempt report ambiguity. Both retain the exact
-payload and keep the conventional signal exit code (129/130/143).
+payload and keep the conventional signal exit code (129/130/143). An operational
+failure after payload validation also reports and retains: deferred before any
+paste attempt, ambiguous once a paste may have started. It keeps the original
+nonzero exit status so callers can distinguish the failure from a normal
+defer/ambiguous decision.
 Keep that file for deliberate retry and remove it when resolved. The sender
 never clears mixed input or automatically repastes/retries Enter.
 
