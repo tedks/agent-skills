@@ -15,7 +15,7 @@
 #       --recap-cursor-file <file>    Record where recap watching should begin
 #       --startup-cursor-file <file> Record the cursor before fork compaction
 #       --codex-bin <executable>     Codex executable (default: codex on PATH)
-#       --model <model>              Codex model (default: Codex configuration)
+#       --model <model>              Claude or Codex model (default: harness configuration)
 #
 # Automatically targets the correct tmux server socket when run inside tmux.
 # Override with SPAWN_TMUX_SOCKET or SPAWN_TMUX_LABEL env vars.
@@ -50,7 +50,7 @@ usage() {
     echo "  --recap-cursor-file: atomically write the safe JSONL recap start offset" >&2
     echo "  --startup-cursor-file: atomically write the pre-compaction JSONL offset" >&2
     echo "  --codex-bin: executable path/name (or SPAWN_CODEX_BIN; default codex)" >&2
-    echo "  --model: Codex model (or SPAWN_CODEX_MODEL; default Codex config)" >&2
+    echo "  --model: Claude or Codex model (SPAWN_CODEX_MODEL defaults Codex only)" >&2
     exit 1
 }
 
@@ -77,7 +77,8 @@ recap_cursor_file=""
 startup_cursor_file=""
 codex_bin="${SPAWN_CODEX_BIN:-codex}"
 codex_model="${SPAWN_CODEX_MODEL:-}"
-codex_options_set=""
+codex_bin_set=""
+model=""
 _cleanup_prompt_file=""
 _cleanup_rollout_output=""
 _cleanup_cursor_output=""
@@ -110,8 +111,12 @@ while [[ $# -gt 0 ]]; do
                 echo "Error: $1 requires a value" >&2
                 exit 1
             fi
-            if [[ "$1" == --codex-bin ]]; then codex_bin="$2"; else codex_model="$2"; fi
-            codex_options_set=1
+            if [[ "$1" == --codex-bin ]]; then
+                codex_bin="$2"
+                codex_bin_set=1
+            else
+                model="$2"
+            fi
             shift 2
             ;;
         --trust)
@@ -227,10 +232,15 @@ if [[ "$agent" == agy && ( -n "$prompt_file" || -n "$prompt" ) ]]; then
     exit 1
 fi
 
-if [[ -n "$codex_options_set" && "$agent" != codex ]]; then
-    echo "Error: --codex-bin and --model apply to codex only" >&2
+if [[ -n "$codex_bin_set" && "$agent" != codex ]]; then
+    echo "Error: --codex-bin applies to codex only" >&2
     exit 1
 fi
+if [[ -n "$model" && "$agent" == agy ]]; then
+    echo "Error: --model supports claude and codex only" >&2
+    exit 1
+fi
+if [[ "$agent" == codex && -n "$model" ]]; then codex_model="$model"; fi
 if [[ "$agent" == codex ]]; then
     codex_bin=$(command -v -- "$codex_bin") || {
         echo "Error: Codex executable not found" >&2
@@ -369,6 +379,7 @@ fi
 # current-vs-saved-directory chooser, which is another modal where an automated
 # Enter would be unsafe.
 agent_command=("$agent")
+if [[ "$agent" == claude && -n "$model" ]]; then agent_command+=(--model "$model"); fi
 if [[ "$agent" == "codex" ]]; then
     # Managed agent windows must not stop at an update chooser. Keep this a
     # process-local override: ordinary Codex launches still perform their

@@ -151,11 +151,22 @@ sys.exit(status)
         self.assertEqual(result.returncode,0,result.stderr)
         self.assertIn('-m chosen-model',(self.root/'launch').read_text())
         (self.root/'tmux.jsonl').unlink()
-        for agent,extra in [('claude',['--model','bad']),('codex',['--trust']),
+        for agent,extra in [('claude',['--codex-bin','codex']),('agy',['--model','bad']),('codex',['--trust']),
                             ('claude',['--fork-session',PARENT])]:
             with self.subTest(agent=agent,extra=extra):
-                self.assertNotEqual(self.launch(agent,extra).returncode,0)
+                self.assertNotEqual(self.launch(agent,extra,task=agent != 'agy').returncode,0)
                 self.assertFalse((self.root/'tmux.jsonl').exists())
+
+    def test_claude_model_is_explicit_and_shell_escaped(self):
+        chosen='opus; $(touch injected)'
+        result=self.launch('claude',extra=['--model',chosen],env={'SPAWN_CODEX_MODEL':'codex-only'})
+        self.assertEqual(result.returncode,0,result.stderr)
+        command=shlex.split((self.root/'launch').read_text())
+        self.assertEqual(command[:3],['claude','--model',chosen])
+        self.assertFalse((self.root/'injected').exists())
+        result=self.launch('claude',env={'SPAWN_CODEX_MODEL':'codex-only'})
+        self.assertEqual(result.returncode,0,result.stderr)
+        self.assertNotIn('--model',shlex.split((self.root/'launch').read_text()))
 
     def test_environment_model_binary_and_shell_escaping(self):
         binary=self.bin/'chosen codex'

@@ -36,7 +36,8 @@ waiting for their turn to finish.
 ~/.claude/skills/spawn-agent/scripts/agent-spawn.sh chaos:helper agy ./project
 ```
 
-Codex options: `--model MODEL`, `--codex-bin EXECUTABLE`, or environment
+Claude and Codex accept `--model MODEL` for an explicit model.
+Codex also accepts `--codex-bin EXECUTABLE`, or environment
 `SPAWN_CODEX_MODEL` / `SPAWN_CODEX_BIN`. Its startup update check is suppressed
 for that process only. Codex launches use `--no-alt-screen` to preserve tmux
 scrollback for receipts longer than the visible pane. Existing alternate-screen
