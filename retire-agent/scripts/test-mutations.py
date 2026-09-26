@@ -26,7 +26,7 @@ mutations = [
     ('lingering core', "for core in original.get('cores', []):", 'for core in []:', 'test_wrapper_exit_waits_for_lingering_core'),
     ('pinned socket', "self.tmux = ['tmux', '-S', state['socket']]", 'pass  # Caller environment selects the wrong server.', 'test_resume_uses_pinned_socket'),
     ('server failure', 'except PaneAbsent:', 'except Stop:', 'test_socket_failure_is_not_pane_disappearance'),
-    ('steward index ownership', '(tracked and outside_section(original) != outside_section(baseline))', 'False', 'test_steward_dirty_index_is_not_published'),
+    ('steward index ownership', '(tracked and outside_section(original) != outside_section(baseline) and not owned_write)', 'False', 'test_steward_dirty_index_is_not_published'),
     ('commit ownership', '        self.require_owned_commits()', '        pass  # Push unowned commits.', 'test_unowned_local_commit_is_not_pushed'),
     ('composer exclusion', ["rows = self.screen.read_response_rows(self.args.pane, self.state['socket'])", "if any(row.strip() and not (len(row.strip()) >= 3 and set(row.strip()) == {'─'}) for row in rows[position + 1:]):"], ["rows = checked(self.tmux + ['capture-pane', '-p', '-t', self.args.pane]).splitlines()", 'if False:'], 'test_composer_done_does_not_complete'),
     ('last polling interval', 'disposition = self.observe()  # Include the final polling interval.', 'pass', 'test_last_poll_interval_is_observed'),
@@ -39,6 +39,9 @@ mutations = [
     ('locked resume reread', 'self.load_resume()  # Another controller may have advanced state before this lock.', 'pass  # Trust stale pre-lock state.', 'test_resume_rereads_state_after_event_lock'),
     ('completion suffix', "if any(row.strip() and not (len(row.strip()) >= 3 and set(row.strip()) == {'─'}) for row in rows[position + 1:]):", 'if False:', 'test_codex_marker_suffix_is_not_completion'),
     ('pending evidence authority', "if self.state.get('handoff_receipt') and not getattr(self, 'evidence_verified', False):", 'if False:', 'test_remote_requested_receipt_cannot_authorize_successor'),
+    ('index preflight ordering', ['self.publication_preflight()  # Preconditions before any INDEX write.', "        if self.git('diff', 'HEAD', '--', *paths)"], ['pass  # Preconditions delayed until after index write.', "        self.publication_preflight()\n        if self.git('diff', 'HEAD', '--', *paths)"], 'test_index_preflight_failure_preserves_legacy_then_resumes'),
+    ('owned tracked index retry', "self.state['index_outside'] = hashlib.sha256(outside_section(updated).encode()).hexdigest()", 'pass  # Lose ownership of our tracked legacy index write.', 'test_own_legacy_index_write_recovers_after_commit_hook_failure'),
+    ('tracked index deletion', 'if tracked and not index_path.exists():', 'if False:', 'test_tracked_deleted_index_is_not_recreated'),
 ]
 for label, before, after, test in mutations:
     replacements = list(zip(before, after)) if isinstance(before, list) else [(before, after)]
@@ -57,6 +60,8 @@ for label, before, after, test in mutations:
                                 text=True, capture_output=True, timeout=30)
         if result.returncode == 0:
             raise SystemExit('SURVIVED: ' + label)
+        if 'INVALID-INSTRUMENTATION:' in result.stderr:
+            raise SystemExit('Invalid mutation instrumentation: ' + label + '\n' + result.stderr)
         if 'FAILED' not in result.stderr:
             raise SystemExit('Invalid mutation test failure: ' + label + '\n' + result.stderr)
         print('KILLED: ' + label)

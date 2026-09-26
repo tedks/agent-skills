@@ -91,7 +91,13 @@ Commits are path-only. Uncommitted steward edits outside the generated INDEX
 section and unowned unpushed commits block publication. Retirement commits
 are owned only with private ledger evidence of their SHA and exact paths.
 Noncooperating Git actors still require coordination. Behind or diverged
-master requires deliberate reconciliation; failed push blocks exit. Verify the shard blob on fetched
+master requires deliberate reconciliation; failed push blocks exit.
+Publication preconditions run before INDEX writes; exact script-owned
+outside-section hashes allow recovery after a later Git hook failure. A
+HEAD-tracked INDEX deletion stops rather than recreating steward metadata.
+Foreign JSON records are indexed only after a matching receipt claims their
+event and path; malformed claimed metadata stops with its bytes preserved.
+Verify the shard blob on fetched
 private `origin/master`, publish its unique ledger receipt, then send the bare
 harness exit through the shared sender. Claude `/exit` uses the sender's
 `--literal-exit` guard: literal typing and one Enter, confirmed by a fresh
@@ -141,6 +147,12 @@ their resources still require shard receipts. Unknown or additional harness
 invocations remain a safe deferral pending operator reconciliation.
 Follow-up `retire-agent-helper-identification` tracks richer auxiliary-command
 classification; do not weaken identity checks to bypass that deferral.
+The npm `node …/codex.js mcp-server` shape also remains a safe helper-identity
+deferral. `retire-agent-commit-ownership-recovery` tracks crashes between Git
+commit and its ownership audit: reconcile an orphaned commit deliberately,
+never infer ownership from its subject. `retire-agent-concurrent-lock-budget`
+tracks the bounded Git-lock wait; busy transactions require a deliberate
+resume rather than an overlapping publication attempt.
 
 Each event also has an append-only private `<event>.jsonl` attempt ledger in
 the Git common directory: target/pane, event marker, transport exit and receipt

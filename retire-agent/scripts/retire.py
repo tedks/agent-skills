@@ -186,7 +186,9 @@ class Retirement:
         raise PaneAbsent('pane disappeared from pinned server')
 
     def transport_env(self):
-        return dict(os.environ, SPAWN_TMUX_SOCKET=self.state['socket'])
+        environment = dict(os.environ, SPAWN_TMUX_SOCKET=self.state['socket'])
+        environment.pop('SPAWN_TMUX_LABEL', None)
+        return environment
 
     def load_screen_helper(self):
         source = (self.shared / 'tmux-message.py').resolve()
@@ -348,7 +350,7 @@ class Retirement:
                     raise Stop('legacy session shard exists; reconcile deliberately')
                 continue
             if not isinstance(prior, dict):
-                raise Stop('malformed prior shard; preserve for reconciliation')
+                continue  # Foreign JSON has no claimed session metadata.
             if data['session_id'] != 'unknown' and prior.get('session_id') == data['session_id'] and prior.get('event') != data['event']:
                 raise Stop('session already has a preserved shard')
         if data['harness'] != self.state['identity']['process']['agent'] or data['working_directory'] != self.state['identity']['directory']:
@@ -377,6 +379,7 @@ class Retirement:
             self.publish_locked(paths, index)
 
     def publish_locked(self, paths, index=False):
+        self.publication_preflight()  # Preconditions before any INDEX write.
         if index:
             entries = ['| Shard | Session | Provider | Role | State | Last verified |\n| --- | --- | --- | --- | --- | --- |\n']
             def cell(value):
@@ -388,18 +391,19 @@ class Retirement:
                     data = json.loads(path.read_text())
                 except ValueError:
                     continue  # Non-JSON legacy metadata remains outside our section.
-                if not isinstance(data, dict):
-                    raise Stop('malformed index shard; expected JSON object')
-                if 'event' not in data:
+                if not isinstance(data, dict) or not isinstance(data.get('event'), str) or not re.fullmatch(r'[0-9a-f]{32}', data['event']):
                     continue
-                if not isinstance(data['event'], str) or not re.fullmatch(r'[0-9a-f]{32}', data['event']):
-                    raise Stop('malformed index shard event')
+                receipt = self.repo / 'receipts' / (data['event'] + '.json')
+                try:
+                    receipt_text = receipt.read_text() if receipt.exists() else '{}'
+                    claim = json.loads(receipt_text)
+                except ValueError:
+                    continue
+                if not isinstance(claim, dict) or claim.get('event') != data['event'] or claim.get('shard') != 'waiting/' + path.name:
+                    continue  # Existing external/legacy metadata has another owner.
+                record = receipt_record(receipt_text)
                 if any(key in data and not isinstance(data[key], str) for key in ('harness', 'session_id', 'role')):
                     raise Stop('malformed index shard metadata')
-                receipt = self.repo / 'receipts' / (data['event'] + '.json')
-                record = receipt_record(receipt.read_text()) if receipt.exists() else {}
-                if record.get('event') != data['event'] or record.get('shard') != 'waiting/' + path.name:
-                    continue  # Existing external/legacy metadata has another owner.
                 status = record['status']
                 provider = {'codex': 'OpenAI', 'claude': 'Anthropic', 'agy': 'Google'}.get(data.get('harness'), 'unknown')
                 values = (data.get('session_id', 'unknown'), provider, data.get('role', 'unknown'), status, record.get('verified_at', 'unknown'))
@@ -407,6 +411,9 @@ class Retirement:
             index_path = self.repo / 'waiting' / 'INDEX.md'
             if index_path.is_symlink() or (index_path.exists() and not index_path.is_file()):
                 raise Stop('unsafe index path; preserve for reconciliation')
+            tracked = run(['git', '-C', self.repo, 'cat-file', '-e', 'HEAD:waiting/INDEX.md']).returncode == 0
+            if tracked and not index_path.exists():
+                raise Stop('tracked INDEX deleted; preserve steward metadata before publication')
             begin, end = '<!-- retire-agent:begin -->', '<!-- retire-agent:end -->'
             original = index_path.read_text() if index_path.exists() else '# Waiting and retired sessions\n'
             def outside_section(text):
@@ -416,14 +423,10 @@ class Retirement:
                     raise Stop('malformed generated index section; preserve for reconciliation')
                 return text[:text.index(begin)] + text[text.index(end) + len(end):]
             if index_path.exists():
-                tracked = run(['git', '-C', self.repo, 'ls-files', '--error-unmatch', 'waiting/INDEX.md']).returncode == 0
                 baseline = self.git('show', 'HEAD:waiting/INDEX.md', raw=True) if tracked else '# Waiting and retired sessions\n'
-                owned_creation = self.state.get('created_index') and self.state.get('created_index_outside') == hashlib.sha256(outside_section(original).encode()).hexdigest()
-                if (not tracked and not owned_creation) or (tracked and outside_section(original) != outside_section(baseline)):
+                owned_write = self.state.get('index_outside') == hashlib.sha256(outside_section(original).encode()).hexdigest()
+                if (not tracked and not owned_write) or (tracked and outside_section(original) != outside_section(baseline) and not owned_write):
                     raise Stop('steward-owned index edits are uncommitted; preserve before publication')
-            else:
-                self.state['created_index'] = True
-                self.persist()
             section = begin + '\n' + ''.join(entries) + end
             if begin in original or end in original:
                 if original.count(begin) != 1 or original.count(end) != 1 or original.index(begin) >= original.index(end):
@@ -431,18 +434,10 @@ class Retirement:
                 updated = original[:original.index(begin)] + section + original[original.index(end) + len(end):]
             else:
                 updated = original + '\n\n' + section + '\n'
-            if self.state.get('created_index'):
-                self.state['created_index_outside'] = hashlib.sha256(outside_section(updated).encode()).hexdigest()
-                self.persist()
+            self.state['index_outside'] = hashlib.sha256(outside_section(updated).encode()).hexdigest()
+            self.persist()
             atomic_bytes(index_path, updated.encode())
             paths = [*paths, 'waiting/INDEX.md']
-        self.private()
-        if self.git('branch', '--show-current') != 'master':
-            raise Stop('private records checkout must be on master')
-        self.git('fetch', 'origin', 'master')
-        if run(['git', '-C', self.repo, 'merge-base', '--is-ancestor', 'origin/master', 'HEAD']).returncode:
-            raise Stop('private master is behind or diverged; reconcile deliberately')
-        self.require_owned_commits()
         if self.git('diff', 'HEAD', '--', *paths) or any(not run(['git', '-C', self.repo, 'ls-files', '--error-unmatch', p]).returncode == 0 for p in paths):
             self.git('add', '--', *paths)
             self.git('commit', '--only', '-m', 'Preserve retirement ' + self.state['id'], '--', *paths)
@@ -457,6 +452,15 @@ class Retirement:
             remote = self.git('rev-parse', 'origin/master:' + path)
             if local != remote:
                 raise Stop('private remote shard verification failed')
+
+    def publication_preflight(self):
+        self.private()
+        if self.git('branch', '--show-current') != 'master':
+            raise Stop('private records checkout must be on master')
+        self.git('fetch', 'origin', 'master')
+        if run(['git', '-C', self.repo, 'merge-base', '--is-ancestor', 'origin/master', 'HEAD']).returncode:
+            raise Stop('private master is behind or diverged; reconcile deliberately')
+        self.require_owned_commits()
 
     def require_owned_commits(self):
         pending = self.git('rev-list', 'origin/master..HEAD').splitlines()

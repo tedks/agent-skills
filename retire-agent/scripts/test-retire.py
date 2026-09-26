@@ -45,7 +45,7 @@ def terminal(directory, mode):
     pending = b''
     pasting = False
     pasted_payload = False
-    pastes = enters = 0
+    pastes = enters = exit_enters = 0
     history = ''
     event = None
     due = None
@@ -124,6 +124,7 @@ def terminal(directory, mode):
                         enters += 1
                         payload = draft.decode()
                         if payload == '/exit':
+                            exit_enters += 1
                             # Independently prove order from the remote, before exit.
                             remote = directory / 'remote.git'
                             receipt = subprocess.run(['git', '--git-dir', str(remote), 'show', 'master:receipts/' + event + '.json'], capture_output=True, text=True)
@@ -153,7 +154,7 @@ def terminal(directory, mode):
                                 draw()
                                 continue
                             if mode != 'hold':
-                                (directory / 'terminal.json').write_text(json.dumps({'pastes': pastes, 'enters': enters, 'event': event, 'exit_pasted': pasted_payload, 'exit_enters': 1}))
+                                (directory / 'terminal.json').write_text(json.dumps({'pastes': pastes, 'enters': enters, 'event': event, 'exit_pasted': pasted_payload, 'exit_enters': exit_enters}))
                                 if mode.startswith('claude'):
                                     sys.stdout.write('\x1b[2J\x1b[HResume this session with:\r\nclaude --resume aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa\r\n')
                                     sys.stdout.flush()
@@ -179,6 +180,10 @@ def terminal(directory, mode):
                                 shard.write_text(json.dumps(data))
                             if mode == 'push-reject':
                                 hook = directory / 'remote.git' / 'hooks' / 'pre-receive'
+                                hook.write_text('#!/bin/sh\nexit 1\n')
+                                hook.chmod(0o700)
+                            if mode == 'commit-reject':
+                                hook = directory / 'repo' / '.git' / 'hooks' / 'pre-commit'
                                 hook.write_text('#!/bin/sh\nexit 1\n')
                                 hook.chmod(0o700)
                         history = ('❯' if mode.startswith('claude') else '›') + ' [Pasted Content ' + str(len(payload)) + ' chars]\r\n'
@@ -208,6 +213,10 @@ def terminal(directory, mode):
                         pasted_payload = False
                     else:
                         draft += char
+            # Buffer a bracketed paste as one composer update, rather than
+            # redrawing a changing collapsed-paste count for every byte. Typed
+            # input still redraws after each available input chunk.
+            if not pasting:
                 draw()
     finally:
         for child in children:
@@ -237,7 +246,7 @@ class Tests(unittest.TestCase):
         shared.mkdir(parents=True)
         # Timing-only wrapper; real shared sender, real terminal, no transport stubs.
         sender = shared / 'tmux-message.sh'
-        sender.write_text('#!/usr/bin/env bash\nphase=$1; pane=$2; shift 2\nexec ' + shlex.quote(str(SHARED / 'tmux-message.sh')) + ' "$phase" "$pane" "$@" --stable-wait .05 --max-wait .15 --submit-delay .05 --render-wait .15 --receipt-wait .2 --retry-wait .05 --poll-interval .02\n')
+        sender.write_text('#!/usr/bin/env bash\nphase=$1; pane=$2; shift 2\nexec ' + shlex.quote(str(SHARED / 'tmux-message.sh')) + ' "$phase" "$pane" "$@" --stable-wait .05 --max-wait .6 --submit-delay .05 --render-wait .5 --receipt-wait .5 --retry-wait .05 --poll-interval .02\n')
         # Options after --prompt-file are accepted by argparse in shared sender.
         sender.chmod(0o700)
         (shared / 'tmux-message.py').symlink_to(SHARED / 'tmux-message.py')
@@ -319,7 +328,8 @@ class Tests(unittest.TestCase):
         stage = self.directory / ('instrumented-' + uuid.uuid4().hex)
         stage.mkdir()
         source = self.source()
-        self.assertIn(before, source)
+        if before not in source:
+            self.fail('INVALID-INSTRUMENTATION: missing stable anchor')
         (stage / 'retire.py').write_text(source.replace(before, after, 1))
         entry = stage / 'retire.sh'
         entry.write_bytes((HERE / 'retire.sh').read_bytes())
@@ -491,6 +501,14 @@ class Tests(unittest.TestCase):
         self.assertIsNone(state['disposition'])
         self.assertNotIn('handoff_receipt', state)
         self.assertIn('● RETIRE-DONE-' + state['id'], self.command(*self.tmux, 'capture-pane', '-p', '-t', self.pane))
+        spec = importlib.util.spec_from_file_location('retire-composer-positive', SHARED / 'tmux-message.py')
+        shared = importlib.util.module_from_spec(spec)
+        sys.modules[spec.name] = shared
+        spec.loader.exec_module(shared)
+        rows = shared.read_response_rows(self.pane, state['socket'])
+        self.assertIsNotNone(rows)  # A recognized input surface, not unknown-layout vacuity.
+        self.assertIn('• Accepted', rows)
+        self.assertFalse(any('RETIRE-DONE-' + state['id'] in row for row in rows))
 
     def test_agy_and_missing_launcher_preflight(self):
         self.actor()
@@ -730,7 +748,9 @@ class Tests(unittest.TestCase):
         index = self.repo / 'waiting' / 'INDEX.md'
         original_index = index.read_text()
         bad = self.repo / 'waiting' / 'malformed.md'
-        for malformed in ('[]', '{"event": []}', json.dumps({'event': 'e' * 32, 'harness': []})):
+        claimed_receipt = self.repo / 'receipts' / ('e' * 32 + '.json')
+        claimed_receipt.write_text(json.dumps({'event': 'e' * 32, 'shard': 'waiting/malformed.md', 'status': 'pending-exit'}))
+        for malformed in (json.dumps({'event': 'e' * 32, key: []}) for key in ('harness', 'session_id', 'role')):
             bad.write_text(malformed)
             result = self.invoke('--resume', str(path))
             self.assertEqual(result.returncode, 2, result.stderr)
@@ -978,7 +998,7 @@ class Tests(unittest.TestCase):
 
     def test_handoff_brief_reads_verified_blob(self):
         self.actor()
-        before = "            preserved = self.git('show', self.state['shard_hash'], raw=True)\n"
+        before = "            brief = directory / (event + '-brief.txt')\n"
         after = ('            (self.repo / self.state["shard"]).write_text("UNVERIFIED LOCAL TEXT")\n' + before)
         entry = self.instrument(before, after)
         with patch.dict(os.environ, {'RETIRE_TEST_SCRIPT': str(entry)}):
@@ -1050,8 +1070,9 @@ class Tests(unittest.TestCase):
         data = json.loads(path.with_suffix('.shard').read_text())
         data['waiting'] = {'decision': 'scope', 'owner': 'Ted'}
         path.with_suffix('.shard').write_text(json.dumps(data))
-        before = '            self.load_resume()  # Another controller may have advanced state before this lock.\n'
-        after = ('            disk = json.loads(self.path.read_text())\n'
+        before = "        self.event_lock = (directory / (self.state['id'] + '.lock')).open('a')\n"
+        after = ('        if self.args.resume:\n'
+                 '            disk = json.loads(self.path.read_text())\n'
                  '            disk["after_lock_fixture"] = True\n'
                  '            save(self.path, disk)\n' + before)
         entry = self.instrument(before, after)
@@ -1108,6 +1129,75 @@ class Tests(unittest.TestCase):
 
     def test_decline_suffix_is_not_disposition(self):
         self.assert_completion_block_pending('decline-suffix')
+
+    def legacy_index(self):
+        waiting = self.repo / 'waiting'
+        waiting.mkdir(exist_ok=True)
+        index = waiting / 'INDEX.md'
+        text = '# Steward record\n\n| Legacy session | Anthropic | Utility | Waiting on Ted |\n'
+        index.write_text(text)
+        self.git('add', '--', 'waiting/INDEX.md')
+        self.git('commit', '-m', 'legacy steward index')
+        self.git('push')
+        return index, text
+
+    def test_index_preflight_failure_preserves_legacy_then_resumes(self):
+        index, original = self.legacy_index()
+        self.actor()
+        before = '    def publication_preflight(self):\n'
+        after = (before + '        if self.state.get("shard") and not self.args.resume:\n'
+                 '            raise Stop("fixture-fetch-precondition-failure")\n')
+        entry = self.instrument(before, after)
+        with patch.dict(os.environ, {'RETIRE_TEST_SCRIPT': str(entry)}):
+            result = self.invoke()
+        self.assertEqual(result.returncode, 2, result.stderr)
+        self.assertIn('fixture-fetch-precondition-failure', result.stderr)
+        self.assertEqual(index.read_text(), original)
+        path, state = self.state()
+        self.assertEqual(state['disposition'], 'DONE')
+        result = self.invoke('--resume', str(path))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertTrue(index.read_text().startswith(original))
+        self.assertIn('Steward record', self.git('show', 'origin/master:waiting/INDEX.md'))
+
+    def test_own_legacy_index_write_recovers_after_commit_hook_failure(self):
+        index, original = self.legacy_index()
+        self.actor('commit-reject')
+        result = self.invoke()
+        self.assertEqual(result.returncode, 2, result.stderr)
+        self.assertIn('command failed: git', result.stderr)
+        self.assertTrue(index.read_text().startswith(original))
+        self.assertIn('<!-- retire-agent:begin -->', index.read_text())
+        path, state = self.state()
+        (self.repo / '.git' / 'hooks' / 'pre-commit').unlink()
+        result = self.invoke('--resume', str(path))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertTrue(index.read_text().startswith(original))
+
+    def test_foreign_json_metadata_is_not_claimed(self):
+        index, original = self.legacy_index()
+        files = {'list.md': '[]', 'foreign.md': '{"event":"foreign-owner","harness":[]}',
+                 'unclaimed.md': json.dumps({'event': 'e' * 32, 'harness': []})}
+        for name, content in files.items():
+            (index.parent / name).write_text(content)
+        self.actor()
+        result = self.invoke()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertTrue(index.read_text().startswith(original))
+        for name, content in files.items():
+            self.assertEqual((index.parent / name).read_text(), content)
+            self.assertNotIn('[' + name + ']', index.read_text())
+
+    def test_tracked_deleted_index_is_not_recreated(self):
+        index, original = self.legacy_index()
+        index.unlink()
+        self.actor()
+        result = self.invoke()
+        self.assertEqual(result.returncode, 2, result.stderr)
+        self.assertIn('tracked INDEX deleted', result.stderr)
+        self.assertFalse(index.exists())
+        self.assertEqual(self.git('show', 'origin/master:waiting/INDEX.md'), original.strip())
+        self.assertFalse((self.directory / 'exit-order.json').exists())
 
 
 if __name__ == '__main__':
