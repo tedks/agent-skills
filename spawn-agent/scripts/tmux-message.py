@@ -178,7 +178,12 @@ class Tmux:
             self.base += ["-L", os.environ["SPAWN_TMUX_LABEL"]]
         elif os.environ.get("TMUX"):
             self.base += ["-S", os.environ["TMUX"].split(",")[0]]
-        self.identity = self.run("display-message", "-p", "-t", target, "#{pid}:#{pane_id}").strip()
+        try:
+            self.identity = subprocess.run(
+                [str(Path(__file__).with_name("tmux-resolve.sh")), target],
+                check=True, capture_output=True, text=True, timeout=5).stdout.strip()
+        except subprocess.CalledProcessError as error:
+            raise DeliveryError("missing-or-ambiguous-target") from error
         if not re.fullmatch(r"\d+:%\d+", self.identity):
             raise DeliveryError("invalid-target")
         self.pane = self.identity.split(":")[1]
