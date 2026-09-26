@@ -179,6 +179,7 @@ PY
     [[ "${!#}" == Enter ]]
     printf 'enter\n' >> "$FAKE_LOG"
     python3 -c 'import time; print(time.monotonic_ns())' >> "$FAKE_STATE/times"
+    cp "$FAKE_STATE/composer" "$FAKE_STATE/submitted"
     : > "$FAKE_STATE/composer"
     ;;
   *) echo "unexpected tmux command: $cmd" >&2; exit 64 ;;
@@ -360,7 +361,8 @@ out=$(run_sender target --submit-delay 0 --max-wait 3 --poll-interval 0.1 --prom
 [[ "$out" == 'status=sent receipt=unverified' ]]
 [[ $(grep -c '^paste-start$' "$FAKE_LOG") -eq 1 ]]
 [[ $(grep -c '^enter$' "$FAKE_LOG") -eq 1 ]]
-[[ $(<"$FAKE_STATE/composer") == 'Reply with exactly P141-QUEUED-TEST' ]]
+[[ $(<"$FAKE_STATE/submitted") == 'Reply with exactly P141-QUEUED-TEST' ]]
+[[ ! -s "$FAKE_STATE/composer" ]]
 
 # The stable-empty pair and pre-paste recheck must finish before max-wait.
 # Simulate a second capture that itself returns only after the deadline.
