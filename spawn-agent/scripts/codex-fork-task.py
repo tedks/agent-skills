@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
-"""Bounded task delivery for an interactive Codex fork (no TUI task paste)."""
+"""Task snapshot and ancestry validation for optional Codex fork preparation."""
 
 import argparse
 import json
 from pathlib import Path
-import subprocess
 import sys
 import uuid
 
@@ -35,7 +34,6 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest="action", required=True)
     preflight = sub.add_parser("preflight")
-    preflight.add_argument("executable")
     preflight.add_argument("task")
     prepare = sub.add_parser("compact")
     prepare.add_argument("policy")
@@ -44,18 +42,9 @@ def main():
     identity = sub.add_parser("child")
     identity.add_argument("rollout")
     identity.add_argument("parent")
-    queue = sub.add_parser("queue")
-    queue.add_argument("executable")
-    queue.add_argument("rollout")
-    queue.add_argument("parent")
-    queue.add_argument("task")
     args = parser.parse_args()
     if args.action == "preflight":
         task_text(args.task)
-        result = subprocess.run([args.executable, "queue", "--help"],
-                                capture_output=True, text=True, timeout=15)
-        if result.returncode or not all(flag in result.stdout for flag in ("--thread", "--message")):
-            raise ValueError("this Codex executable does not support native queue --thread/--message; no fork launched")
     elif args.action == "compact":
         policy = Path(args.policy).read_text(encoding="utf-8")
         task = task_text(args.task)
@@ -66,25 +55,11 @@ def main():
             encoding="utf-8")
     elif args.action == "child":
         print(child_id(args.rollout, args.parent))
-    else:
-        child = child_id(args.rollout, args.parent)
-        task = task_text(args.task)
-        # Native queue currently accepts argv, not stdin. Pass one exact UTF-8
-        # argument, including trailing newlines, without shell interpolation.
-        result = subprocess.run([args.executable, "queue", "--thread", child, "--message=" + task],
-                                capture_output=True, timeout=15)
-        if result.returncode:
-            raise ValueError("Codex queue rejected task delivery; inspect the child before retrying (no automatic paste fallback)")
-        print(child)
 
 
 if __name__ == "__main__":
     try:
         main()
-    except subprocess.TimeoutExpired:
-        # TimeoutExpired's string includes argv, which would echo the task.
-        print("Error: Codex command timed out; inspect the existing child before retrying task delivery.", file=sys.stderr)
-        sys.exit(1)
     except (OSError, ValueError, KeyError, TypeError) as error:
         print(f"Error: {error}", file=sys.stderr)
         sys.exit(1)

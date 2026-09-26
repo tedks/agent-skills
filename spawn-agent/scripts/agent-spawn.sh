@@ -20,9 +20,8 @@
 # Automatically targets the correct tmux server socket when run inside tmux.
 # Override with SPAWN_TMUX_SOCKET or SPAWN_TMUX_LABEL env vars.
 #
-# Fork tasks use native codex queue after readiness/compaction. Other launches
-# retain tmux load-buffer/paste-buffer delivery. Queue takes one bounded argv
-# message; do not put credentials in task prompts.
+# All task and /compact input goes through tmux-message. Fork metadata and
+# optional completion watchers are separate from message transport.
 #
 # Examples:
 #   agent-spawn.sh chaos:review claude ./project "Review auth module"
@@ -34,36 +33,6 @@ set -e
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPT_DIR/tmux-ctx.sh"
-
-codex_composer_ready() {
-    local active_tail last_nonempty
-    active_tail=$(printf '%s\n' "$1" | tail -n 6)
-    last_nonempty=$(printf '%s\n' "$active_tail" | awk 'NF { line = $0 } END { print line }')
-    [[ "$active_tail" != *"Working ("* ]] && \
-        [[ "$last_nonempty" =~ Context[[:space:]][0-9]+% ]] && \
-        printf '%s\n' "$active_tail" | grep -q '^[[:space:]]*› '
-}
-
-codex_update_modal_active() {
-    local active_tail last_nonempty
-    active_tail=$(printf '%s\n' "$1" | tail -n 8)
-    last_nonempty=$(printf '%s\n' "$active_tail" | awk 'NF { line = $0 } END { print line }')
-    [[ "$active_tail" == *"Update available!"* && \
-       "$last_nonempty" == *"Press enter to continue"* ]]
-}
-
-codex_trust_modal_active() {
-    local active_tail last_nonempty
-    active_tail=$(printf '%s\n' "$1" | tail -n 8)
-    last_nonempty=$(printf '%s\n' "$active_tail" | awk 'NF { line = $0 } END { print line }')
-    [[ "$active_tail" == *"Do you trust the contents of this project?"* && \
-       "$last_nonempty" == *"enter Confirm"* ]]
-}
-
-# Claude Code pane classifiers live in their own file so that
-# claude-trust-dir.sh --verify shares them verbatim rather than keeping a
-# private copy that could drift from what the spawner actually enforces.
-source "$SCRIPT_DIR/claude-pane-detect.sh"
 
 usage() {
     echo "Usage: agent-spawn.sh <session:window> <agent> [directory] [prompt]" >&2
@@ -110,7 +79,6 @@ codex_bin="${SPAWN_CODEX_BIN:-codex}"
 codex_model="${SPAWN_CODEX_MODEL:-}"
 codex_options_set=""
 _cleanup_prompt_file=""
-_cleanup_command_file=""
 _cleanup_rollout_output=""
 _cleanup_cursor_output=""
 _cleanup_startup_output=""
@@ -125,7 +93,6 @@ _cleanup_fork_task=""
 # would kill the trap under `set -e` before it got there.
 cleanup() {
     if [[ -n "$_cleanup_prompt_file" ]]; then rm -f "$_cleanup_prompt_file" || true; fi
-    if [[ -n "$_cleanup_command_file" ]]; then rm -f "$_cleanup_command_file" || true; fi
     if [[ -n "$_cleanup_rollout_output" ]]; then rm -f "$_cleanup_rollout_output" || true; fi
     if [[ -n "$_cleanup_cursor_output" ]]; then rm -f "$_cleanup_cursor_output" || true; fi
     if [[ -n "$_cleanup_startup_output" ]]; then rm -f "$_cleanup_startup_output" || true; fi
@@ -341,7 +308,7 @@ if [[ -n "$fork_session" && -n "$prompt_file" ]]; then
     _cleanup_fork_task=$(mktemp /tmp/spawn-agent-fork-task.XXXXXX)
     cp -- "$prompt_file" "$_cleanup_fork_task"
     prompt_file="$_cleanup_fork_task"
-    python3 "$SCRIPT_DIR/codex-fork-task.py" preflight "$codex_bin" "$prompt_file"
+    python3 "$SCRIPT_DIR/codex-fork-task.py" preflight "$prompt_file"
 fi
 
 if [[ -n "$compact_prompt_file" ]]; then
@@ -433,120 +400,19 @@ if [[ "$trust_directory" -eq 1 ]]; then
     fi
 fi
 
-# Start the agent only after options, task size and queue support are checked.
+# Start only after options and fork task validation.
 if ! "${TMUX_CMD[@]}" has-session -t "$session" 2>/dev/null; then
     echo "Creating tmux session: $session" >&2
     "${TMUX_CMD[@]}" new-session -d -s "$session"
 fi
-"${TMUX_CMD[@]}" new-window -t "$session" -n "$window" -c "$directory" "$agent_shell_command"
+pane_id=$("${TMUX_CMD[@]}" new-window -P -F '#{pane_id}' -t "$session" -n "$window" -c "$directory" "$agent_shell_command")
+[[ "$pane_id" =~ ^%[0-9]+$ ]] || { echo "Error: invalid spawned pane identity" >&2; exit 1; }
 _cleanup_compact_file="" # child shell now owns cleanup, including failed delivery
 
 if [[ -n "$prompt_file" ]]; then
-    # Wait for the actual composer before sending anything. In particular,
-    # Codex may show an update chooser first; the old fixed sleep pasted the
-    # task into that chooser and its Enter selected "Update now".
-    # Every supported agent has a readiness probe below. The else branch
-    # survives as a fallback so a future agent added to the validator above
-    # degrades to the old fixed sleep instead of hanging here.
-    if [[ "$agent" == "agy" || "$agent" == "codex" || "$agent" == "claude" ]]; then
-        # agy paints a full-screen TUI and discards anything delivered before it
-        # is listening, so a flat `sleep 2` races it -- on a cold start the
-        # prompt vanishes and the spawn still reports success.
-        #
-        # Worse, agy's FIRST run in an untrusted directory opens a modal asking
-        # whether to trust it, whose default button is "Yes, I trust this
-        # folder" and whose footer is "enter Confirm". Pasting into that does
-        # nothing and the Enter that follows GRANTS TRUST. That is how
-        # /tmp/pr64-test ended up in agy's trustedWorkspaces during testing.
-        # Never send keys until the composer specifically is on screen.
-        agent_ready=""
-        agent_gone=0
-        for _ in $(seq 1 120); do
-            # A window that disappeared is not a slow window: say so, rather
-            # than burning 30s and then claiming the agent is waiting for input.
-            if pane="$("${TMUX_CMD[@]}" capture-pane -p -t "$session:$window" 2>/dev/null)"; then
-                agent_gone=0
-            else
-                agent_gone=$(( agent_gone + 1 ))
-                if (( agent_gone >= 3 )); then
-                    echo "Error: $session:$window is gone -- $agent exited before the prompt could be sent." >&2
-                    echo "  Nothing was pasted." >&2
-                    exit 1
-                fi
-                sleep 0.25
-                continue
-            fi
-
-            # Only inspect the active bottom of the pane. A Codex fork can
-            # contain old transcript text that quotes one of these dialogs.
-            pane_tail=$(printf '%s\n' "$pane" | tail -n 30)
-
-            if [[ "$agent" == "codex" ]]; then
-                if codex_update_modal_active "$pane_tail"; then
-                    echo "Error: Codex is showing its update chooser in $session:$window." >&2
-                    echo "  Nothing was pasted, and no key was sent -- selecting an update is an" >&2
-                    echo "  operator decision. Resolve the chooser in that window, then send the" >&2
-                    echo "  prompt explicitly or start the fork again." >&2
-                    exit 1
-                fi
-                if codex_trust_modal_active "$pane_tail"; then
-                    echo "Error: Codex is asking whether to trust this directory before it will run:" >&2
-                    echo "    $directory" >&2
-                    echo "  Nothing was pasted, and no key was sent -- answering that prompt is a" >&2
-                    echo "  permission decision this tooling will not make for you." >&2
-                    echo "  Answer it yourself, then send the prompt explicitly." >&2
-                    exit 1
-                fi
-                # A live composer's Context status is the bottommost non-empty
-                # line. This distinguishes it from a stale composer in restored
-                # history when a modal is actually on top.
-                if codex_composer_ready "$pane_tail"; then
-                    agent_ready=1
-                    break
-                fi
-            elif [[ "$agent" == "claude" ]]; then
-                if claude_trust_modal_active "$pane_tail"; then
-                    echo "Error: Claude Code is asking whether to trust this directory before it will run:" >&2
-                    echo "    $directory" >&2
-                    echo "  Nothing was pasted, and no key was sent." >&2
-                    echo "  Which button an Enter would hit is BUILD-SPECIFIC: 2.1.261 defaults" >&2
-                    echo "  to \"No, exit\", 2.1.220 defaults to \"Yes, I trust this folder\". So an" >&2
-                    echo "  automated Enter may silently GRANT trust to an unvetted directory." >&2
-                    echo "  Answer it yourself, or re-run with --trust to grant it explicitly." >&2
-                    exit 1
-                fi
-                if claude_composer_ready "$pane_tail"; then
-                    agent_ready=1
-                    break
-                fi
-            elif [[ "$pane_tail" == *"Do you trust the contents of this project?"* ]]; then
-                echo "Error: agy is asking whether to trust this directory before it will run:" >&2
-                echo "    $directory" >&2
-                echo "  Nothing was pasted, and no key was sent -- answering that prompt is a" >&2
-                echo "  permission decision this tooling will not make for you." >&2
-                echo "  Answer it yourself, then send the prompt explicitly." >&2
-                exit 1
-            # agy's composer specifically: its rule AND shortcuts hint. Check
-            # trust first because a modal may be painted over a live frame.
-            elif [[ "$pane_tail" == *"? for shortcuts"* && "$pane_tail" == *"─"* ]]; then
-                agent_ready=1
-                break
-            fi
-            sleep 0.25
-        done
-        if [[ -z "$agent_ready" ]]; then
-            echo "Error: $agent's input box did not appear within 30s; prompt not sent." >&2
-            echo "  $agent is running in $session:$window -- attach and type it by hand." >&2
-            exit 1
-        fi
-        # The box is painted a beat before input is accepted.
-        if [[ "$agent" == "codex" ]]; then sleep 3; else sleep 1; fi
-    else
-        sleep 2
-    fi
     if [[ "$agent" == "codex" && -n "$fork_session" ]]; then
         rollout_path=$("$SCRIPT_DIR/codex-rollout-path.sh" \
-            --exclude-session "$fork_session" "$target") || {
+            --exclude-session "$fork_session" "$pane_id") || {
             echo "Error: could not resolve the child rollout; task prompt not sent." >&2
             echo "  The child remains running and un-tasked in $target." >&2
             exit 1
@@ -570,45 +436,13 @@ if [[ -n "$prompt_file" ]]; then
             mv -f -- "$_cleanup_startup_output" "$startup_cursor_file"
             _cleanup_startup_output=""
         fi
-        compact_before_paste=$("${TMUX_CMD[@]}" capture-pane -p -t "$session:$window")
-        compact_before_count=$(printf '%s\n' "$compact_before_paste" | tail -n 20 | \
-            grep -c '^[[:space:]]*› /compact[[:space:]]*$' || true)
-        _cleanup_command_file=$(mktemp /tmp/spawn-agent-command.XXXXXX)
-        printf '%s' '/compact' > "$_cleanup_command_file"
-        compact_buf="spawn-agent-compact-$$"
-        "${TMUX_CMD[@]}" load-buffer -b "$compact_buf" "$_cleanup_command_file"
-        if ! "${TMUX_CMD[@]}" paste-buffer -d -t "$session:$window" -b "$compact_buf"; then
-            "${TMUX_CMD[@]}" delete-buffer -b "$compact_buf" 2>/dev/null || true
-            echo "Error: failed to paste /compact to $session:$window; task prompt not sent." >&2
-            exit 1
+        if "$SCRIPT_DIR/tmux-message.sh" send "$pane_id" --max-wait 30 '/compact'; then
+            :
+        else
+            status=$?
+            echo "Error: /compact transport failed; task not sent. Inspect $target before retrying." >&2
+            exit "$status"
         fi
-        compact_loaded=""
-        for _ in $(seq 1 20); do
-            if ! pane=$("${TMUX_CMD[@]}" capture-pane -p -t "$session:$window" 2>/dev/null); then
-                echo "Error: $session:$window exited before /compact could be submitted." >&2
-                echo "  No Enter was sent and the task prompt was not sent." >&2
-                exit 1
-            fi
-            compact_tail=$(printf '%s\n' "$pane" | tail -n 20)
-            if codex_update_modal_active "$compact_tail" || \
-               codex_trust_modal_active "$compact_tail"; then
-                break
-            fi
-            compact_after_count=$(printf '%s\n' "$compact_tail" | \
-                grep -c '^[[:space:]]*› /compact[[:space:]]*$' || true)
-            if [[ "$pane" != "$compact_before_paste" ]] && \
-               (( compact_after_count > compact_before_count )); then
-                compact_loaded=1
-                break
-            fi
-            sleep 0.25
-        done
-        if [[ -z "$compact_loaded" ]]; then
-            echo "Error: the Codex composer does not contain exactly /compact." >&2
-            echo "  No Enter was sent; the child remains running and un-tasked in $target." >&2
-            exit 1
-        fi
-        "${TMUX_CMD[@]}" send-keys -t "$session:$window" Enter
         echo "Waiting for Codex to finish the requested history compaction..." >&2
         if ! "$SCRIPT_DIR/codex-jsonl-watch.py" compaction \
             "$rollout_path" "$compact_after" "$compact_timeout"; then
@@ -617,34 +451,6 @@ if [[ -n "$prompt_file" ]]; then
             echo "  If Codex was upgraded, verify its compaction config/event compatibility." >&2
             exit 1
         fi
-
-        # The structured event is authoritative, but wait for the composer to
-        # become interactive again before placing the task in it.
-        compact_ready=""
-        for _ in $(seq 1 120); do
-            if ! pane=$("${TMUX_CMD[@]}" capture-pane -p -t "$session:$window" 2>/dev/null); then
-                echo "Error: $session:$window exited after compaction; task prompt not sent." >&2
-                exit 1
-            fi
-            pane_tail=$(printf '%s\n' "$pane" | tail -n 30)
-            if codex_update_modal_active "$pane_tail" || \
-               codex_trust_modal_active "$pane_tail"; then
-                echo "Error: Codex opened a startup modal after compaction; task prompt not sent." >&2
-                echo "  No key was sent; resolve it in $target or close the child." >&2
-                exit 1
-            fi
-            if codex_composer_ready "$pane_tail"; then
-                compact_ready=1
-                break
-            fi
-            sleep 0.25
-        done
-        if [[ -z "$compact_ready" ]]; then
-            echo "Error: Codex compacted but its composer did not return; task prompt not sent." >&2
-            echo "  The child remains running and un-tasked in $target; inspect or close it." >&2
-            exit 1
-        fi
-        sleep 1
     fi
 
     if [[ -n "$recap_cursor_file" ]]; then
@@ -656,26 +462,14 @@ if [[ -n "$prompt_file" ]]; then
         _cleanup_cursor_output=""
     fi
 
-    if [[ "$agent" == codex && -n "$fork_session" ]]; then
-        child_session=$(python3 "$SCRIPT_DIR/codex-fork-task.py" queue \
-            "$codex_bin" "$rollout_path" "$fork_session" "$prompt_file") || {
-            echo "Error: task delivery was not confirmed; inspect $target before retrying." >&2
-            exit 1
-        }
-        echo "Spawned $agent in $target (dir: $directory); task queued to $child_session"
+    if "$SCRIPT_DIR/tmux-message.sh" send "$pane_id" --max-wait 30 --prompt-file "$prompt_file"; then
+        echo "Spawned $agent in $target ($pane_id, dir: $directory); task transport sent, receipt unverified"
         exit 0
+    else
+        status=$?
+        echo "Error: task transport failed; child remains in $target ($pane_id). Inspect before retrying." >&2
+        exit "$status"
     fi
-
-    # Codex needs time to finish paste-burst handling for large task files.
-    buf_name="spawn-agent-task-$$"
-    "${TMUX_CMD[@]}" load-buffer -b "$buf_name" "$prompt_file"
-    if ! "${TMUX_CMD[@]}" paste-buffer -d -t "$session:$window" -b "$buf_name"; then
-        "${TMUX_CMD[@]}" delete-buffer -b "$buf_name" 2>/dev/null || true
-        echo "Error: failed to paste prompt to $session:$window" >&2
-        exit 1
-    fi
-    if [[ "$agent" == "codex" ]]; then sleep 3; else sleep 1.5; fi
-    "${TMUX_CMD[@]}" send-keys -t "$session:$window" Enter
 fi
 
 echo "Spawned $agent in $target (dir: $directory)"

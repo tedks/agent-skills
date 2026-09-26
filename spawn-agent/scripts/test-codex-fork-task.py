@@ -1,31 +1,31 @@
 #!/usr/bin/env python3
-"""Small failure-boundary checks; no live Codex process or model calls."""
-
-from contextlib import redirect_stderr
-import io
+"""Fork preparation validates task bytes without invoking native messaging."""
 from pathlib import Path
-import runpy
-import subprocess
+import importlib.util
+import tempfile
 import unittest
 from unittest.mock import patch
 
+spec = importlib.util.spec_from_file_location("fork_task", Path(__file__).with_name("codex-fork-task.py"))
+helper = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(helper)
 
-HELPER = Path(__file__).with_name("codex-fork-task.py")
+class ForkTaskTests(unittest.TestCase):
+    def test_exact_bytes_and_no_native_command(self):
+        with tempfile.TemporaryDirectory() as directory:
+            task = Path(directory) / "task"
+            task.write_bytes('Unicode λ\nsecond line\n'.encode())
+            with patch("sys.argv", [str(helper.__file__), "preflight", str(task)]):
+                helper.main()
+            self.assertEqual(helper.task_text(task), 'Unicode λ\nsecond line\n')
 
-
-class ForkTaskFailures(unittest.TestCase):
-    def test_timeout_does_not_echo_task_from_process_arguments(self):
-        output = io.StringIO()
-        with patch("sys.argv", [str(HELPER), "preflight", "codex", "unused"]), \
-                patch("pathlib.Path.read_bytes", return_value=b"short task"), \
-                patch("subprocess.run", side_effect=subprocess.TimeoutExpired(
-                    ["codex", "queue", "--message=PRIVATE TASK MUST NOT BE LOGGED"], 15)), \
-                redirect_stderr(output), self.assertRaises(SystemExit) as stopped:
-            runpy.run_path(str(HELPER), run_name="__main__")
-        self.assertEqual(stopped.exception.code, 1)
-        self.assertIn("timed out", output.getvalue())
-        self.assertNotIn("PRIVATE TASK", output.getvalue())
-
+    def test_invalid_tasks(self):
+        with tempfile.TemporaryDirectory() as directory:
+            task = Path(directory) / "task"
+            for content in [b"", b"x" * 32768, b"x\0y", b"\xff"]:
+                task.write_bytes(content)
+                with self.assertRaises(ValueError):
+                    helper.task_text(task)
 
 if __name__ == "__main__":
     unittest.main()

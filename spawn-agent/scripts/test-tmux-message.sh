@@ -46,7 +46,7 @@ for entry in "$TEST_DIR/repo bin/tmux-message" "$TEST_DIR/installed bin/send-mes
     status=0
     "$entry" send %88 --submit-delay 8 "$message" || status=$?
     [[ $status == 3 ]]
-    printf '%s\0' %88 --submit-delay 8 "$message" > "$TEST_DIR/expected"
+    printf '%s\0' %88 --submit-delay 8 --render-wait 3 --max-wait 10 --submit-delay 8 "$message" > "$TEST_DIR/expected"
     cmp "$TEST_DIR/expected" "$TEST_DIR/args"
 done
 printf 'tmux-message alias tests passed\n'

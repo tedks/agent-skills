@@ -17,7 +17,8 @@ shift
 case "$command" in
     send)
         (($# >= 2)) || usage
-        exec "$SCRIPT_DIR/claude-send.sh" "$@";;
+        target=$1; shift
+        exec "$SCRIPT_DIR/claude-send.sh" "$target" --submit-delay 8 --render-wait 3 --max-wait 10 "$@";;
     read)
         (($# == 1)) || usage
         [[ -n "$1" && "$1" != -* ]] || usage
