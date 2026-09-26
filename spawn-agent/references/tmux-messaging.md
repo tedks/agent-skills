@@ -86,4 +86,3 @@ Invisible input, cursor movement, clipped/collapsed pasted blocks, and TUI
 layout changes limit what can be verified. Unsupported surfaces fail closed.
 See [the delivery boundaries](../../../../docs/control-delivery.md) and the
 fixture-based regression suite `scripts/test-claude-send.sh`.
-

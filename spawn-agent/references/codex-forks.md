@@ -112,4 +112,3 @@ The launcher creates its own mode-600 combined compaction file; the child shell
 removes it when the child exits. Original caller files are never edited or
 deleted. Keep the rollout/cursor files for your watcher, then remove `step_dir`
 when finished. ROOT compaction and child compaction remain separate operations.
-
