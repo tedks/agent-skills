@@ -148,7 +148,7 @@ trap handle_exit EXIT
 trap 'handle_signal HUP 129' HUP
 trap 'handle_signal INT 130' INT
 trap 'handle_signal TERM 143' TERM
-identity=$("${TMUX_CMD[@]}" display-message -p -t "$window" '#{pid}:#{pane_id}') || { echo 'Error: failed to resolve tmux target' >&2; exit 1; }
+identity=$("$SCRIPT_DIR/tmux-resolve.sh" "$window") || { echo 'Error: failed to resolve tmux target' >&2; exit 1; }
 [[ "$identity" =~ ^[0-9]+:%[0-9]+$ ]] || { echo 'Error: tmux returned an invalid target identity' >&2; exit 1; }
 pane_id=${identity#*:}
 lock_key=$(printf '%s' "$identity" | sha256sum | cut -d' ' -f1)

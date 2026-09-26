@@ -22,7 +22,8 @@ case "$command" in
     read)
         (($# == 1)) || usage
         [[ -n "$1" && "$1" != -* ]] || usage
-        pane=$("${TMUX_CMD[@]}" display-message -p -t "$1" '#{pane_id}')
+        identity=$("$SCRIPT_DIR/tmux-resolve.sh" "$1")
+        pane=${identity#*:}
         [[ "$pane" =~ ^%[0-9]+$ ]] || { echo 'Invalid tmux pane identity.' >&2; exit 2; }
         exec "${TMUX_CMD[@]}" capture-pane -e -p -t "$pane" -S -200;;
     *) usage;;

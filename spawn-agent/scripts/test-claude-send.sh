@@ -86,6 +86,9 @@ record_tmux_exit() {
 trap record_tmux_exit EXIT
 printf '%s\n' "$cmd" >> "$FAKE_STATE/tmux-calls"
 case "$cmd" in
+  list-windows) printf '@7\tworker\n@8\talias\n';;
+  list-panes)
+    if [[ "$*" == *"@8"* ]]; then printf '4242:%%7:1:alias\n'; else printf '4242:%%7:1:worker\n'; fi;;
   display-message)
     if [[ "${*: -1}" == '#{pid}:#{pane_id}' ]]; then printf '4242:%%7\n'
     elif [[ "${*: -1}" == '#{cursor_x}:#{cursor_y}' ]]; then
@@ -282,7 +285,7 @@ for name, content in payloads.items():
 PY
 for invalid in malformed-utf8 carriage-return delete c1-control blank trailing-space; do
   reset_case empty
-  if run_sender target --submit-delay 0 --max-wait 1 --poll-interval 0.1 --prompt-file "$TEST_DIR/$invalid" 2>"$TEST_DIR/$invalid.err"; then
+  if run_sender %7 --submit-delay 0 --max-wait 1 --poll-interval 0.1 --prompt-file "$TEST_DIR/$invalid" 2>"$TEST_DIR/$invalid.err"; then
     echo "FAIL: invalid $invalid payload was accepted" >&2; exit 1
   fi
   [[ ! -s "$FAKE_STATE/tmux-calls" ]]
@@ -293,18 +296,18 @@ done
 # sender attempts to resolve or mutate a pane.
 for option in --submit-delay --render-wait --max-wait --poll-interval; do
   reset_case empty
-  if run_sender target "$option" 999999999999999999999 --prompt-file "$prompt_file" 2>"$TEST_DIR/numeric.err"; then
+  if run_sender %7 "$option" 999999999999999999999 --prompt-file "$prompt_file" 2>"$TEST_DIR/numeric.err"; then
     echo "FAIL: overflowing $option was accepted" >&2; exit 1
   fi
   [[ ! -s "$FAKE_STATE/tmux-calls" ]]
 done
 reset_case empty
-if run_sender target --render-wait 0 --prompt-file "$prompt_file" 2>"$TEST_DIR/zero-render-wait.err"; then
+if run_sender %7 --render-wait 0 --prompt-file "$prompt_file" 2>"$TEST_DIR/zero-render-wait.err"; then
   echo 'FAIL: zero render budget was accepted' >&2; exit 1
 fi
 [[ ! -s "$FAKE_STATE/tmux-calls" ]]
 reset_case empty
-if run_sender target --max-wait 0 --prompt-file "$prompt_file" 2>"$TEST_DIR/zero-max-wait.err"; then
+if run_sender %7 --max-wait 0 --prompt-file "$prompt_file" 2>"$TEST_DIR/zero-max-wait.err"; then
   echo 'FAIL: zero max-wait was accepted' >&2; exit 1
 fi
 [[ ! -s "$FAKE_STATE/tmux-calls" ]]
@@ -447,7 +450,7 @@ PYTEST
 
 # Fresh fork command/menu shape runs through the real sender once.
 reset_case forkcompact
-out=$(run_sender target --submit-delay 0 --render-wait 3 --max-wait 3 '/compact')
+out=$(run_sender %7 --submit-delay 0 --render-wait 3 --max-wait 3 '/compact')
 [[ "$out" == 'status=sent receipt=unverified' ]]
 [[ $(grep -c '^paste-buffer$' "$FAKE_STATE/tmux-calls") -eq 1 ]]
 [[ $(grep -c '^send-keys$' "$FAKE_STATE/tmux-calls") -eq 1 ]]
@@ -457,7 +460,7 @@ out=$(run_sender target --submit-delay 0 --render-wait 3 --max-wait 3 '/compact'
 reset_case busyqueue
 queue_prompt="$TEST_DIR/queue-prompt"
 printf 'Reply with exactly P141-QUEUED-TEST' > "$queue_prompt"
-out=$(run_sender target --submit-delay 0 --max-wait 3 --poll-interval 0.1 --prompt-file "$queue_prompt")
+out=$(run_sender %7 --submit-delay 0 --max-wait 3 --poll-interval 0.1 --prompt-file "$queue_prompt")
 [[ "$out" == 'status=sent receipt=unverified' ]]
 [[ $(grep -c '^paste-start$' "$FAKE_LOG") -eq 1 ]]
 [[ $(grep -c '^enter$' "$FAKE_LOG") -eq 1 ]]
@@ -467,7 +470,7 @@ out=$(run_sender target --submit-delay 0 --max-wait 3 --poll-interval 0.1 --prom
 # The current separate model/context queue footer works end-to-end too.
 reset_case busycontext
 printf 'S short control: reply S-BUSY-1 after the current task.' > "$queue_prompt"
-out=$(run_sender target --submit-delay 0 --render-wait 2 --max-wait 3 --poll-interval 0.1 --prompt-file "$queue_prompt")
+out=$(run_sender %7 --submit-delay 0 --render-wait 2 --max-wait 3 --poll-interval 0.1 --prompt-file "$queue_prompt")
 [[ "$out" == 'status=sent receipt=unverified' ]]
 [[ $(grep -c '^paste-start$' "$FAKE_LOG") -eq 1 ]]
 [[ $(grep -c '^enter$' "$FAKE_LOG") -eq 1 ]]
@@ -475,7 +478,7 @@ cmp "$queue_prompt" "$FAKE_STATE/submitted"
 
 # Once ownership was visible, an unknown frame stops even with a large budget.
 reset_case unknown-after-own
-if run_sender target --submit-delay 8 --render-wait 30 --max-wait 3 --poll-interval 0.1 --prompt-file "$prompt_file" 2>"$TEST_DIR/ownership-loss.err"; then
+if run_sender %7 --submit-delay 8 --render-wait 30 --max-wait 3 --poll-interval 0.1 --prompt-file "$prompt_file" 2>"$TEST_DIR/ownership-loss.err"; then
   echo 'FAIL: unknown frame after ownership was submitted' >&2; exit 1
 else rc=$?; [[ $rc -eq 3 ]]; fi
 grep -q 'reason=post-paste-unknown' "$TEST_DIR/ownership-loss.err"
@@ -485,7 +488,7 @@ rm -rf "$(dirname "$pending")"
 
 # Reporting can fail after Enter: retain as ambiguous, never safe-to-retry deferred.
 reset_case empty
-if run_sender target --submit-delay 0 --max-wait 3 --poll-interval 0.1 --prompt-file "$prompt_file" >/dev/full 2>"$TEST_DIR/report-failure.err"; then
+if run_sender %7 --submit-delay 0 --max-wait 3 --poll-interval 0.1 --prompt-file "$prompt_file" >/dev/full 2>"$TEST_DIR/report-failure.err"; then
   echo 'FAIL: failed success reporting returned success' >&2; exit 1
 else rc=$?; [[ $rc -eq 1 ]]; fi
 pending=$(assert_pending ambiguous "$TEST_DIR/report-failure.err")
@@ -497,7 +500,7 @@ rm -rf "$(dirname "$pending")"
 # The stable-empty pair and pre-paste recheck must finish before max-wait.
 # Simulate a second capture that itself returns only after the deadline.
 reset_case slow-second-empty
-if run_sender target --submit-delay 0 --max-wait 1 --poll-interval 0.1 --prompt-file "$prompt_file" 2>"$TEST_DIR/slow-capture.err"; then
+if run_sender %7 --submit-delay 0 --max-wait 1 --poll-interval 0.1 --prompt-file "$prompt_file" 2>"$TEST_DIR/slow-capture.err"; then
   echo 'FAIL: late empty observation was delivered after max-wait' >&2; exit 1
 else rc=$?; [[ $rc -eq 2 ]]; fi
 pending=$(assert_pending deferred "$TEST_DIR/slow-capture.err")
@@ -507,7 +510,7 @@ rm -rf "$(dirname "$pending")"
 
 # The immediate pre-paste recheck is the third capture and must share max-wait.
 reset_case slow-third-empty
-if run_sender target --submit-delay 0 --max-wait 1 --poll-interval 0.1 --prompt-file "$prompt_file" 2>"$TEST_DIR/slow-third.err"; then
+if run_sender %7 --submit-delay 0 --max-wait 1 --poll-interval 0.1 --prompt-file "$prompt_file" 2>"$TEST_DIR/slow-third.err"; then
   echo 'FAIL: slow third empty observation was delivered after max-wait' >&2; exit 1
 else rc=$?; [[ $rc -eq 2 ]]; fi
 pending=$(assert_pending deferred "$TEST_DIR/slow-third.err")
@@ -517,7 +520,7 @@ rm -rf "$(dirname "$pending")"
 
 # A signal while waiting before any paste must still retain the outgoing payload.
 reset_case interrupt-before-paste
-if FAKE_INTERRUPT_BEFORE_PASTE=1 run_sender target --submit-delay 0 --max-wait 3 --poll-interval 0.1 --prompt-file "$prompt_file" 2>"$TEST_DIR/pre-paste-signal.err"; then
+if FAKE_INTERRUPT_BEFORE_PASTE=1 run_sender %7 --submit-delay 0 --max-wait 3 --poll-interval 0.1 --prompt-file "$prompt_file" 2>"$TEST_DIR/pre-paste-signal.err"; then
   echo 'FAIL: pre-paste interruption returned success' >&2; exit 1
 else rc=$?; [[ $rc -eq 143 ]]; fi
 pending=$(assert_pending deferred "$TEST_DIR/pre-paste-signal.err")
@@ -528,7 +531,7 @@ rm -rf "$(dirname "$pending")"
 
 # A clock subprocess failure after snapshot creation but before paste keeps a private deferred copy.
 reset_case empty
-if FAKE_FAIL_CLOCK_BEFORE_PASTE=1 run_sender target --submit-delay 0 --max-wait 3 --poll-interval 0.1 --prompt-file "$prompt_file" 2>"$TEST_DIR/clock-failure.err"; then
+if FAKE_FAIL_CLOCK_BEFORE_PASTE=1 run_sender %7 --submit-delay 0 --max-wait 3 --poll-interval 0.1 --prompt-file "$prompt_file" 2>"$TEST_DIR/clock-failure.err"; then
   echo 'FAIL: injected pre-paste clock failure returned success' >&2; exit 1
 else rc=$?; [[ $rc -eq 1 ]]; fi
 pending=$(assert_pending deferred "$TEST_DIR/clock-failure.err")
@@ -539,14 +542,14 @@ rm -rf "$(dirname "$pending")"
 
 # Empty composer plus unrelated generation output still accepts queued input.
 reset_case streaming
-out=$(run_sender target --submit-delay 0 --max-wait 3 --poll-interval 0.1 --prompt-file "$prompt_file")
+out=$(run_sender %7 --submit-delay 0 --max-wait 3 --poll-interval 0.1 --prompt-file "$prompt_file")
 [[ "$out" == 'status=sent receipt=unverified' ]]
 [[ $(grep -c '^enter$' "$FAKE_LOG") -eq 1 ]]
 [[ $(grep -c '^paste-start$' "$FAKE_LOG") -eq 1 ]]
 
 # A single stale empty frame after paste is tolerated until the paste renders exactly.
 reset_case render-stale-empty
-out=$(run_sender target --submit-delay 0 --max-wait 3 --poll-interval 0.1 --prompt-file "$prompt_file")
+out=$(run_sender %7 --submit-delay 0 --max-wait 3 --poll-interval 0.1 --prompt-file "$prompt_file")
 [[ "$out" == 'status=sent receipt=unverified' ]]
 [[ $(grep -c '^paste-start$' "$FAKE_LOG") -eq 1 ]]
 [[ $(grep -c '^enter$' "$FAKE_LOG") -eq 1 ]]
@@ -554,13 +557,13 @@ out=$(run_sender target --submit-delay 0 --max-wait 3 --poll-interval 0.1 --prom
 # Initial unknown repaint may settle, but a known mixed composer stops.
 for mode in render-unknown render-late-unknown slow-first-own; do
   reset_case "$mode"
-  out=$(run_sender target --render-wait 2 --submit-delay 0 --max-wait 3 --poll-interval 0.1 --prompt-file "$prompt_file")
+  out=$(run_sender %7 --render-wait 2 --submit-delay 0 --max-wait 3 --poll-interval 0.1 --prompt-file "$prompt_file")
   [[ "$out" == 'status=sent receipt=unverified' ]]
   [[ $(grep -c '^enter$' "$FAKE_LOG") -eq 1 ]]
 done
 for mode in render-late-unknown render-unknown-human slow-first-own; do
   reset_case "$mode"
-  if run_sender target --render-wait 1 --submit-delay 0 --max-wait 3 --poll-interval 0.1 --prompt-file "$prompt_file" 2>"$TEST_DIR/render-limit.err"; then
+  if run_sender %7 --render-wait 1 --submit-delay 0 --max-wait 3 --poll-interval 0.1 --prompt-file "$prompt_file" 2>"$TEST_DIR/render-limit.err"; then
     echo 'FAIL: timeout or mixed render was submitted' >&2; exit 1
   else rc=$?; [[ $rc -eq 3 ]]; fi
   pending=$(assert_pending ambiguous "$TEST_DIR/render-limit.err")
@@ -570,7 +573,7 @@ done
 
 # Persistently stale empty rendering times out ambiguously; it never presses Enter.
 reset_case persistent-empty-after-paste
-if run_sender target --submit-delay 0 --max-wait 3 --poll-interval 0.1 --prompt-file "$prompt_file" 2>"$TEST_DIR/persistent-empty.err"; then
+if run_sender %7 --submit-delay 0 --max-wait 3 --poll-interval 0.1 --prompt-file "$prompt_file" 2>"$TEST_DIR/persistent-empty.err"; then
   echo 'FAIL: persistent stale empty rendering was submitted' >&2; exit 1
 else rc=$?; [[ $rc -eq 3 ]]; fi
 pending=$(assert_pending ambiguous "$TEST_DIR/persistent-empty.err")
@@ -581,7 +584,7 @@ rm -rf "$(dirname "$pending")"
 
 # A persistent unknown render frame exhausts its budget without Enter.
 reset_case unknown-after-paste
-if run_sender target --submit-delay 0 --max-wait 3 --poll-interval 0.1 --prompt-file "$prompt_file" 2>"$TEST_DIR/unknown-after-paste.err"; then
+if run_sender %7 --submit-delay 0 --max-wait 3 --poll-interval 0.1 --prompt-file "$prompt_file" 2>"$TEST_DIR/unknown-after-paste.err"; then
   echo 'FAIL: unknown post-paste frame was submitted' >&2; exit 1
 else rc=$?; [[ $rc -eq 3 ]]; fi
 pending=$(assert_pending ambiguous "$TEST_DIR/unknown-after-paste.err")
@@ -592,7 +595,7 @@ rm -rf "$(dirname "$pending")"
 # Existing human text, slash commands, and modal screens time out without paste/Enter.
 for mode in human slash modal; do
   reset_case "$mode"
-  if run_sender target --submit-delay 0 --max-wait 1 --poll-interval 0.1 --prompt-file "$prompt_file" 2>"$TEST_DIR/$mode.err"; then
+  if run_sender %7 --submit-delay 0 --max-wait 1 --poll-interval 0.1 --prompt-file "$prompt_file" 2>"$TEST_DIR/$mode.err"; then
     echo "FAIL: $mode composer was sent" >&2; exit 1
   else rc=$?; [[ $rc -eq 2 ]]; fi
   pending=$(assert_pending deferred "$TEST_DIR/$mode.err")
@@ -604,7 +607,7 @@ done
 
 # A new human draft between stable-empty observations and paste defers safely.
 reset_case human-before-paste
-if run_sender target --submit-delay 0 --max-wait 3 --poll-interval 0.1 --prompt-file "$prompt_file" 2>"$TEST_DIR/before-paste.err"; then
+if run_sender %7 --submit-delay 0 --max-wait 3 --poll-interval 0.1 --prompt-file "$prompt_file" 2>"$TEST_DIR/before-paste.err"; then
   echo 'FAIL: pre-paste human draft was sent' >&2; exit 1
 else rc=$?; [[ $rc -eq 2 ]]; fi
 pending=$(assert_pending deferred "$TEST_DIR/before-paste.err")
@@ -614,7 +617,7 @@ rm -rf "$(dirname "$pending")"
 
 # If human input appears after our paste, do not Enter, erase, or paste again.
 reset_case human-during-delay
-if run_sender target --submit-delay 1 --max-wait 3 --poll-interval 0.1 --prompt-file "$prompt_file" 2>"$TEST_DIR/midflight.err"; then
+if run_sender %7 --submit-delay 1 --max-wait 3 --poll-interval 0.1 --prompt-file "$prompt_file" 2>"$TEST_DIR/midflight.err"; then
   echo 'FAIL: changed composer was submitted' >&2; exit 1
 else rc=$?; [[ $rc -eq 3 ]]; fi
 pending=$(assert_pending ambiguous "$TEST_DIR/midflight.err")
@@ -622,7 +625,7 @@ pending=$(assert_pending ambiguous "$TEST_DIR/midflight.err")
 [[ $(grep -c '^enter$' "$FAKE_LOG" || true) -eq 0 ]]
 [[ $(<"$FAKE_STATE/composer") == 'a human began typing' ]]
 # A second attempt while the ambiguous composer is occupied must defer, never duplicate.
-if run_sender target --submit-delay 0 --max-wait 1 --poll-interval 0.1 --prompt-file "$pending" 2>"$TEST_DIR/retry-occupied.err"; then
+if run_sender %7 --submit-delay 0 --max-wait 1 --poll-interval 0.1 --prompt-file "$pending" 2>"$TEST_DIR/retry-occupied.err"; then
   echo 'FAIL: retry was pasted over occupied composer' >&2; exit 1
 else rc=$?; [[ $rc -eq 2 ]]; fi
 [[ $(grep -c '^paste-start$' "$FAKE_LOG") -eq 1 ]]
@@ -631,7 +634,7 @@ else rc=$?; [[ $rc -eq 2 ]]; fi
 rm -f "$FAKE_STATE/pasted"
 : > "$FAKE_STATE/composer"
 printf empty > "$FAKE_STATE/mode"
-out=$(run_sender target --submit-delay 0 --max-wait 3 --poll-interval 0.1 --prompt-file "$pending")
+out=$(run_sender %7 --submit-delay 0 --max-wait 3 --poll-interval 0.1 --prompt-file "$pending")
 [[ "$out" == 'status=sent receipt=unverified' ]]
 [[ $(grep -c '^enter$' "$FAKE_LOG") -eq 1 ]]
 rm -rf "$(dirname "$pending")"
@@ -639,12 +642,12 @@ rm -rf "$(dirname "$pending")"
 # If the sender stops after paste, its pending message must not be pasted over
 # the same exact visible payload on a deliberate retry.
 reset_case empty
-if FAKE_INTERRUPT_AFTER_PASTE=1 run_sender target --submit-delay 0 --max-wait 3 --poll-interval 0.1 --prompt-file "$prompt_file" 2>"$TEST_DIR/interrupted.err"; then
+if FAKE_INTERRUPT_AFTER_PASTE=1 run_sender %7 --submit-delay 0 --max-wait 3 --poll-interval 0.1 --prompt-file "$prompt_file" 2>"$TEST_DIR/interrupted.err"; then
   echo 'FAIL: injected post-paste interruption returned success' >&2; exit 1
 else rc=$?; [[ $rc -ne 0 ]]; fi
 pending=$(assert_pending ambiguous "$TEST_DIR/interrupted.err")
 [[ $(<"$FAKE_STATE/composer") == $'alpha\nbeta' ]]
-if run_sender target --submit-delay 0 --max-wait 1 --poll-interval 0.1 --prompt-file "$pending" 2>"$TEST_DIR/retry-own.err"; then
+if run_sender %7 --submit-delay 0 --max-wait 1 --poll-interval 0.1 --prompt-file "$pending" 2>"$TEST_DIR/retry-own.err"; then
   echo 'FAIL: exact visible payload was submitted twice' >&2; exit 1
 else rc=$?; [[ $rc -eq 2 ]]; fi
 [[ $(grep -c '^paste-start$' "$FAKE_LOG") -eq 1 ]]
@@ -653,7 +656,7 @@ rm -rf "$(dirname "$pending")"
 
 # A parser subprocess failure after paste becomes unknown and keeps the payload.
 reset_case empty
-if FAKE_FAIL_PARSER_AFTER_PASTE=1 run_sender target --submit-delay 0 --max-wait 3 --poll-interval 0.1 --prompt-file "$prompt_file" 2>"$TEST_DIR/parser-failure.err"; then
+if FAKE_FAIL_PARSER_AFTER_PASTE=1 run_sender %7 --submit-delay 0 --max-wait 3 --poll-interval 0.1 --prompt-file "$prompt_file" 2>"$TEST_DIR/parser-failure.err"; then
   echo 'FAIL: parser failure after paste was treated as success' >&2; exit 1
 else rc=$?; [[ $rc -eq 3 ]]; fi
 pending=$(assert_pending ambiguous "$TEST_DIR/parser-failure.err")
@@ -664,7 +667,7 @@ rm -rf "$(dirname "$pending")"
 
 # Paste failure retains payload and never submits; the named buffer is cleaned.
 reset_case empty
-if FAKE_FAIL_PASTE=1 run_sender target --submit-delay 0 --max-wait 3 --poll-interval 0.1 --prompt-file "$prompt_file" 2>"$TEST_DIR/paste.err"; then
+if FAKE_FAIL_PASTE=1 run_sender %7 --submit-delay 0 --max-wait 3 --poll-interval 0.1 --prompt-file "$prompt_file" 2>"$TEST_DIR/paste.err"; then
   echo 'FAIL: paste failure reported success' >&2; exit 1
 else rc=$?; [[ $rc -eq 3 ]]; fi
 pending=$(assert_pending ambiguous "$TEST_DIR/paste.err")
@@ -674,7 +677,7 @@ rm -rf "$(dirname "$pending")"
 
 # The default submit delay remains eight seconds, measured from paste to Enter.
 reset_case empty
-if out=$(FAKE_REAL_SLEEP=1 run_sender target --max-wait 3 --poll-interval 0.1 --prompt-file "$prompt_file"); then
+if out=$(FAKE_REAL_SLEEP=1 run_sender %7 --max-wait 3 --poll-interval 0.1 --prompt-file "$prompt_file"); then
   [[ "$out" == 'status=sent receipt=unverified' ]]
 else
   echo 'FAIL: successful prompt-file delivery returned nonzero' >&2
@@ -691,7 +694,7 @@ PY
 
 # A target-lock timeout is a deferred, privately retained delivery.
 reset_case empty
-if FAKE_FAIL_FLOCK=1 run_sender target --submit-delay 0 --max-wait 3 --poll-interval 0.1 --prompt-file "$prompt_file" 2>"$TEST_DIR/lock.err"; then
+if FAKE_FAIL_FLOCK=1 run_sender %7 --submit-delay 0 --max-wait 3 --poll-interval 0.1 --prompt-file "$prompt_file" 2>"$TEST_DIR/lock.err"; then
   echo 'FAIL: failed target lock was ignored' >&2; exit 1
 else rc=$?; [[ $rc -eq 2 ]]; fi
 pending=$(assert_pending deferred "$TEST_DIR/lock.err")
@@ -701,8 +704,8 @@ rm -rf "$(dirname "$pending")"
 
 # Aliases resolving to the same pane serialize the full paste/delay/submit sequence.
 reset_case empty
-run_sender alias-one --submit-delay 0 --max-wait 3 --poll-interval 0.1 --prompt-file "$prompt_file" & one=$!
-run_sender_without_xdg_runtime alias-two --submit-delay 0 --max-wait 3 --poll-interval 0.1 --prompt-file "$prompt_file" & two=$!
+run_sender %7 --submit-delay 0 --max-wait 3 --poll-interval 0.1 --prompt-file "$prompt_file" & one=$!
+run_sender_without_xdg_runtime test:worker --submit-delay 0 --max-wait 3 --poll-interval 0.1 --prompt-file "$prompt_file" & two=$!
 wait "$one"; wait "$two"
 python3 - "$FAKE_LOG" <<'PY'
 from pathlib import Path

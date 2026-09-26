@@ -11,7 +11,8 @@ cat > "$TEST_DIR/fake bin/tmux" <<'STUB'
 #!/usr/bin/env bash
 printf '%s\n' "$@" > "$TMUX_TEST_ARGS"
 case " $* " in
-    *' display-message '*) printf '%%88\n';;
+    *' list-windows '*) printf '@7\twindow\n';;
+    *' list-panes '*) printf '4242:%%88:1:window\n';;
     *' capture-pane '*) printf 'controlled pane history\n';;
     *) exit 99;;
 esac

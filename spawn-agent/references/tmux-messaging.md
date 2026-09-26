@@ -1,5 +1,12 @@
 # Tmux transport details
 
+Targets are exact `SESSION:WINDOW` names, stable `%PANE_ID`, or stable
+`@WINDOW_ID` (its active pane). Prefixes, globs, bare names and implicit
+window-index selectors are rejected. Named windows must be unique in the named
+session. Resolution uses `list-windows`/`list-panes`, never `display-message`,
+which may fall back to the active pane when a target is missing. Operations pin
+the resolved pane ID; deletion afterward causes failure rather than retargeting.
+
 Read this for timing overrides, deferred/ambiguous recovery, or a UI blocker.
 `tmux-message send` calls the compatibility backend `claude-send.sh`; callers
 use the shared interface.
