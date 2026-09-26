@@ -3,9 +3,11 @@
 from pathlib import Path
 import importlib.util
 import tempfile
+import sys
 import unittest
 from unittest.mock import patch
 
+sys.dont_write_bytecode = True
 spec = importlib.util.spec_from_file_location("fork_task", Path(__file__).with_name("codex-fork-task.py"))
 helper = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(helper)
