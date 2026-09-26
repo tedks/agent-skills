@@ -352,8 +352,8 @@ Claude-specific spawner with additional options:
 
 ### claude-send.sh
 
-**Interim protocol, directed by Ted:** the `agent-message.py` pilot is paused
-because its transcript-discovery prerequisites block live sessions. Use the
+**Interim protocol, directed by Ted:** the transcript-dependent prototype was withdrawn
+after its prerequisites blocked live sessions. Use the
 installed `claude-send.sh` with `--submit-delay 8 --render-wait 3 --max-wait 10`,
 send actual message text by default, and read tmux for a NEW submitted user
 message or explicit pending-steer receipt. Busy output does not require an idle
@@ -367,34 +367,20 @@ an ambiguous attempt, or replay archived pending files. Report concrete blocked
 panes rather than polling indefinitely. Keep reusable fixes here, without a
 per-session sender fork. See [the current protocol](../../../docs/tmux-messaging.md).
 
-The following coordinator interface is an unfinished candidate, not the
-operational fallback:
+The shared, agent-agnostic interface is `tmux-message.sh`:
 
 ```bash
-~/.claude/skills/spawn-agent/scripts/agent-message.py send SESSION:WINDOW \
-  --harness codex --report-file /absolute/path/to/report.md
-~/.claude/skills/spawn-agent/scripts/agent-message.py status /private/attempt/attempt.json
-~/.claude/skills/spawn-agent/scripts/agent-message.py continue /private/attempt/attempt.json
+~/.claude/skills/spawn-agent/scripts/tmux-message.sh send SESSION:WINDOW \
+  --submit-delay 8 --render-wait 3 --max-wait 10 'MSG-unique Actual message text.'
+~/.claude/skills/spawn-agent/scripts/tmux-message.sh read SESSION:WINDOW
 ```
 
-Claude uses `--harness claude`. The coordinator prefixes a fresh message UUID,
-preflights one printable-ASCII line against pane width, binds its exact bytes to
-the receiver process and a new-record receipt baseline, and permits at most one
-Enter-only continuation through this sender. `--no-continuation` stops after
-the initial transport attempt. Fresh exact application user-message records or
-the measured Codex pending-steer widget prove receipt; output/quoted history,
-vanished composer text and tmux success do not. The result is JSON: receipt exit
-0, deferred exit 2, ambiguous exit 3, plus a private attempt path. It does not
-wait for execution/completion, use native queue commands, clear input or repaste
-on continuation. Keep unresolved attempts; do not replay old legacy pending
-files or Ted's manual submissions. Current adapters need an established live
-transcript; unsupported identity/surfaces defer. See
-[the caller contract](../../../docs/tmux-messaging.md) for conditions and limits.
-
-The transport's `--submit-pending` mode requires `--attempt-file` and exact
-current ownership throughout its independent submit delay. Those flags are
-internal to the coordinator; callers must not invent receipt baselines. Ted's
-explicit manual-relay authorization above governs the interim fallback.
+`send` forwards text and options unchanged to the shared guarded sender. `read`
+resolves a stable pane ID and shows its last 200 history rows plus visible pane.
+It does not require an agent name, transcript, registry or daemon. Transport
+success remains unverified until the caller inspects a new receipt. No model
+completion or native messaging command is involved. The installed `.bin`
+alias is `tmux-message`; use the source path during approved source-only trials.
 
 Send a message to a running Claude instance:
 ```bash

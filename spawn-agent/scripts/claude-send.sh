@@ -27,15 +27,8 @@ submit_delay=8
 render_wait=1
 max_wait=30
 poll_interval=0.5
-submit_pending=0
-attempt_file=''
 while (($#)); do
     case "$1" in
-        --submit-pending)
-            submit_pending=1; shift;;
-        --attempt-file)
-            (($# >= 2)) || { echo 'Error: --attempt-file requires a path' >&2; exit 1; }
-            attempt_file=$2; shift 2;;
         --submit-delay|--render-wait|--max-wait|--poll-interval)
             (($# >= 2)) || { echo "Error: $1 requires a value" >&2; exit 1; }
             option=$1; value=$2; shift 2
@@ -64,10 +57,6 @@ while (($#)); do
         *) break;;
     esac
 done
-if ((submit_pending)) && [[ -z "$attempt_file" ]]; then
-    echo 'Error: --submit-pending requires a durable --attempt-file receipt baseline' >&2
-    exit 1
-fi
 if (($# < 1)); then echo 'Error: message or --prompt-file is required' >&2; exit 1; fi
 
 prompt_file=''
@@ -178,26 +167,6 @@ if ! flock -w 90 "$lock_fd"; then
     preserve_pending deferred target-lock-timeout
     exit 2
 fi
-# The transaction coordinator owns the immutable attempt and fresh receipt
-# baseline. This check is fixed to our read-only helper, never caller shell code.
-# It revalidates process incarnation and exact bytes under the same pane lock.
-attempt_guard() {
-    [[ -n "$attempt_file" ]] || return 0
-    local receipt status=deferred
-    ((paste_started || submit_pending)) && status=ambiguous
-    if ! receipt=$(python3 "$SCRIPT_DIR/agent-message.py" guard "$attempt_file" "$identity" "$prompt_file"); then
-        preserve_pending "$status" attempt-evidence-unknown
-        if [[ "$status" == ambiguous ]]; then exit 3; else exit 2; fi
-    fi
-    case "$receipt" in
-        received|pending-steer)
-            printf 'status=received receipt=%s\n' "$receipt"
-            exit 0;;
-        missing) return 0;;
-        *) preserve_pending "$status" invalid-attempt-evidence; exit 3;;
-    esac
-}
-attempt_guard
 screen_state() {
     local screen screen_raw cursor cursor_x cursor_y last_nonempty
     screen_raw=$("${TMUX_CMD[@]}" capture-pane -e -p -t "$pane_id" 2>/dev/null) || return 1
@@ -219,19 +188,11 @@ screen_state() {
     printf '%s' "$screen_raw" | python3 "$SCRIPT_DIR/claude-send-screen.py" "$prompt_file" "$cursor_x" "$cursor_y"
 }
 
-if ((submit_pending)); then
-    # Never paste in continuation mode. Render grace applies only to a NEW
-    # paste; an existing composer must already be provably exactly ours.
-    paste_started=1
-    state=$(screen_state 2>/dev/null || printf unknown)
-    [[ "$state" == own ]] || { preserve_pending ambiguous "pending-$state"; exit 3; }
-else
 # A bounded deadline avoids granting extra time after slow capture calls.
 wait_start_ns=$(python3 -c 'import time; print(time.monotonic_ns())')
 delay=$poll_interval
 empty_seen=0
 while :; do
-    attempt_guard
     state=$(screen_state 2>/dev/null || printf unknown)
     stable_empty=0
     if [[ "$state" == empty ]]; then
@@ -249,7 +210,6 @@ while :; do
 done
 
 # Recheck under the alias-shared lock immediately before paste.
-attempt_guard
 state=$(screen_state 2>/dev/null || printf unknown)
 elapsed=$(python3 -c 'import time,sys; print((time.monotonic_ns()-int(sys.argv[1]))/1e9)' "$wait_start_ns")
 remaining=$(awk -v d="$max_wait" -v e="$elapsed" 'BEGIN { printf "%.3f",d-e }')
@@ -264,7 +224,6 @@ if ! "${TMUX_CMD[@]}" paste-buffer -p -r -d -t "$pane_id" -b "$buf_name"; then
     exit 3
 fi
 buffer_loaded=0
-fi
 
 # Require exact visible ownership throughout the delay and again immediately
 # before Enter. A changed/unreadable frame is ambiguous; never clear, repaste,
@@ -275,9 +234,8 @@ start_ns=$(python3 -c 'import time; print(time.monotonic_ns())')
 # authorizes Enter; a known mismatch or modal stops immediately. Once ownership
 # is observed, every later transition must remain exact.
 render_grace_ns=$((render_wait * 1000000000))
-own_seen=$submit_pending
+own_seen=0
 while ((own_seen == 0)); do
-    attempt_guard
     state=$(screen_state 2>/dev/null || printf unknown)
     if [[ "$state" == own ]]; then
         elapsed_ns=$(python3 -c 'import time,sys; print(time.monotonic_ns()-int(sys.argv[1]))' "$start_ns")
@@ -296,7 +254,6 @@ while ((own_seen == 0)); do
     sleep "$sleep_for"
 done
 while :; do
-    attempt_guard
     state=$(screen_state 2>/dev/null || printf unknown)
     [[ "$state" == own ]] || { preserve_pending ambiguous "post-paste-$state"; exit 3; }
     elapsed=$(python3 -c 'import time,sys; print((time.monotonic_ns()-int(sys.argv[1]))/1e9)' "$start_ns")
@@ -305,12 +262,8 @@ while :; do
     sleep_for=$(awk -v d="$poll_interval" -v r="$remaining" 'BEGIN { if (d>r) d=r; printf "%.3f",d }')
     sleep "$sleep_for"
 done
-attempt_guard
 state=$(screen_state 2>/dev/null || printf unknown)
 [[ "$state" == own ]] || { preserve_pending ambiguous "pre-submit-$state"; exit 3; }
-# The final receipt/identity check follows composer inspection as well. Neither
-# screen polling nor this lock can exclude concurrent physical keyboard input.
-attempt_guard
 "${TMUX_CMD[@]}" send-keys -t "$pane_id" Enter
 # A paste attempt remains irreversible even if reporting fails after Enter.
 # Only a normal exit suppresses retention; never classify this phase deferred.
