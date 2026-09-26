@@ -1,6 +1,10 @@
 #!/usr/bin/env python3
 """Behavior tests with a virtual clock and a simulated terminal, no model calls."""
 import importlib.util
+import io
+import json
+from contextlib import redirect_stderr, redirect_stdout, nullcontext
+from unittest.mock import patch
 import shutil
 import subprocess
 import tempfile
@@ -229,6 +233,26 @@ class DeliveryTests(unittest.TestCase):
             with self.assertRaisesRegex(m.DeliveryError, 'unsupported-typed-command'):
                 deliver(t, typed_command=True)
             self.assertEqual(t.actions, [])
+
+    def test_typed_command_rejects_unrenderable_tail_and_length(self):
+        for command in ('/model x ', '/model x;', '/model ' + 'x' * 194):
+            t = Terminal(payload=command)
+            with self.assertRaisesRegex(m.DeliveryError, 'unsupported-typed-command'):
+                deliver(t, typed_command=True)
+            self.assertEqual(t.actions, [])
+
+    def test_typed_validation_failure_reports_no_input(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            pending = Path(tmp) / 'pending'
+            pending.mkdir()
+            err = io.StringIO()
+            with patch.object(m, 'options', return_value=m.options(['%1', '--typed-command', '/x '])), patch.object(m, 'Tmux', return_value=SimpleNamespace(identity='0:%1', pane='%1')), patch.object(m, 'pane_lock', return_value=nullcontext()), patch.object(m.Sender, 'deliver', return_value={'status': 'delivered'}), redirect_stdout(io.StringIO()), patch.object(m.tempfile, 'mkdtemp', return_value=str(pending)), redirect_stderr(err):
+                self.assertEqual(m.main(), 2)
+            result = json.loads(err.getvalue())
+            self.assertEqual(result['input_method'], 'typed')
+            self.assertFalse(result['input_attempted'])
+            self.assertFalse(result['paste_attempted'])
+            self.assertEqual(result['status'], 'deferred')
 
     def test_typed_command_preserves_draft_and_modal(self):
         for modal in (False, True):
@@ -490,6 +514,8 @@ def typed_mutations():
     root = Path(__file__).parent
     original = (root / 'tmux-message.py').read_text()
     cases = [
+        ('typed_length_tail', 'if self.typed and (len(payload.encode("utf-8")) > 200 or payload.endswith((" ", ";"))):', 'if False:'),
+        ('typed_failure_method', '"typed" if o.typed_command else "paste"', '"typed" if sender and sender.typed else "paste"'),
         ('typed_dispatch', 'self.tmux.type_command(self.payload)', 'self.tmux.paste(self.path)'),
         ('typed_scope', 'if self.typed and not re.fullmatch(r"/[A-Za-z][A-Za-z0-9_-]*(?: [^\\r\\n\\x00-\\x1f\\x7f]*)?", payload):', 'if False:'),
         ('literal', 'self.pane, "-l", "--", text', 'self.pane, "--", text'),
@@ -508,7 +534,7 @@ def typed_mutations():
             (target / 'tmux-message.py').write_text(code)
             result = subprocess.run([sys.executable, str(target / 'test-tmux-message.py')],
                                     capture_output=True, text=True, timeout=30)
-            assert result.returncode != 0 and 'FAIL:' in result.stderr, (name, result.stderr)
+            assert result.returncode != 0 and 'FAIL:' in result.stderr and 'ERROR:' not in result.stderr, (name, result.stderr)
             print('killed:', name)
 
 

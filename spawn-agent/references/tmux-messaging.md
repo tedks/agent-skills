@@ -68,7 +68,9 @@ literal characters with `tmux send-keys -l` rather than bracketed paste. The
 same lock, empty-composer checks, input verification, settling delay, and NEW
 receipt requirements apply. A command has an ASCII letter name (letters, digits, `_`
 and `-`), optionally followed by a space and arguments. Controls, newlines,
-leading whitespace and ordinary prose are rejected. Ordinary messages retain
+leading whitespace, trailing spaces or semicolons, commands over 200 UTF-8 bytes,
+and ordinary prose are rejected. These limits avoid tmux argument loss and
+ambiguous wrapped or trimmed composer evidence. Ordinary messages retain
 bracketed paste. Typed
 input requires exact visible command text; a collapsed paste marker cannot
 authorize its Enter. Failure JSON distinguishes `input_attempted` from
@@ -78,8 +80,10 @@ never be blindly replayed.
 Payloads are nonblank UTF-8 with no control characters except newlines. Message
 bytes, including trailing whitespace/newlines, are preserved in the paste.
 
-Exit 0 emits delivered JSON. Exit 2 means deferred before paste. Exit 3 means
-ambiguous after a paste attempt. Signals retain conventional 128+signal exit
+Exit 0 emits delivered JSON on stdout. Failures emit JSON on stderr. Exit 2
+means deferred before input. Exit 3 means ambiguous after an input attempt.
+Use `input_attempted` to determine whether any input may have occurred;
+`paste_attempted` applies only to bracketed paste, not literal typing. Signals retain conventional 128+signal exit
 codes. Unsuccessful attempts retain the outgoing message in a private temporary
 directory (700) with a private file (600). Remove that file/directory after
 resolving it. No human draft or pane contents are logged automatically.
