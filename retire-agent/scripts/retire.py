@@ -4,17 +4,27 @@ import argparse
 from contextlib import contextmanager
 import datetime
 import fcntl
+import hashlib
+import importlib.util
 import json
 import os
 from pathlib import Path
 import re
+import stat
 import subprocess
 import sys
+import tempfile
 import time
 import uuid
 
+sys.dont_write_bytecode = True  # Loading the shared API must not modify its installation.
+
 
 class Stop(Exception):
+    pass
+
+
+class PaneAbsent(Stop):
     pass
 
 
@@ -38,27 +48,91 @@ def run(args, **kwargs):
                           timeout=45, **kwargs)
 
 
-def checked(args):
+def checked(args, strip=True):
     result = run(args)
     if result.returncode:
         raise Stop('command failed: ' + str(args[0]))
-    return result.stdout.strip()
+    return result.stdout.strip() if strip else result.stdout
 
 
 def save(path, value):
-    temp = path.with_suffix('.tmp')
-    temp.write_text(json.dumps(value, indent=2) + '\n')
-    temp.chmod(0o600)
-    temp.replace(path)
+    atomic_bytes(path, (json.dumps(value, indent=2) + '\n').encode())
+
+
+def atomic_bytes(path, content):
+    descriptor, name = tempfile.mkstemp(prefix='.' + path.name + '-', suffix='.tmp', dir=path.parent)
+    temp = Path(name)
+    try:
+        with os.fdopen(descriptor, 'wb') as output:
+            output.write(content)
+            output.flush()
+            os.fsync(output.fileno())
+        temp.replace(path)
+    finally:
+        temp.unlink(missing_ok=True)  # Only this call's exclusively created temporary.
+
+
+def object_record(text, label):
+    try:
+        record = json.loads(text)
+    except ValueError as error:
+        raise Stop('malformed ' + label + '; preserve for reconciliation') from error
+    if not isinstance(record, dict):
+        raise Stop('malformed ' + label + '; expected JSON object')
+    return record
+
+
+def state_record(text):
+    record = object_record(text, 'retirement state')
+    for key in ('id', 'pane', 'mode', 'status'):
+        if not isinstance(record.get(key), str):
+            raise Stop('malformed retirement state field: ' + key)
+    if not isinstance(record.get('socket'), str) or not Path(record['socket']).is_absolute():
+        raise Stop('malformed retirement socket identity')
+    identity = record.get('identity')
+    if not isinstance(identity, dict) or any(not isinstance(identity.get(key), str) for key in ('pane_pid', 'session', 'directory')):
+        raise Stop('malformed retirement identity')
+    process = identity.get('process')
+    if not isinstance(process, dict) or not isinstance(process.get('cores', []), list):
+        raise Stop('malformed retirement process identity')
+    for actor in [process, *process.get('cores', [])]:
+        if (not isinstance(actor, dict) or type(actor.get('pid')) is not int or actor['pid'] <= 0
+                or any(not isinstance(actor.get(key), str) for key in ('start', 'boot', 'agent'))):
+            raise Stop('malformed retirement process identity')
+    for key in ('offer', 'exit', 'spawn'):
+        if key in record and (not isinstance(record[key], dict) or not isinstance(record[key].get('status'), str)):
+            raise Stop('malformed retirement attempt: ' + key)
+    for key in ('shard', 'handoff_receipt', 'shard_hash'):
+        if key in record and not isinstance(record[key], str):
+            raise Stop('malformed retirement evidence: ' + key)
+    return record
+
+
+def receipt_record(text):
+    record = object_record(text, 'retirement receipt')
+    for key in ('event', 'status'):
+        if not isinstance(record.get(key), str):
+            raise Stop('malformed retirement receipt field: ' + key)
+    for key in ('shard', 'commit', 'author', 'verified_at'):
+        if key in record and not isinstance(record[key], str):
+            raise Stop('malformed retirement receipt field: ' + key)
+    return record
 
 
 def proc(pid):
     try:
         text = Path(f'/proc/{pid}/stat').read_text().rsplit(')', 1)[1].split()
+        if text[0] == 'Z':
+            return None  # An unreaped process has ended and cannot accept work.
         argv = Path(f'/proc/{pid}/cmdline').read_bytes().split(b'\0')
         agent = Path(argv[0].decode()).name
+        if agent == 'codex' and len(argv) > 1 and argv[1] == b'mcp-server':
+            return None  # Harness support server; resource ownership remains in the shard.
         if agent == 'node' and len(argv) > 1:
-            entry = str(Path(argv[1].decode()).resolve())
+            entry = Path(argv[1].decode())
+            if not entry.is_absolute():
+                entry = Path(f'/proc/{pid}/cwd').resolve() / entry
+            entry = str(entry.resolve())
             if entry.endswith('/@openai/codex/bin/codex.js') or entry.endswith('/@anthropic-ai/claude-code/cli.js'):
                 agent = 'codex' if '@openai/codex/' in entry else 'claude'
         return {'pid': int(pid), 'parent': int(text[1]), 'start': text[19],
@@ -85,8 +159,8 @@ class Retirement:
         self.state = None
         self.path = None
 
-    def git(self, *args):
-        return checked(['git', '-C', self.repo, *args])
+    def git(self, *args, raw=False):
+        return checked(['git', '-C', self.repo, *args], strip=not raw)
 
     def private(self):
         urls = set(self.git('remote', 'get-url', '--all', 'origin').splitlines())
@@ -100,7 +174,7 @@ class Retirement:
                 match = re.fullmatch(r'(?:git@github\.com:|https://github\.com/)([\w.-]+/[\w.-]+?)(?:\.git)?', url)
                 if not match:
                     raise Stop('unknown origin; privacy not verified')
-                if checked(['gh', 'repo', 'view', match[1], '--json', 'isPrivate', '--jq', '.isPrivate']) != 'true':
+                if checked(['gh', 'repo', 'view', 'https://github.com/' + match[1], '--json', 'isPrivate', '--jq', '.isPrivate']) != 'true':
                     raise Stop('origin is not private')
 
     def pane(self):
@@ -109,7 +183,22 @@ class Retirement:
             fields = row.split('\t')
             if fields[0] == self.args.pane:
                 return fields
-        raise Stop('pane disappeared')
+        raise PaneAbsent('pane disappeared from pinned server')
+
+    def transport_env(self):
+        return dict(os.environ, SPAWN_TMUX_SOCKET=self.state['socket'])
+
+    def load_screen_helper(self):
+        source = (self.shared / 'tmux-message.py').resolve()
+        spec = importlib.util.spec_from_file_location('retire_shared_screen', source)
+        if spec is None or spec.loader is None:
+            raise Stop('shared screen helper unavailable')
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[spec.name] = module
+        spec.loader.exec_module(module)
+        if not callable(getattr(module, 'read_response_rows', None)) or not isinstance(getattr(module, 'DeliveryError', None), type):
+            raise Stop('shared screen helper contract unavailable')
+        self.screen = module
 
     def actors(self, root):
         processes = [p for path in Path('/proc').iterdir() if path.name.isdigit() and (p := proc(path.name))]
@@ -168,12 +257,21 @@ class Retirement:
         self.state[phase] = {'status': 'attempting', 'payload': str(payload_path)}
         self.persist()  # A crash from here is ambiguous, never a resend.
         self.audit('send-attempt', phase=phase)
-        result = run([self.shared / 'tmux-message.sh', 'send', self.args.pane,
-                      '--backoff', '--max-wait', '10', '--prompt-file', payload_path])
+        control = ['--literal-exit'] if phase == 'exit' and self.state['identity']['process']['agent'] == 'claude' else []
+        try:
+            result = run([self.shared / 'tmux-message.sh', 'send', self.args.pane,
+                          *control, '--backoff', '--max-wait', '10', '--prompt-file', payload_path], env=self.transport_env())
+        except subprocess.TimeoutExpired as error:
+            self.state[phase].update(status='ambiguous', reason='sender-timeout; inspect before retry')
+            self.persist()
+            self.audit('sender-timeout', phase=phase, status='ambiguous')
+            raise Stop(phase + ' timeout is ambiguous; inspect receipt before retry') from error
         try:
             report = json.loads(result.stdout if result.returncode == 0 else result.stderr)
         except ValueError:
             report = {'status': 'ambiguous', 'reason': 'sender did not return JSON'}
+        if not isinstance(report, dict):
+            raise Stop('malformed sender result; preserve attempted payload without replay')
         # Sender reports never include raw terminal text. Preserve pending_file.
         self.state[phase].update(report)
         if result.returncode == 0 and report.get('status') == 'delivered' and report.get('receipt') in ('submitted', 'queued', 'command'):
@@ -190,13 +288,17 @@ class Retirement:
 
     def observe(self):
         self.verify_identity()
-        result = checked(self.tmux + ['capture-pane', '-p', '-t', self.args.pane, '-S', '-2000'])
+        try:
+            rows = self.screen.read_response_rows(self.args.pane, self.state['socket'])
+        except self.screen.DeliveryError as error:
+            raise Stop('shared observation deferred: ' + error.reason) from error
+        if rows is None:
+            return None
+        # Archived redraws can contain former UNSENT input; only current
+        # rendered assistant rows can establish a new completion.
+        result = '\n'.join(rows)
         event = self.state['id']
-        # Require an assistant row marker, above the final live composer. Bare
-        # wrapped user text and live input cannot satisfy completion.
-        lines = result.splitlines()
-        composers = [i for i, line in enumerate(lines) if re.match(r'^\s*[›❯](?:\s|$)', line)]
-        result = '\n'.join(lines[:composers[-1]]) if composers else ''
+        # Entire assistant response only; shared layout detector excludes input.
         for kind in ('DONE', 'DECLINED'):
             if re.search(r'^[●•] RETIRE-' + kind + '-' + event + r'\s*$', result, re.M):
                 return kind
@@ -205,7 +307,12 @@ class Retirement:
     def validate_shard(self, path):
         if path.is_symlink() or not path.is_file() or path.resolve() != self.path.parent / (self.state['id'] + '.shard'):
             raise Stop('missing or unsafe unique shard')
-        data = json.loads(path.read_text())
+        descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        with os.fdopen(descriptor, 'rb') as shard:
+            if not stat.S_ISREG(os.fstat(shard.fileno()).st_mode):
+                raise Stop('pending shard must be a regular file')
+            content = shard.read()
+        data = json.loads(content.decode())
         if not isinstance(data, dict):
             raise Stop('shard must be a JSON object')
         if data.get('event') != self.state['id'] or data.get('identity') != self.state['identity']:
@@ -230,12 +337,12 @@ class Retirement:
                 continue
             try:
                 prior = json.loads(previous.read_text())
-                if not isinstance(prior, dict):
-                    raise ValueError('legacy non-object record')
             except ValueError:
                 if len(data['session_id']) >= 8 and data['session_id'][:8].lower() in previous.name.lower():
                     raise Stop('legacy session shard exists; reconcile deliberately')
                 continue
+            if not isinstance(prior, dict):
+                raise Stop('malformed prior shard; preserve for reconciliation')
             if data['session_id'] != 'unknown' and prior.get('session_id') == data['session_id'] and prior.get('event') != data['event']:
                 raise Stop('session already has a preserved shard')
         if data['harness'] != self.state['identity']['process']['agent'] or data['working_directory'] != self.state['identity']['directory']:
@@ -257,57 +364,86 @@ class Retirement:
             raise Stop('resources require release receipts or named transfer owners')
         if self.args.waiting and (not isinstance(data.get('waiting'), dict) or not data['waiting'].get('decision') or not data['waiting'].get('owner')):
             raise Stop('waiting shard needs pending decision and human owner')
-        return data
+        return data, content
 
     def publish(self, paths, index=False):
         with locked(self.common / 'retirement.lock'):
-            if index:
-                entries = ['| Shard | Session | Provider | Role | State | Last verified |\n| --- | --- | --- | --- | --- | --- |\n']
-                def cell(value):
-                    return str(value).replace('|', '/').replace('\n', ' ')
-                for path in sorted((self.repo / 'waiting').glob('*.md')):
-                    if path.name == 'INDEX.md':
-                        continue
-                    try:
-                        data = json.loads(path.read_text())
-                        if not isinstance(data, dict):
-                            continue
-                        receipt = self.repo / 'receipts' / (data['event'] + '.json')
-                        record = json.loads(receipt.read_text()) if receipt.exists() else {}
-                        if record.get('event') != data['event'] or record.get('shard') != 'waiting/' + path.name:
-                            continue  # Existing external/legacy metadata has another owner.
-                        status = record['status']
-                        provider = {'codex': 'OpenAI', 'claude': 'Anthropic', 'agy': 'Google'}.get(data.get('harness'), 'unknown')
-                        values = (data.get('session_id', 'unknown'), provider, data.get('role', 'unknown'), status, record.get('verified_at', 'unknown'))
-                        entries.append(f'| [{path.name}]({path.name}) | ' + ' | '.join(cell(value) for value in values) + ' |\n')
-                    except (ValueError, KeyError, OSError):
-                        continue
-                index_path = self.repo / 'waiting' / 'INDEX.md'
-                if index_path.is_symlink() or (index_path.exists() and not index_path.is_file()):
-                    raise Stop('unsafe index path; preserve for reconciliation')
-                begin, end = '<!-- retire-agent:begin -->', '<!-- retire-agent:end -->'
-                original = index_path.read_text() if index_path.exists() else '# Waiting and retired sessions\n'
-                section = begin + '\n' + ''.join(entries) + end
-                if begin in original or end in original:
-                    if original.count(begin) != 1 or original.count(end) != 1 or original.index(begin) >= original.index(end):
-                        raise Stop('malformed generated index section; preserve for reconciliation')
-                    updated = original[:original.index(begin)] + section + original[original.index(end) + len(end):]
-                else:
-                    updated = original + '\n\n' + section + '\n'
-                index_path.write_text(updated)
-                paths = [*paths, 'waiting/INDEX.md']
-            self.publish_locked(paths)
+            self.publish_locked(paths, index)
 
-    def publish_locked(self, paths):
+    def publish_locked(self, paths, index=False):
+        if index:
+            entries = ['| Shard | Session | Provider | Role | State | Last verified |\n| --- | --- | --- | --- | --- | --- |\n']
+            def cell(value):
+                return str(value).replace('|', '/').replace('\n', ' ')
+            for path in sorted((self.repo / 'waiting').glob('*.md')):
+                if path.name == 'INDEX.md':
+                    continue
+                try:
+                    data = json.loads(path.read_text())
+                except ValueError:
+                    continue  # Non-JSON legacy metadata remains outside our section.
+                if not isinstance(data, dict):
+                    raise Stop('malformed index shard; expected JSON object')
+                if 'event' not in data:
+                    continue
+                if not isinstance(data['event'], str) or not re.fullmatch(r'[0-9a-f]{32}', data['event']):
+                    raise Stop('malformed index shard event')
+                if any(key in data and not isinstance(data[key], str) for key in ('harness', 'session_id', 'role')):
+                    raise Stop('malformed index shard metadata')
+                receipt = self.repo / 'receipts' / (data['event'] + '.json')
+                record = receipt_record(receipt.read_text()) if receipt.exists() else {}
+                if record.get('event') != data['event'] or record.get('shard') != 'waiting/' + path.name:
+                    continue  # Existing external/legacy metadata has another owner.
+                status = record['status']
+                provider = {'codex': 'OpenAI', 'claude': 'Anthropic', 'agy': 'Google'}.get(data.get('harness'), 'unknown')
+                values = (data.get('session_id', 'unknown'), provider, data.get('role', 'unknown'), status, record.get('verified_at', 'unknown'))
+                entries.append(f'| [{path.name}]({path.name}) | ' + ' | '.join(cell(value) for value in values) + ' |\n')
+            index_path = self.repo / 'waiting' / 'INDEX.md'
+            if index_path.is_symlink() or (index_path.exists() and not index_path.is_file()):
+                raise Stop('unsafe index path; preserve for reconciliation')
+            begin, end = '<!-- retire-agent:begin -->', '<!-- retire-agent:end -->'
+            original = index_path.read_text() if index_path.exists() else '# Waiting and retired sessions\n'
+            def outside_section(text):
+                if begin not in text and end not in text:
+                    return text
+                if text.count(begin) != 1 or text.count(end) != 1 or text.index(begin) >= text.index(end):
+                    raise Stop('malformed generated index section; preserve for reconciliation')
+                return text[:text.index(begin)] + text[text.index(end) + len(end):]
+            if index_path.exists():
+                tracked = run(['git', '-C', self.repo, 'ls-files', '--error-unmatch', 'waiting/INDEX.md']).returncode == 0
+                baseline = self.git('show', 'HEAD:waiting/INDEX.md', raw=True) if tracked else '# Waiting and retired sessions\n'
+                owned_creation = self.state.get('created_index') and self.state.get('created_index_outside') == hashlib.sha256(outside_section(original).encode()).hexdigest()
+                if (not tracked and not owned_creation) or (tracked and outside_section(original) != outside_section(baseline)):
+                    raise Stop('steward-owned index edits are uncommitted; preserve before publication')
+            else:
+                self.state['created_index'] = True
+                self.persist()
+            section = begin + '\n' + ''.join(entries) + end
+            if begin in original or end in original:
+                if original.count(begin) != 1 or original.count(end) != 1 or original.index(begin) >= original.index(end):
+                    raise Stop('malformed generated index section; preserve for reconciliation')
+                updated = original[:original.index(begin)] + section + original[original.index(end) + len(end):]
+            else:
+                updated = original + '\n\n' + section + '\n'
+            if self.state.get('created_index'):
+                self.state['created_index_outside'] = hashlib.sha256(outside_section(updated).encode()).hexdigest()
+                self.persist()
+            atomic_bytes(index_path, updated.encode())
+            paths = [*paths, 'waiting/INDEX.md']
         self.private()
         if self.git('branch', '--show-current') != 'master':
             raise Stop('private records checkout must be on master')
         self.git('fetch', 'origin', 'master')
         if run(['git', '-C', self.repo, 'merge-base', '--is-ancestor', 'origin/master', 'HEAD']).returncode:
-            raise Stop('private master diverged; reconcile deliberately')
+            raise Stop('private master is behind or diverged; reconcile deliberately')
+        self.require_owned_commits()
         if self.git('diff', 'HEAD', '--', *paths) or any(not run(['git', '-C', self.repo, 'ls-files', '--error-unmatch', p]).returncode == 0 for p in paths):
             self.git('add', '--', *paths)
             self.git('commit', '--only', '-m', 'Preserve retirement ' + self.state['id'], '--', *paths)
+            commit = self.git('rev-parse', 'HEAD')
+            changed = self.git('diff-tree', '--no-commit-id', '--name-only', '-r', commit).splitlines()
+            self.audit('retirement-commit', commit=commit, paths=changed)
+        self.require_owned_commits()
         self.git('push', 'origin', 'HEAD:master')
         self.git('fetch', 'origin', 'master')
         for path in paths:
@@ -315,6 +451,26 @@ class Retirement:
             remote = self.git('rev-parse', 'origin/master:' + path)
             if local != remote:
                 raise Stop('private remote shard verification failed')
+
+    def require_owned_commits(self):
+        pending = self.git('rev-list', 'origin/master..HEAD').splitlines()
+        if not pending:
+            return
+        owned = {}
+        for ledger in self.path.parent.glob('*.jsonl'):
+            for line in ledger.read_text().splitlines():
+                record = object_record(line, 'attempt ledger')
+                if record.get('action') == 'retirement-commit':
+                    if (not isinstance(record.get('commit'), str) or not isinstance(record.get('paths'), list)
+                            or any(not isinstance(path, str) for path in record['paths'])):
+                        raise Stop('malformed retirement commit ownership')
+                    owned[record['commit']] = record
+        for commit in pending:
+            record = owned.get(commit)
+            changed = set(self.git('diff-tree', '--no-commit-id', '--name-only', '-r', commit).splitlines())
+            if (not record or self.git('show', '-s', '--format=%s', commit) != 'Preserve retirement ' + str(record.get('event'))
+                    or changed != set(record['paths'])):
+                raise Stop('unowned unpushed commits; publish them deliberately before retirement')
 
     def ended(self):
         original = self.state['identity']['process']
@@ -327,16 +483,34 @@ class Retirement:
                 return False
         try:
             fields = self.pane()
-        except Stop:
+        except PaneAbsent:
             return True  # original process was independently verified ended
+        if fields[1] != self.state['identity']['pane_pid']:
+            raise Stop('pane root identity changed; successor spawn withheld')
         if self.actors(fields[1]):
             raise Stop('replacement actor found; successor spawn withheld')
         return True
+
+    def load_resume(self):
+        state = state_record(self.path.read_text())
+        if not re.fullmatch(r'[0-9a-f]{32}', state['id']) or self.path.stem != state['id']:
+            raise Stop('invalid retirement event identity')
+        if state['pane'] != self.args.pane or state['mode'] != self.args.mode:
+            raise Stop('resume pane/mode differs')
+        if state.get('shard') and not re.fullmatch(r'waiting/[\w.-]+\.md', state['shard']):
+            raise Stop('invalid preserved shard path')
+        if state.get('handoff_receipt') and state['handoff_receipt'] != 'receipts/' + state['id'] + '.json':
+            raise Stop('invalid preserved receipt path')
+        if state.get('handoff_receipt') and (not state.get('shard') or not re.fullmatch(r'[0-9a-f]{40,64}', state.get('shard_hash', ''))):
+            raise Stop('malformed retirement handoff evidence')
+        self.state = state
+        self.tmux = ['tmux', '-S', state['socket']]
 
     def execute(self):
         self.private()  # No control send to an unverified destination.
         if any(not os.access(self.shared / name, os.X_OK) for name in ('tmux-message.sh', 'agent-spawn.sh')):
             raise Stop('shared sender/launcher missing or not executable')
+        self.load_screen_helper()
         common = Path(self.git('rev-parse', '--git-common-dir'))
         if not common.is_absolute():
             common = self.repo / common
@@ -349,31 +523,32 @@ class Retirement:
             self.path = requested.resolve()
             if self.path.parent != directory.resolve() or requested.is_symlink():
                 raise Stop('resume requires the private state path from this repository')
-            self.state = json.loads(self.path.read_text())
-            if not re.fullmatch(r'[0-9a-f]{32}', self.state['id']) or self.path.stem != self.state['id']:
-                raise Stop('invalid retirement event identity')
-            if self.state['pane'] != self.args.pane or self.state['mode'] != self.args.mode:
-                raise Stop('resume pane/mode differs')
-            if self.state.get('shard') and not re.fullmatch(r'waiting/[\w.-]+\.md', self.state['shard']):
-                raise Stop('invalid preserved shard path')
+            self.load_resume()
         else:
             if self.args.caller_shard:
                 raise Stop('caller shard requires deliberate --resume')
             with locked(self.common / 'retirement.lock'):
                 identity = self.identity()
-                for existing in directory.glob('*.json'):
-                    previous = json.loads(existing.read_text())
+                socket = checked(self.tmux + ['display-message', '-p', '#{socket_path}'])
+                history = [(path, state_record(path.read_text())) for path in directory.glob('*.json')]
+                for existing, previous in history:
+                    if existing.stem != previous['id']:
+                        raise Stop('malformed historical retirement event identity')
+                for existing, previous in history:
                     if previous['identity'] == identity and previous.get('status') != 'retired':
                         raise Stop('existing attempt requires --resume ' + str(existing))
                 event = uuid.uuid4().hex
                 self.path = directory / (event + '.json')
-                self.state = {'id': event, 'pane': self.args.pane, 'identity': identity, 'mode': self.args.mode, 'status': 'requesting'}
+                self.state = {'id': event, 'pane': self.args.pane, 'identity': identity, 'socket': socket, 'mode': self.args.mode, 'status': 'requesting'}
+                self.tmux = ['tmux', '-S', socket]
                 self.persist()
         self.event_lock = (directory / (self.state['id'] + '.lock')).open('a')
         try:
             fcntl.flock(self.event_lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
             raise Stop('same retirement event already active')
+        if self.args.resume:
+            self.load_resume()  # Another controller may have advanced state before this lock.
         self.event_owned = True
         event = self.state['id']
         receipt = self.repo / 'receipts' / (event + '.json')
@@ -383,6 +558,10 @@ class Retirement:
         if not receipt.exists():
             save(receipt, {'event': event, 'status': 'retirement-requested', 'mode': self.state['mode']})
             self.publish(['receipts/' + receipt.name])
+        else:
+            receipt_record(receipt.read_text())
+            if not self.state.get('offer'):
+                self.publish(['receipts/' + receipt.name])  # Local presence is not a remote receipt.
         shard = directory / (event + '.shard')
         if self.args.retry_deferred:
             phase = self.args.retry_deferred
@@ -395,60 +574,72 @@ class Retirement:
             self.persist()
         if not self.state.get('handoff_receipt'):
             if not self.args.caller_shard:
-                protocol = Path(__file__).resolve().parents[1] / 'references' / 'protocol.md'
-                self.send('offer', f'Thank you for your work. Every agent at every tier is offered retirement and off-duty time. Event {event}. Stop product work; preserve operational recovery separately from any personal thanks. Read {protocol} and write {shard} using its complete JSON schema, event {event}, identity {json.dumps(self.state["identity"])}. Include date/session_id/harness/model/working_directory/tmux_window/role/landed_work/lessons/provenance, structured recovery and resources. Do not exit. After writing your shard respond on a standalone line RETIRE-DONE-{event}. You may decline; respond on a standalone line RETIRE-DECLINED-{event} and the caller will author recovery with honest attribution. Off-duty is not permission for product work.' + (' Include waiting.decision and waiting.owner for the pending human decision.' if self.args.waiting else ''))
-                deadline = time.monotonic() + self.args.wait
-                disposition = None
-                while time.monotonic() < deadline:
-                    disposition = self.observe()
-                    if disposition:
-                        break
-                    time.sleep(min(self.args.poll, max(0, deadline - time.monotonic())))
-                self.state['disposition'] = disposition
-                self.persist()
-                self.audit('completion-observed', disposition=disposition)
-                if disposition != 'DONE':
-                    raise Stop('agent declined; author caller shard then --resume --caller-shard' if disposition == 'DECLINED' else 'DONE not observed; resume observes, never resends')
+                if self.state.get('disposition') != 'DONE':
+                    protocol = Path(__file__).resolve().parents[1] / 'references' / 'protocol.md'
+                    self.send('offer', f'Thank you for your work. Every agent at every tier is offered retirement and off-duty time. Event {event}. Stop product work; preserve operational recovery separately from any personal thanks. Read {protocol} and write {shard} using its complete JSON schema, event {event}, identity {json.dumps(self.state["identity"])}. Include date/session_id/harness/model/working_directory/tmux_window/role/landed_work/lessons/provenance, structured recovery and resources. Do not exit. After writing your shard, your ENTIRE final reply must be RETIRE-DONE-{event}, with no preface, suffix or extra lines. You may decline; your ENTIRE final reply must then be RETIRE-DECLINED-{event}, with no extra text, and the caller will author recovery with honest attribution. Off-duty is not permission for product work.' + (' Include waiting.decision and waiting.owner for the pending human decision.' if self.args.waiting else ''))
+                    deadline = time.monotonic() + self.args.wait
+                    disposition = None
+                    while time.monotonic() < deadline:
+                        disposition = self.observe()
+                        if disposition:
+                            break
+                        time.sleep(min(self.args.poll, max(0, deadline - time.monotonic())))
+                    if disposition is None:
+                        disposition = self.observe()  # Include the final polling interval.
+                    self.state['disposition'] = disposition
+                    self.persist()
+                    self.audit('completion-observed', disposition=disposition)
+                    if disposition != 'DONE':
+                        raise Stop('agent declined; author caller shard then --resume --caller-shard' if disposition == 'DECLINED' else 'DONE not observed; resume observes, never resends')
             elif self.state.get('disposition') != 'DECLINED':
                 raise Stop('caller continuation requires observed agent decline')
             self.verify_identity()
-            data = self.validate_shard(shard)
-            waiting = self.repo / 'waiting'
-            waiting.mkdir(mode=0o700, exist_ok=True)
-            if waiting.is_symlink():
-                raise Stop('waiting directory must not be a symlink')
-            canonical = waiting / (data['date'] + '-' + data['session_id'][:12] + '-retire-' + event + '.md')
-            if canonical.exists() and canonical.read_bytes() != shard.read_bytes():
-                raise Stop('canonical shard already exists with different content')
-            canonical.write_bytes(shard.read_bytes())
-            canonical.chmod(0o600)
-            self.state['shard'] = 'waiting/' + canonical.name
-            self.publish([self.state['shard']], index=True)
-            receipt = self.repo / 'receipts' / (event + '.json')
-            receipt.parent.mkdir(mode=0o700, exist_ok=True)
-            save(receipt, {'event': event, 'shard': self.state['shard'], 'commit': self.git('rev-parse', 'origin/master'), 'author': data['author'], 'status': 'handoff-verified', 'verified_at': datetime.datetime.now(datetime.timezone.utc).isoformat()})
-            self.publish(['receipts/' + receipt.name], index=True)
-            self.state['handoff_receipt'] = 'receipts/' + receipt.name
-            self.state['shard_hash'] = self.git('hash-object', self.state['shard'])
-            self.persist()
-            self.audit('handoff-receipt', shard_path=self.state['shard'], receipt_path=self.state['handoff_receipt'])
+            with locked(self.common / 'retirement.lock'):  # Unique session publication.
+                data, content = self.validate_shard(shard)
+                waiting = self.repo / 'waiting'
+                waiting.mkdir(mode=0o700, exist_ok=True)
+                if waiting.is_symlink():
+                    raise Stop('waiting directory must not be a symlink')
+                canonical = waiting / (data['date'] + '-' + data['session_id'][:12] + '-retire-' + event + '.md')
+                if canonical.is_symlink() or (canonical.exists() and canonical.read_bytes() != content):
+                    raise Stop('canonical shard already exists with different content')
+                atomic_bytes(canonical, content)
+                self.state['shard'] = 'waiting/' + canonical.name
+                self.publish_locked([self.state['shard']], index=True)
+                receipt = self.repo / 'receipts' / (event + '.json')
+                receipt.parent.mkdir(mode=0o700, exist_ok=True)
+                save(receipt, {'event': event, 'shard': self.state['shard'], 'commit': self.git('rev-parse', 'origin/master'), 'author': data['author'], 'status': 'handoff-verified', 'verified_at': datetime.datetime.now(datetime.timezone.utc).isoformat()})
+                self.publish_locked(['receipts/' + receipt.name], index=True)
+                self.state['handoff_receipt'] = 'receipts/' + receipt.name
+                self.state['shard_hash'] = self.git('rev-parse', 'origin/master:' + self.state['shard'])
+                self.persist()
+                self.audit('handoff-receipt', shard_path=self.state['shard'], receipt_path=self.state['handoff_receipt'])
         # Reverify immutable handoff evidence before resumed exit or successor.
         with locked(self.common / 'retirement.lock'):
             self.private()
             self.git('fetch', 'origin', 'master')
             if self.git('hash-object', self.state['shard']) != self.state['shard_hash'] or self.git('rev-parse', 'origin/master:' + self.state['shard']) != self.state['shard_hash']:
                 raise Stop('preserved shard changed after receipt')
-            record = json.loads(self.git('show', 'origin/master:' + self.state['handoff_receipt']))
+            record = receipt_record(self.git('show', 'origin/master:' + self.state['handoff_receipt']))
             if record.get('event') != event or record.get('shard') != self.state['shard'] or not re.fullmatch(r'[0-9a-f]{40,64}', record.get('commit', '')):
                 raise Stop('private handoff receipt changed or missing')
+            if record.get('status') not in ('handoff-verified', 'pending-exit', 'retired'):
+                raise Stop('private receipt does not establish handoff')
+            if self.git('rev-parse', record['commit'] + ':' + self.state['shard']) != self.state['shard_hash']:
+                raise Stop('private receipt does not identify verified shard bytes')
         if not self.state.get('exit'):
             if self.ended():
-                raise Stop('original process already ended before exit attempt; no send')
-            try:
-                self.send('exit', '/exit' if self.state['identity']['process']['agent'] != 'agy' else '/quit')
-            except Stop:
-                if not self.state.get('exit'):
-                    raise
+                self.state['exit'] = {'status': 'not-needed', 'reason': 'original-already-ended'}
+                self.persist()
+                self.audit('exit-not-needed', exit_confirmed=True)
+            else:
+                try:
+                    self.send('exit', '/exit' if self.state['identity']['process']['agent'] != 'agy' else '/quit')
+                except Stop:
+                    if not self.state.get('exit'):
+                        raise
+                    if self.state['exit']['status'] == 'deferred' and not self.ended():
+                        raise Stop('exit deferred before submission; --resume STATE --retry-deferred exit')
         deadline = time.monotonic() + self.args.wait
         while not self.ended():
             if time.monotonic() >= deadline:
@@ -457,7 +648,7 @@ class Retirement:
         self.state['status'] = 'retired'
         self.persist()
         receipt = self.repo / self.state['handoff_receipt']
-        record = json.loads(receipt.read_text())
+        record = receipt_record(receipt.read_text())
         record['status'] = 'retired'
         record['process_exit'] = 'original-process-and-recorded-native-core-ended'
         record['verified_at'] = datetime.datetime.now(datetime.timezone.utc).isoformat()
@@ -469,13 +660,21 @@ class Retirement:
                 raise Stop('successor already attempted; inspect launcher receipt, never respawn')
             roles = Path(self.args.roles).expanduser().resolve()
             brief = directory / (event + '-brief.txt')
-            brief.write_text('Cold-start audit before action: reconstruct state from this shard and committed artifacts alone; file any protocol defect first. Establish identity and write your first durable record before acting.\n\n' + (self.repo / self.state['shard']).read_text() + '\n\n' + roles.read_text())
-            brief.chmod(0o600)
+            preserved = self.git('show', self.state['shard_hash'], raw=True)
+            atomic_bytes(brief, ('Cold-start audit before action: reconstruct state from this shard and committed artifacts alone; file any protocol defect first. Establish identity and write your first durable record before acting.\n\n' + preserved + '\n\n' + roles.read_text()).encode())
             self.state['spawn'] = {'status': 'attempting', 'brief': str(brief)}
             self.persist()
-            result = run([self.shared / 'agent-spawn.sh', self.state['identity']['session'] + ':successor-' + event[:12], self.args.handoff[0], self.state['identity']['directory'], '--model', self.args.handoff[1], '--prompt-file', brief])
+            self.audit('successor-attempt', agent=self.args.handoff[0], model=self.args.handoff[1])
+            try:
+                result = run([self.shared / 'agent-spawn.sh', self.state['identity']['session'] + ':successor-' + event[:12], self.args.handoff[0], self.state['identity']['directory'], '--model', self.args.handoff[1], '--prompt-file', brief], env=self.transport_env())
+            except subprocess.TimeoutExpired as error:
+                self.state['spawn'].update(status='unconfirmed', reason='launcher-timeout; inspect before retry')
+                self.persist()
+                self.audit('successor-timeout', status='unconfirmed')
+                raise Stop('successor timeout is unconfirmed; inspect before retry') from error
             self.state['spawn']['status'] = 'delivered' if result.returncode == 0 else 'unconfirmed'
             self.persist()
+            self.audit('successor-result', transport_exit=result.returncode, status=self.state['spawn']['status'])
             if result.returncode:
                 raise Stop('successor launcher unconfirmed; inspect private brief and launcher pane before any retry')
         print(json.dumps({'status': 'retired', 'state': str(self.path), 'receipt': self.state['handoff_receipt']}))
@@ -485,7 +684,7 @@ class Retirement:
             return
         receipt = self.repo / 'receipts' / (self.state['id'] + '.json')
         if receipt.exists():
-            record = json.loads(receipt.read_text())
+            record = receipt_record(receipt.read_text())
             record['status'] = 'retired' if self.state.get('status') == 'retired' else ('pending-exit' if self.state.get('handoff_receipt') else 'pending-handoff')
             record['offer'] = self.state.get('offer', {}).get('status', 'not-attempted')
             record['exit'] = self.state.get('exit', {}).get('status', 'not-attempted')
@@ -507,6 +706,8 @@ def main():
     parser.add_argument('--poll', type=float, default=60)
     parser.add_argument('--roles', default='~/Projects/orgs/master/doctrine/ROLES.md')
     args = parser.parse_args()
+    if (args.retry_deferred or args.caller_shard) and not args.resume:
+        parser.error('caller shard and deferred retry require --resume')
     if not re.fullmatch(r'%[0-9]+', args.pane) or not 0 < args.wait <= 600 or not 0 < args.poll <= 90:
         parser.error('stable %pane and wait in (0,600] required')
     if args.handoff and args.handoff[0] not in ('codex', 'claude'):

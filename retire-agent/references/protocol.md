@@ -5,8 +5,13 @@ JSON file outside the working tree. After
 validation the controller preserves its bytes in
 `waiting/YYYY-MM-DD-sessionprefix-retire-<event>.md`, one shard per known
 session, and updates only its bounded generated section in `waiting/INDEX.md`. The `.md` file contains JSON.
+The agent must already have permission to write that private path. Workspace
+sandboxing or an approval modal can prevent this; never bypass permissions or
+send into a modal. The agent can decline, letting the authorized caller write
+the recovery shard through the deliberate caller continuation.
 A completion is a fresh assistant response row `RETIRE-DONE-<event>` after
-writing the shard; a decline is `RETIRE-DECLINED-<event>`. The observed terminal
+writing the shard; a decline is `RETIRE-DECLINED-<event>`. The marker must be
+the agent's entire final reply, without prose before or after it. The observed terminal
 must render an assistant `●` or `•` row marker. Bare wrapped user text and
 live composer text do not count. Unsupported response layouts stay pending.
 The controller never accepts a reported alternate shard path.
@@ -64,27 +69,40 @@ include an actual quotation only with `thanks_provenance: "quoted-agent"`.
 Then invoke `--resume PRIVATE_STATE --caller-shard` in the same mode.
 
 The checkout must already have private `origin/master`. Privacy is checked for
-every fetch/push URL. GitHub uses authenticated `gh repo view`; unknown/public
+every fetch/push URL. GitHub uses authenticated `gh repo view` with an explicit
+github.com URL, independent of `GH_HOST`; unknown/public
 remotes fail closed. `RETIRE_PRIVATE_CHECK` names an optional trusted site-owned
 executable accepting one URL and returning zero only when that URL is verifiably
 private (tests use local bare repositories). It is a privacy authority; never
 set it to `true`. `RETIRE_REPO` and `RETIRE_SPAWN_SKILL` select alternate private
 records and the existing shared skill. The default shared skill is the
 sibling spawn-agent in the same resolved checkout; overrides must provide the
-matching published Claude/Codex model-selection contract. No pane or unsent human text is saved.
+matching published Claude/Codex model-selection and guarded literal-Claude-exit
+contracts. No pane or unsent human text is saved.
 
 Git transactions hold `.git/retirement.lock` (the common directory for
-worktrees), only around Git work; a per-event lock protects longer orchestration.
-Commits are path-only. Noncooperating Git actors still require coordination.
-Diverged master and failed push block exit. Verify the shard blob on fetched
+worktrees), around duplicate-session validation, canonical shard creation and
+publication together; a per-event lock protects longer orchestration.
+Commits are path-only. Uncommitted steward edits outside the generated INDEX
+section and unowned unpushed commits block publication. Retirement commits
+are owned only with private ledger evidence of their SHA and exact paths.
+Noncooperating Git actors still require coordination. Behind or diverged
+master requires deliberate reconciliation; failed push blocks exit. Verify the shard blob on fetched
 private `origin/master`, publish its unique ledger receipt, then send the bare
-harness exit through the shared sender. `/exit` is used for Claude/Codex;
+harness exit through the shared sender. Claude `/exit` uses the sender's
+`--literal-exit` guard: literal typing and one Enter, confirmed by a fresh
+`Resume this session with:` / `claude --resume UUID` receipt. Pasted Claude
+`/exit` is ordinary text and cannot retire a harness. `/exit` is used for Codex;
 `/quit` for agy. Verify the original PID/start time/boot ID ended, even when its
 pane survives as a shell. Recognized Node entrypoints resolve through symlinks;
 the outer wrapper and its native Codex child are one logical harness, and
 retirement waits for both processes to end. A replacement harness blocks completion. Nothing
 kills a process. Resumes reverify the preserved blob and receipt before exit
-or successor. The ledger records pending handoff, pending exit and retired;
+or successor. If the original ended independently after that verified handoff,
+record `exit-not-needed` and continue without sending into its shell. A
+replacement actor still blocks succession. Malformed private records stop
+with their bytes preserved for operator reconciliation.
+The ledger records pending handoff, pending exit and retired;
 its index preserves all steward-owned legacy metadata outside the bounded
 generated section. A legacy filename matching the same session ID prefix
 (eight characters or more) blocks another shard until deliberate reconciliation.
@@ -104,6 +122,17 @@ actor attribution. An assistant/user deliberately spoofing another actor's
 terminal framing can be ambiguous. Schema validation checks fields and resource
 receipts, not the truth of claims, PR hashes, model/session identification or
 operational prose; the caller must audit those before requesting retirement.
+Observation consumes only spawn-agent's published `read_response_rows(pane,
+socket)` and `DeliveryError` Python contract. It excludes archived redraws and
+the live composer. Keep the final marker visible until the controller records
+DONE; after that, resume uses the recorded disposition and revalidates identity.
+The socket is pinned in private state and reused for observation and transport;
+server failure is not evidence that the pane disappeared. Recognized
+`codex mcp-server` support processes are excluded from harness identity, but
+their resources still require shard receipts. Unknown or additional harness
+invocations remain a safe deferral pending operator reconciliation.
+Follow-up `retire-agent-helper-identification` tracks richer auxiliary-command
+classification; do not weaken identity checks to bypass that deferral.
 
 Each event also has an append-only private `<event>.jsonl` attempt ledger in
 the Git common directory: target/pane, event marker, transport exit and receipt
