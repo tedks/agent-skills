@@ -37,6 +37,13 @@ MODAL = re.compile(r"Quick safety check|Yes, I trust this folder|No, exit|Do you
 QUEUE = re.compile(r"Messages to be submitted|queued messages?", re.I)
 
 
+CLAUDE_RESUME = re.compile(r"Resume this session with:\s*\n\s*claude --resume ([0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12})(?=\s|$)", re.I)
+
+
+def resume_records(frame):
+    return Counter(session.lower() for session in CLAUDE_RESUME.findall(styles.strip_ansi(frame.history or frame.raw)))
+
+
 def normalized(text):
     # Line wrapping, indentation and terminal padding do not identify a message.
     return "".join(text.split())
@@ -177,9 +184,13 @@ class DeliveryError(Exception):
 
 
 class Tmux:
-    def __init__(self, target):
+    def __init__(self, target, *, socket=None):
+        resolver_env = None
         self.base = ["tmux"]
-        if os.environ.get("SPAWN_TMUX_SOCKET"):
+        if socket is not None:
+            self.base += ["-S", socket]
+            resolver_env = dict(os.environ, SPAWN_TMUX_SOCKET=socket)
+        elif os.environ.get("SPAWN_TMUX_SOCKET"):
             self.base += ["-S", os.environ["SPAWN_TMUX_SOCKET"]]
         elif os.environ.get("SPAWN_TMUX_LABEL"):
             self.base += ["-L", os.environ["SPAWN_TMUX_LABEL"]]
@@ -188,7 +199,7 @@ class Tmux:
         try:
             self.identity = subprocess.run(
                 [str(Path(__file__).with_name("tmux-resolve.sh")), target],
-                check=True, capture_output=True, text=True, timeout=5).stdout.strip()
+                check=True, capture_output=True, text=True, timeout=5, env=resolver_env).stdout.strip()
         except subprocess.CalledProcessError as error:
             raise DeliveryError("missing-or-ambiguous-target") from error
         if not re.fullmatch(r"\d+:%\d+", self.identity):
@@ -225,6 +236,25 @@ class Tmux:
                 self.run("delete-buffer", "-b", name)
             except subprocess.CalledProcessError:
                 pass
+
+
+def read_response_rows(pane, socket):
+    """Read visible response rows above recognized input, never send keys.
+
+    This is the supported Python observation API. Unknown, modal, or moving
+    surfaces return None; target/read failures are sanitized DeliveryError.
+    """
+    if (not isinstance(pane, str) or not re.fullmatch(r"%\d+", pane)
+            or not isinstance(socket, str) or not Path(socket).is_absolute()):
+        raise DeliveryError("invalid-observation-target")
+    try:
+        frame = Tmux(pane, socket=socket).frame()
+        inp = composer(frame)
+        if inp.kind in {"unknown", "modal"}:
+            return None
+        return styles.strip_ansi(frame.raw).splitlines()[:inp.start]
+    except (subprocess.SubprocessError, OSError, ValueError) as error:
+        raise DeliveryError("observation-read-failed") from error
 
 
 @contextmanager
@@ -292,6 +322,12 @@ class Sender:
             if now - stable_since >= self.o.stable_wait:
                 if inp.kind == "empty":
                     return frame, inp
+                # Retirement's literal exit permits only Claude's canonical
+                # idle suggestion at the input-start cursor, never draft text.
+                if (getattr(self.o, "literal_exit", False) and self.payload == "/exit"
+                        and inp.kind == "suggestion" and inp.harness == "claude"
+                        and re.fullmatch(r'Try "[^\n]*"', inp.text)):
+                    return frame, inp
                 if inp.kind == "suggestion" and not probed:
                     # Ted-authorized probe: real draft text remains; a ghost
                     # suggestion should disappear. Never clear actual text.
@@ -314,9 +350,16 @@ class Sender:
         if check.fingerprint() != inp.fingerprint():
             raise DeliveryError("input-changed-before-paste")
         baseline = records(before, check)
+        literal = getattr(self.o, "literal_exit", False)
+        if literal and (self.payload != "/exit" or check.harness != "claude"):
+            raise DeliveryError("literal-exit-requires-claude-exit")
+        resume_before = resume_records(before) if literal else Counter()
         compact_before = styles.strip_ansi(before.history or before.raw).count("• Context compacted")
         self.pasted = True  # A failed paste command can still have changed input.
-        self.tmux.paste(self.path)
+        if literal:
+            self.tmux.keys("-l", self.payload)
+        else:
+            self.tmux.paste(self.path)
         start = self.clock()
         deadline = start + self.o.render_wait + self.o.submit_delay + self.o.receipt_wait
         owned = None
@@ -330,13 +373,19 @@ class Sender:
             if now >= deadline:
                 break
             receipt = records(frame, current)
+            if literal and self.enters == 1 and current.kind == "unknown":
+                resumed = resume_records(frame)
+                fresh = [session for session, count in resumed.items() if count > resume_before[session]]
+                if fresh:
+                    return {"status": "delivered", "receipt": "command", "command": "claude-exit",
+                            "resume_session_id": fresh[0], "enters": 1, "transport": "literal"}
             if (self.payload == "/compact" and self.enters and current.kind == "empty"
                     and styles.strip_ansi(frame.history or frame.raw).count("• Context compacted") > compact_before):
                 return {"status": "delivered", "receipt": "command", "enters": self.enters}
             # A collapsed receipt is usable only if the same marker was seen
             # in this attempt's input. Existing marker history is in baseline.
             for kind in ("submitted", "queued"):
-                if self.enters and any(receipt[(kind, form)] > baseline[(kind, form)] for form in accepted_forms):
+                if not literal and self.enters and any(receipt[(kind, form)] > baseline[(kind, form)] for form in accepted_forms):
                     return {"status": "delivered", "receipt": kind, "enters": self.enters}
             if current.kind == "modal":
                 raise DeliveryError("modal-after-paste", 3)
@@ -353,12 +402,12 @@ class Sender:
                 accepted_forms.add(normalized(current.text))
                 due = start + self.o.submit_delay if last_enter is None else last_enter + self.o.retry_wait
                 if (now >= due and now - evidence_since >= self.o.poll_interval
-                        and self.enters < 2 and not input_disappeared):
+                        and self.enters < (1 if literal else 2) and not input_disappeared):
                     # Refresh receipt AND input immediately before each Enter.
                     confirm, live = self.sample()
                     fresh = records(confirm, live)
                     for kind in ("submitted", "queued"):
-                        if self.enters and any(fresh[(kind, form)] > baseline[(kind, form)] for form in accepted_forms):
+                        if not literal and self.enters and any(fresh[(kind, form)] > baseline[(kind, form)] for form in accepted_forms):
                             return {"status": "delivered", "receipt": kind, "enters": self.enters}
                     if live.fingerprint() != owned or not paste_evidence(live, self.payload):
                         raise DeliveryError("input-changed-before-enter", 3)
@@ -383,6 +432,7 @@ def options(argv=None):
                           ("render-wait", 3), ("receipt-wait", 15), ("retry-wait", 3),
                           ("poll-interval", 0.25)):
         p.add_argument("--" + name, type=float, default=default)
+    p.add_argument("--literal-exit", action="store_true", help="type a bare Claude /exit literally, send at most one Enter, and verify a fresh resume notice")
     p.add_argument("--backoff", action="store_true", help="wait for stable empty input within --max-wait instead of exiting on typing/drafts")
     p.add_argument("message", nargs="?")
     o = p.parse_intermixed_args(argv)
@@ -402,6 +452,8 @@ def main():
     o = options()
     try:
         payload = o.prompt_file.read_bytes().decode("utf-8") if o.prompt_file else o.message
+        if o.literal_exit and payload != "/exit":
+            raise ValueError("--literal-exit accepts only the bare /exit command")
         if not payload.strip() or any(unicodedata.category(c) == "Cc" and c != "\n" for c in payload):
             raise ValueError("message must be nonblank UTF-8 text without control characters other than newlines")
     except (OSError, UnicodeError, ValueError) as e:

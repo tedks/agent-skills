@@ -5,6 +5,7 @@ from pathlib import Path
 from types import SimpleNamespace
 import sys
 import unittest
+from unittest.mock import patch
 sys.dont_write_bytecode = True
 spec = importlib.util.spec_from_file_location('delivery', Path(__file__).with_name('tmux-message.py'))
 m = importlib.util.module_from_spec(spec)
@@ -62,6 +63,30 @@ class Terminal:
                 self.draft = ''
 
 
+class ClaudeExitTerminal(Terminal):
+    session = '11111111-2222-3333-4444-555555555555'
+
+    def __init__(self, **kw):
+        super().__init__(payload='/exit', **kw)
+        self.typed = 0
+
+    def frame(self):
+        self.frames += 1
+        if self.accepted_at is not None and self.now >= self.accepted_at + self.delayed:
+            history = self.history + 'Resume this session with:\nclaude --resume ' + self.session + '\nuser@host:~$ \n'
+            return m.Frame(history, 14, len(history.splitlines()) - 1, history)
+        text = self.draft + (' human' if self.mutate and self.typed else '')
+        return screen(text, self.history, harness='claude')
+
+    def keys(self, *keys):
+        if keys == ('-l', '/exit'):
+            self.typed += 1
+            self.draft += '/exit'
+            self.actions.extend(keys)
+        else:
+            super().keys(*keys)
+
+
 def deliver(t, **kw):
     o = dict(max_wait=8, stable_wait=3, poll_interval=.25, backoff=False,
              submit_delay=1, render_wait=3, receipt_wait=8, retry_wait=3)
@@ -70,6 +95,118 @@ def deliver(t, **kw):
 
 
 class DeliveryTests(unittest.TestCase):
+    def test_response_rows_exclude_live_composer_and_archive(self):
+        f = screen('● RETIRE-DONE-in-draft', history='● archived marker\n',
+                   prefix='● visible response\n\n')
+        for harness in ('codex', 'claude'):
+            f = screen('● RETIRE-DONE-in-draft', history='● archived marker\n',
+                       prefix='● visible response\n\n', harness=harness)
+            with patch.object(m, 'Tmux') as t:
+                t.return_value.frame.return_value = f
+                self.assertEqual(m.read_response_rows('%1', '/tmp/test-socket'),
+                                 ['● visible response', ''] if harness == 'codex' else ['● visible response', '', '──────────────'])
+                t.assert_called_once_with('%1', socket='/tmp/test-socket')
+                t.return_value.keys.assert_not_called()
+                t.return_value.paste.assert_not_called()
+
+    def test_response_rows_unknown_modal_and_failed_read(self):
+        for f in (m.Frame('', -1, -1), screen('Allow once')):
+            with patch.object(m, 'Tmux') as t:
+                t.return_value.frame.return_value = f
+                self.assertIsNone(m.read_response_rows('%1', '/tmp/test-socket'))
+        with patch.object(m, 'Tmux', side_effect=OSError('private detail')):
+            with self.assertRaisesRegex(m.DeliveryError, 'observation-read-failed'):
+                m.read_response_rows('%1', '/tmp/test-socket')
+        with self.assertRaisesRegex(m.DeliveryError, 'invalid-observation-target'):
+            m.read_response_rows('session:window', 'relative')
+
+    def test_observation_socket_is_explicit_without_global_env_change(self):
+        import os
+        before = dict(os.environ)
+        with patch.object(m.subprocess, 'run') as run:
+            run.return_value.stdout = '123:%1'
+            t = m.Tmux('%1', socket='/tmp/pinned-socket')
+            self.assertEqual(t.base, ['tmux', '-S', '/tmp/pinned-socket'])
+            self.assertEqual(run.call_args.kwargs['env']['SPAWN_TMUX_SOCKET'], '/tmp/pinned-socket')
+        self.assertEqual(dict(os.environ), before)
+
+    def test_literal_claude_exit_fresh_resume_receipt(self):
+        t = ClaudeExitTerminal(delayed=2)
+        t.history = 'Resume this session with:\nclaude --resume ' + t.session + '\n'
+        result = deliver(t, literal_exit=True)
+        self.assertEqual(result['receipt'], 'command')
+        self.assertEqual(result['resume_session_id'], t.session)
+        self.assertEqual((t.pastes, t.typed, t.enters), (0, 1, 1))
+
+    def test_literal_exit_canonical_idle_placeholder(self):
+        class Ghost(ClaudeExitTerminal):
+            def frame(self):
+                if not self.typed:
+                    f = screen('Try "summarize this work"', harness='claude')
+                    f.x = 2
+                    return f
+                return super().frame()
+        t = Ghost()
+        self.assertEqual(deliver(t, literal_exit=True)['receipt'], 'command')
+        self.assertEqual((t.pastes, t.typed, t.enters), (0, 1, 1))
+        self.assertNotIn('Space', t.actions)
+
+    def test_literal_exit_suggestion_shaped_actual_draft(self):
+        t = ClaudeExitTerminal(draft='Try "my draft"')
+        with self.assertRaisesRegex(m.DeliveryError, 'existing-input'):
+            deliver(t, literal_exit=True)
+        self.assertEqual((t.pastes, t.typed, t.enters), (0, 0, 0))
+
+    def test_literal_exit_noncanonical_suggestion_stays_protected(self):
+        t = ClaudeExitTerminal()
+        f = screen('Try unquoted draft', harness='claude')
+        f.x = 2
+        t.frame = lambda: f
+        with self.assertRaisesRegex(m.DeliveryError, 'existing-input'):
+            deliver(t, literal_exit=True)
+        self.assertEqual((t.pastes, t.typed, t.enters), (0, 0, 0))
+
+    def test_literal_exit_swallowed_enter_never_retries(self):
+        t = ClaudeExitTerminal(dropped=99)
+        t.history = 'Resume this session with:\nclaude --resume ' + t.session + '\n'
+        with self.assertRaisesRegex(m.DeliveryError, 'receipt-timeout'):
+            deliver(t, literal_exit=True)
+        self.assertEqual((t.pastes, t.typed, t.enters), (0, 1, 1))
+
+    def test_literal_exit_old_resume_in_shell_cannot_confirm(self):
+        class NoNewNotice(ClaudeExitTerminal):
+            def frame(self):
+                if self.accepted_at is not None:
+                    history = self.history + 'user@host:~$ \n'
+                    return m.Frame(history, 14, len(history.splitlines()) - 1, history)
+                return super().frame()
+        t = NoNewNotice()
+        t.history = 'Resume this session with:\nclaude --resume ' + t.session + '\n'
+        with self.assertRaisesRegex(m.DeliveryError, 'receipt-timeout'):
+            deliver(t, literal_exit=True)
+        self.assertEqual((t.pastes, t.typed, t.enters), (0, 1, 1))
+
+    def test_literal_exit_protects_draft_and_mixed_input(self):
+        t = ClaudeExitTerminal(draft='human draft')
+        with self.assertRaisesRegex(m.DeliveryError, 'existing-input'):
+            deliver(t, literal_exit=True)
+        self.assertEqual((t.typed, t.enters), (0, 0))
+        t = ClaudeExitTerminal(mutate=True)
+        with self.assertRaisesRegex(m.DeliveryError, 'mixed-input'):
+            deliver(t, literal_exit=True)
+        self.assertEqual((t.typed, t.enters), (1, 0))
+
+    def test_literal_exit_rejects_other_harness_and_payload(self):
+        t = Terminal(payload='/exit')
+        with self.assertRaisesRegex(m.DeliveryError, 'requires-claude-exit'):
+            deliver(t, literal_exit=True)
+        self.assertEqual((t.pastes, t.enters), (0, 0))
+        t = ClaudeExitTerminal()
+        t.payload = 'ordinary task'
+        with self.assertRaisesRegex(m.DeliveryError, 'requires-claude-exit'):
+            deliver(t, literal_exit=True)
+        self.assertEqual((t.pastes, t.typed, t.enters), (0, 0, 0))
+
     def test_blocks_until_delayed_receipt_without_extra_enter(self):
         t = Terminal(delayed=5)
         self.assertEqual(deliver(t)['status'], 'delivered')

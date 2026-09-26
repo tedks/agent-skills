@@ -99,3 +99,38 @@ Unknown shells, modals and unsupported input surfaces do not authorize paste.
 Run `test-tmux-message.py` for behavior tests and `test-tmux-message-live.py`
 for a private real tmux test with a deterministic terminal. Neither uses model
 tokens or touches installed tools or live controllers.
+
+## Literal Claude exit
+
+For a verified retirement handoff, send the bare `/exit` with `--literal-exit`.
+Claude treats pasted slash commands as text; this mode uses `tmux send-keys -l`
+for `/exit` through the same stability, composer, lock and ownership checks.
+It sends at most one Enter, never a second recovery Enter. Other payloads and
+other harnesses are rejected before input. Success requires a fresh shell
+resume notice (`Resume this session with:` followed by `claude --resume UUID`),
+not a submitted user row. The retirement caller separately verifies the
+original harness processes ended. A modal, mixed input or missing fresh notice
+preserves the attempt for inspection; do not retype it blindly.
+
+The compatibility `paste_attempted` field also means a literal input attempt
+in this mode. A successful literal exit reports `transport: "literal"` and
+`receipt: "command"`. Example: `tmux-message send %PANE --literal-exit /exit`.
+
+## Python observation contract
+
+Callers may import `scripts/tmux-message.py` from this same skill installation
+and use `read_response_rows(pane, socket)` with a stable `%PANE_ID` and absolute
+verified socket path. Register the imported module in `sys.modules` before
+executing it, as required for dataclasses. This read-only API returns
+ANSI-stripped visible rows strictly above a recognized composer. It returns
+`None` for modal, unknown or unstable surfaces, and raises `DeliveryError`
+with a sanitized `reason` for invalid targets or server/read failure.
+It never types, pastes, probes, returns archived redraw history, or changes
+global environment variables. Missing read evidence is not process-end proof.
+All other Python names are internal; actual sends use the public CLI.
+
+For `--literal-exit` only, a stable Claude canonical `Try "…"` suggestion
+with its cursor at the input start counts as idle, as authorized for retirement.
+Unquoted suggestions, multiline input, and a cursor in actual draft text still
+defer. Ordinary messages retain the probe-and-defer rule. This distinction is
+screen evidence and cannot exclude a human typing between observations.

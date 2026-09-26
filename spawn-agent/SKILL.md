@@ -112,3 +112,8 @@ idle hook or final response before delivering a message to an empty composer.
 - `claude-trust-dir.sh`: inspect/grant workspace trust and verify trust behavior.
 - `codex-rollout-path.sh`: optional fork preparation and completion metadata.
 - [Reusable tools](references/reusable-tools.md): surrounding orchestration.
+
+Claude retirement exits use `tmux-message send %PANE --literal-exit /exit` only
+after a private handoff receipt. This types the slash command literally and
+permits one Enter, then verifies a fresh shell resume notice. Process exit
+remains a separate lifecycle receipt. Read the messaging reference for limits.
