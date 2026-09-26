@@ -115,9 +115,10 @@ class DeliveryTests(unittest.TestCase):
         with patch.object(m, 'Tmux', side_effect=OSError('private detail')):
             with self.assertRaisesRegex(m.DeliveryError, 'observation-read-failed'):
                 m.read_response_rows('%1', '/tmp/test-socket')
-        with patch.object(m, 'Tmux') as t, patch.object(m, 'composer', side_effect=TypeError('private frame detail')):
-            with self.assertRaisesRegex(m.DeliveryError, 'observation-read-failed'):
-                m.read_response_rows('%1', '/tmp/test-socket')
+        for error in (TypeError, IndexError, KeyError):
+            with self.subTest(error=error), patch.object(m, 'Tmux'), patch.object(m, 'composer', side_effect=error('private frame detail')):
+                with self.assertRaisesRegex(m.DeliveryError, 'observation-read-failed'):
+                    m.read_response_rows('%1', '/tmp/test-socket')
         with self.assertRaisesRegex(m.DeliveryError, 'invalid-observation-target'):
             m.read_response_rows('session:window', 'relative')
 

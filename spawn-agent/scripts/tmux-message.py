@@ -254,7 +254,7 @@ def read_response_rows(pane, socket):
         if inp.kind in {"unknown", "modal"}:
             return None
         return styles.strip_ansi(frame.raw).splitlines()[:inp.start]
-    except (subprocess.SubprocessError, OSError, ValueError, TypeError, AttributeError) as error:
+    except (subprocess.SubprocessError, OSError, ValueError, TypeError, AttributeError, LookupError) as error:
         raise DeliveryError("observation-read-failed") from error
 
 

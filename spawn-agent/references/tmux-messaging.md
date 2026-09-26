@@ -141,3 +141,7 @@ multi-sample typing-stability interval. The send path performs its own stable
 input checks. Literal-exit unit and disposable-terminal tests do not model every
 real Claude slash-command menu layout. An unrecognized menu remains a safe
 deferral; do not infer compatibility or retry an ambiguous exit from these tests.
+
+Completion consumers require a marker-only final assistant block. Nonblank
+status or queued-message rows between that block and the composer keep
+retirement pending; fixtures cover blank rows and plain horizontal rules.
