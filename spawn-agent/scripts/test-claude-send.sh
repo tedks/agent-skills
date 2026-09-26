@@ -48,6 +48,15 @@ export PATH="$TEST_DIR/bin:$PATH"
 
 cat > "$TEST_DIR/bin/python3" <<'STUB'
 #!/bin/bash
+if [[ "${1:-}" == */agent-message.py && "${2:-}" == guard ]]; then
+  n=0; [[ -s "$FAKE_STATE/guards" ]] && n=$(<"$FAKE_STATE/guards")
+  n=$((n + 1)); printf '%s' "$n" > "$FAKE_STATE/guards"
+  if [[ "${FAKE_ATTEMPT_UNKNOWN:-0}" == 1 ]]; then exit 3; fi
+  if [[ "${FAKE_RECEIPT_AFTER_GUARDS:-0}" -gt 0 && "$n" -ge "$FAKE_RECEIPT_AFTER_GUARDS" ]]; then
+    printf 'received\n'
+  else printf 'missing\n'; fi
+  exit 0
+fi
 if [[ "${FAKE_FAIL_CLOCK_BEFORE_PASTE:-0}" == 1 && "$*" == *monotonic_ns* && ! -s "$FAKE_STATE/pasted" ]]; then
   printf 'injected monotonic clock subprocess failure\n' >&2
   exit 1
@@ -196,6 +205,7 @@ PY
   send-keys)
     [[ "${!#}" == Enter ]]
     printf 'enter\n' >> "$FAKE_LOG"
+    if [[ "${FAKE_IGNORE_FIRST_ENTER:-0}" == 1 && $(grep -c '^enter$' "$FAKE_LOG") -eq 1 ]]; then exit 0; fi
     python3 -c 'import time; print(time.monotonic_ns())' >> "$FAKE_STATE/times"
     cp "$FAKE_STATE/composer" "$FAKE_STATE/submitted"
     : > "$FAKE_STATE/composer"
@@ -227,6 +237,7 @@ reset_case() {
   : > "$FAKE_STATE/tmux-trace"
   : > "$FAKE_STATE/parser-trace"
   : > "$FAKE_STATE/sender-pid"
+  : > "$FAKE_STATE/guards"
   printf '%s\n' "${1:-empty}" > "$FAKE_STATE/mode"
   cp "$FIXTURES/claude-blank.ansi" "$FAKE_STATE/empty"
   cp "$FIXTURES/modal.txt" "$FAKE_STATE/modal"
@@ -665,4 +676,49 @@ lines = Path(sys.argv[1]).read_text().splitlines()
 assert lines == ['paste-start','paste-end','enter','paste-start','paste-end','enter'], lines
 PY
 
-echo 'claude-send composer protection tests passed'
+# New transaction mode must recover an intentionally unconsumed first Enter
+# using exact current ownership, with one paste total and two key attempts.
+reset_case empty
+FAKE_IGNORE_FIRST_ENTER=1 run_sender target --submit-delay 0 --max-wait 3 --poll-interval 0.1 \
+  --attempt-file "$TEST_DIR/synthetic-attempt" --prompt-file "$prompt_file" > /dev/null
+[[ -s "$FAKE_STATE/composer" ]]
+run_sender target --submit-delay 0 --submit-pending --poll-interval 0.1 \
+  --attempt-file "$TEST_DIR/synthetic-attempt" --prompt-file "$prompt_file" > /dev/null
+[[ $(grep -c '^paste-start$' "$FAKE_LOG") -eq 1 ]]
+[[ $(grep -c '^enter$' "$FAKE_LOG") -eq 2 ]]
+cmp "$FAKE_STATE/submitted" "$prompt_file"
+
+# A delayed application receipt observed during the guarded continuation
+# suppresses Enter, even when its composer still paints our exact old bytes.
+reset_case empty
+cp "$prompt_file" "$FAKE_STATE/composer"
+out=$(FAKE_RECEIPT_AFTER_GUARDS=3 run_sender target --submit-delay 0 --submit-pending \
+  --attempt-file "$TEST_DIR/synthetic-attempt" --prompt-file "$prompt_file")
+[[ "$out" == 'status=received receipt=received' ]]
+[[ ! -s "$FAKE_LOG" ]]
+cmp "$FAKE_STATE/composer" "$prompt_file"
+
+# Human mixing, modals, wrong bytes and unreadable attempt evidence never
+# authorize continuation. No render grace is permitted for retained input.
+for mode in human-during-delay modal wrong-bytes unknown; do
+  reset_case "$mode"
+  cp "$prompt_file" "$FAKE_STATE/composer"
+  printf 'pasted\n' > "$FAKE_STATE/pasted"
+  if [[ "$mode" == wrong-bytes ]]; then printf 'different human draft' > "$FAKE_STATE/composer"; fi
+  if [[ "$mode" == unknown ]]; then unknown=1; else unknown=0; fi
+  if FAKE_ATTEMPT_UNKNOWN=$unknown run_sender target --submit-delay 1 --submit-pending --poll-interval 0.1 \
+      --attempt-file "$TEST_DIR/synthetic-attempt" --prompt-file "$prompt_file" 2>"$TEST_DIR/continuation.err"; then
+    echo "FAIL: unsafe $mode continuation was accepted" >&2; exit 1
+  else rc=$?; [[ $rc -eq 3 ]]; fi
+  [[ ! -s "$FAKE_LOG" ]]
+  pending=$(assert_pending ambiguous "$TEST_DIR/continuation.err")
+  cmp "$pending" "$prompt_file"
+  rm -rf "$(dirname "$pending")"
+done
+reset_case empty
+if run_sender target --submit-pending --prompt-file "$prompt_file" 2>"$TEST_DIR/no-attempt.err"; then
+  echo 'FAIL: continuation without receipt baseline was accepted' >&2; exit 1
+fi
+[[ ! -s "$FAKE_STATE/tmux-calls" ]]
+
+echo 'claude-send composer protection and continuation tests passed'

@@ -352,6 +352,36 @@ Claude-specific spawner with additional options:
 
 ### claude-send.sh
 
+For control notices that require receipt and bounded recovery, use the shared
+`agent-message.py` coordinator instead of wrapping `claude-send.sh` in a session.
+Put the report in a durable file and send a short pointer:
+
+```bash
+~/.claude/skills/spawn-agent/scripts/agent-message.py send SESSION:WINDOW \
+  --harness codex --report-file /absolute/path/to/report.md
+~/.claude/skills/spawn-agent/scripts/agent-message.py status /private/attempt/attempt.json
+~/.claude/skills/spawn-agent/scripts/agent-message.py continue /private/attempt/attempt.json
+```
+
+Claude uses `--harness claude`. The coordinator prefixes a fresh message UUID,
+preflights one printable-ASCII line against pane width, binds its exact bytes to
+the receiver process and a new-record receipt baseline, and permits at most one
+Enter-only continuation through this sender. `--no-continuation` stops after
+the initial transport attempt. Fresh exact application user-message records or
+the measured Codex pending-steer widget prove receipt; output/quoted history,
+vanished composer text and tmux success do not. The result is JSON: receipt exit
+0, deferred exit 2, ambiguous exit 3, plus a private attempt path. It does not
+wait for execution/completion, use native queue commands, clear input or repaste
+on continuation. Keep unresolved attempts; do not replay old legacy pending
+files or Ted's manual submissions. Current adapters need an established live
+transcript; unsupported identity/surfaces defer. See
+[the caller contract](../../../docs/tmux-messaging.md) for conditions and limits.
+
+The transport's `--submit-pending` mode requires `--attempt-file` and exact
+current ownership throughout its independent submit delay. Those flags are
+internal to the coordinator; callers must not invent receipt baselines or
+fall back to raw tmux Enter.
+
 Send a message to a running Claude instance:
 ```bash
 ~/.claude/skills/spawn-agent/scripts/claude-send.sh <window> <message>
