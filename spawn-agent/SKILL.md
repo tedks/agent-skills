@@ -352,9 +352,23 @@ Claude-specific spawner with additional options:
 
 ### claude-send.sh
 
-For control notices that require receipt and bounded recovery, use the shared
-`agent-message.py` coordinator instead of wrapping `claude-send.sh` in a session.
-Put the report in a durable file and send a short pointer:
+**Interim protocol, directed by Ted:** the `agent-message.py` pilot is paused
+because its transcript-discovery prerequisites block live sessions. Use the
+installed `claude-send.sh` with `--submit-delay 8 --render-wait 3 --max-wait 10`,
+send actual message text by default, and read tmux for a NEW submitted user
+message or explicit pending-steer receipt. Busy output does not require an idle
+gate. File paths are optional supporting attachments, not the message protocol.
+
+Ted explicitly permits manual tmux relay when necessary: inspect the target,
+paste once into an empty agent input, settle eight seconds, then Enter; or use
+one Enter-only continuation when the input is exactly the sender's own
+unsubmitted bytes. Verify receipt. Never clear unrelated/mixed drafts, repaste
+an ambiguous attempt, or replay archived pending files. Report concrete blocked
+panes rather than polling indefinitely. Keep reusable fixes here, without a
+per-session sender fork. See [the current protocol](../../../docs/tmux-messaging.md).
+
+The following coordinator interface is an unfinished candidate, not the
+operational fallback:
 
 ```bash
 ~/.claude/skills/spawn-agent/scripts/agent-message.py send SESSION:WINDOW \
@@ -379,8 +393,8 @@ transcript; unsupported identity/surfaces defer. See
 
 The transport's `--submit-pending` mode requires `--attempt-file` and exact
 current ownership throughout its independent submit delay. Those flags are
-internal to the coordinator; callers must not invent receipt baselines or
-fall back to raw tmux Enter.
+internal to the coordinator; callers must not invent receipt baselines. Ted's
+explicit manual-relay authorization above governs the interim fallback.
 
 Send a message to a running Claude instance:
 ```bash
