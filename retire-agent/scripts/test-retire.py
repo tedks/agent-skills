@@ -703,8 +703,14 @@ class Tests(unittest.TestCase):
                  '        while not self.ended() and time.monotonic() < until:\n'
                  '            time.sleep(.02)\n'
                  '        signal.unlink()\n'
+                 '        stats = self.repo.parent / "terminal.json"\n'
+                 '        stats.unlink(missing_ok=True)\n'
                  '        checked(self.tmux + ["respawn-pane", "-k", "-t", self.args.pane, ' + repr(outer) + '])\n'
-                 '        time.sleep(.15)\n' + before)
+                 '        until = time.monotonic() + 3\n'
+                 '        while not stats.exists() and time.monotonic() < until:\n'
+                 '            time.sleep(.02)\n'
+                 '        if not stats.exists():\n'
+                 '            raise Stop("fixture replacement did not become ready")\n' + before)
         entry = self.instrument(before, after)
         with patch.dict(os.environ, {'RETIRE_TEST_SCRIPT': str(entry)}):
             result = self.invoke('--handoff', 'codex', 'test-model', '--roles', str(self.roles))
