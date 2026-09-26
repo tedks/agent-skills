@@ -36,7 +36,8 @@ waiting for their turn to finish.
 ~/.claude/skills/spawn-agent/scripts/agent-spawn.sh chaos:helper agy ./project
 ```
 
-Codex options: `--model MODEL`, `--codex-bin EXECUTABLE`, or environment
+Claude and Codex accept `--model MODEL` for an explicit model.
+Codex also accepts `--codex-bin EXECUTABLE`, or environment
 `SPAWN_CODEX_MODEL` / `SPAWN_CODEX_BIN`. Its startup update check is suppressed
 for that process only. Codex launches use `--no-alt-screen` to preserve tmux
 scrollback for receipts longer than the visible pane. Existing alternate-screen
@@ -111,3 +112,8 @@ idle hook or final response before delivering a message to an empty composer.
 - `claude-trust-dir.sh`: inspect/grant workspace trust and verify trust behavior.
 - `codex-rollout-path.sh`: optional fork preparation and completion metadata.
 - [Reusable tools](references/reusable-tools.md): surrounding orchestration.
+
+Claude retirement exits use `tmux-message send %PANE --literal-exit /exit` only
+after a private handoff receipt. This types the slash command literally and
+permits one Enter, then verifies a fresh shell resume notice. Process exit
+remains a separate lifecycle receipt. Read the messaging reference for limits.

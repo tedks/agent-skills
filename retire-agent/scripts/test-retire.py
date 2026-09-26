@@ -1,0 +1,1296 @@
+#!/usr/bin/env python3
+"""Behavioral tests; isolated tmux server, local bare private Git, no models/network."""
+import json
+import importlib.util
+import os
+from pathlib import Path
+import re
+import signal
+import select
+import shlex
+import subprocess
+import sys
+import tempfile
+import termios
+import time
+import tty
+import unittest
+from unittest.mock import patch
+from types import SimpleNamespace
+import uuid
+
+sys.dont_write_bytecode = True
+
+HERE = Path(__file__).resolve().parent
+SHARED = HERE.parents[1] / 'spawn-agent' / 'scripts'
+
+
+def shard_data(event, identity):
+    return {'event': event, 'identity': identity, 'author': 'agent',
+            'date': '2026-09-26', 'session_id': 'test-session-id', 'harness': identity['process']['agent'],
+            'model': 'test-model', 'working_directory': identity['directory'], 'tmux_window': 'private-test:0',
+            'role': 'Utility', 'landed_work': 'none', 'lessons': 'Record receipts before exit.', 'provenance': 'fixture-agent',
+            'recovery': {'mission': 'Mission authorized', 'authorization': 'fixture caller', 'pauses': 'none',
+                         'worktree': identity['directory'], 'branch': 'master', 'heads': 'fixture seed',
+                         'tested_vs_merged': 'none', 'evidence': 'local records', 'limits': 'fixture only',
+                         'failures': 'none', 'open_decisions': [], 'outstanding_sends': 'none', 'next_action': 'read artifacts'},
+            'resources': []}
+
+
+def terminal(directory, mode):
+    directory = Path(directory)
+    old = termios.tcgetattr(0)
+    tty.setraw(0)
+    draft = b'human unfinished draft' if mode == 'draft' else b''
+    pending = b''
+    pasting = False
+    pasted_payload = False
+    pastes = enters = exit_enters = 0
+    history = ''
+    event = None
+    due = None
+    children = []
+    if mode in ('node-core', 'extra-core', 'linger-core'):
+        core = str(directory / '@openai/codex/node_modules/@openai/codex-linux-x64/vendor/test/bin/codex')
+        names = (core,) if mode == 'linger-core' else (core, core if mode == 'extra-core' else 'node')
+        for name in names:
+            if mode == 'linger-core':
+                body = 'import signal,time; signal.signal(signal.SIGHUP,signal.SIG_IGN); time.sleep(360)'
+                command = 'exec -a ' + shlex.quote(name) + ' ' + shlex.join([os.environ['RETIRE_TEST_PYTHON'], '-c', body])
+                children.append(subprocess.Popen(['bash', '-c', command], start_new_session=True))
+                (directory / 'owned-core-pid').write_text(str(children[-1].pid))
+            else:
+                children.append(subprocess.Popen(['bash', '-c', 'exec -a ' + shlex.quote(name) + ' sleep 360']))
+    def draw():
+        collapsed = f'[Pasted Content {len(draft.decode(errors="replace"))} chars]' if draft and mode != 'draft' else draft.decode(errors='replace')
+        body = history + '\r\n› ' + collapsed + '\r\n\r\n  Test model · branch\r\n'
+        if mode.startswith('claude'):
+            if mode == 'claude-ghost' and event and not draft:
+                collapsed = 'Try "summarize the work"'
+            body = history + '\r\n' + '─' * 80 + '\r\n❯ ' + collapsed + '\r\n' + '─' * 80 + '\r\n'
+        visible_marker = mode in ('composer', 'claude-composer') and draft.startswith('● RETIRE-DONE-'.encode())
+        if visible_marker:
+            body = history + '\r\n› \r\n' + draft.decode() + '\r\n\r\n  Test model · branch\r\n'
+            if mode == 'claude-composer':
+                body = history + '\r\n' + '─' * 80 + '\r\n❯ \r\n' + draft.decode() + '\r\n' + '─' * 80 + '\r\n'
+        if mode == 'modal':
+            body = 'Do you trust the contents of this directory?\r\n  1. Yes\r\n  2. No\r\n'
+        sys.stdout.write('\x1b[?2004h\x1b[2J\x1b[H' + body)
+        row = history.count('\n') + (3 if mode.startswith('claude') else 2)
+        if visible_marker:
+            row += 1
+        cursor = 3 if mode == 'claude-ghost' and event and not draft else 3 + len(collapsed)
+        sys.stdout.write(f'\x1b[{row};{cursor}H')
+        sys.stdout.flush()
+        (directory / 'terminal.json').write_text(json.dumps({'pastes': pastes, 'enters': enters, 'event': event}))
+    try:
+        draw()
+        while True:
+            if due is not None and time.monotonic() >= due:
+                history += '● RETIRE-DONE-' + event + '\r\n'
+                due = None
+                draw()
+            cleared = directory / 'human-cleared-history'
+            if cleared.exists():
+                history = '• Assistant output cleared.\r\n'
+                cleared.unlink()
+                draw()
+            new_draft = directory / 'human-typed-draft'
+            if new_draft.exists():
+                draft = b'human new draft'
+                new_draft.unlink()
+                draw()
+            if (directory / 'human-independent-exit').exists():
+                return
+            if mode == 'draft' and (directory / 'human-cleared-draft').exists():
+                draft = b''
+                mode = 'done'
+                draw()
+            if not select.select([0], [], [], .1)[0]:
+                continue
+            pending += os.read(0, 65536)
+            while pending:
+                if pending.startswith(b'\x1b[200~'):
+                    pastes += 1
+                    pasting = True
+                    pasted_payload = True
+                    pending = pending[6:]
+                elif pending.startswith(b'\x1b[201~'):
+                    pasting = False
+                    pending = pending[6:]
+                elif pending.startswith(b'\x1b') and len(pending) < 6:
+                    break
+                else:
+                    char, pending = pending[:1], pending[1:]
+                    if not pasting and char == b'\r':
+                        enters += 1
+                        payload = draft.decode()
+                        if payload == '/exit':
+                            exit_enters += 1
+                            # Independently prove order from the remote, before exit.
+                            remote = directory / 'remote.git'
+                            receipt = subprocess.run(['git', '--git-dir', str(remote), 'show', 'master:receipts/' + event + '.json'], capture_output=True, text=True)
+                            verified = False
+                            if receipt.returncode == 0:
+                                record = json.loads(receipt.stdout)
+                                source = directory / 'repo' / '.git' / 'retirements' / (event + '.shard')
+                                data = json.loads(source.read_text())
+                                expected = 'waiting/' + data['date'] + '-' + data['session_id'][:12] + '-retire-' + event + '.md'
+                                remote_hash = subprocess.run(['git', '--git-dir', str(remote), 'rev-parse', 'master:' + expected], capture_output=True, text=True)
+                                verified_hash = subprocess.run(['git', '--git-dir', str(remote), 'rev-parse', record.get('commit', 'missing') + ':' + expected], capture_output=True, text=True)
+                                recorded_blob = subprocess.run(['git', '--git-dir', str(remote), 'show', record.get('commit', 'missing') + ':' + expected], capture_output=True)
+                                master_blob = subprocess.run(['git', '--git-dir', str(remote), 'show', 'master:' + expected], capture_output=True)
+                                verified = (record.get('status') == 'handoff-verified' and record.get('event') == event
+                                            and record.get('shard') == expected and remote_hash.returncode == 0
+                                            and verified_hash.returncode == 0 and remote_hash.stdout == verified_hash.stdout
+                                            and recorded_blob.returncode == 0 and master_blob.returncode == 0
+                                            and recorded_blob.stdout == master_blob.stdout
+                                            and json.loads(recorded_blob.stdout)['event'] == event
+                                            and json.loads(recorded_blob.stdout)['identity'] == identity)
+                            (directory / 'exit-order.json').write_text(json.dumps({'receipt_before_exit': verified}))
+                            if mode.startswith('claude') and pasted_payload:
+                                # Real regression: Claude treats pasted /exit as prose.
+                                history = '❯ /exit\r\n● Pasted text is an ordinary message.\r\n'
+                                draft = b''
+                                pasted_payload = False
+                                draw()
+                                continue
+                            if mode != 'hold':
+                                (directory / 'terminal.json').write_text(json.dumps({'pastes': pastes, 'enters': enters, 'event': event, 'exit_pasted': pasted_payload, 'exit_enters': exit_enters}))
+                                if mode.startswith('claude'):
+                                    sys.stdout.write('\x1b[2J\x1b[HResume this session with:\r\nclaude --resume aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa\r\n')
+                                    sys.stdout.flush()
+                                return
+                        else:
+                            match = re.search(r'Event ([0-9a-f]{32})\.', payload)
+                            event = match[1]
+                            if mode == 'initial-receipt':
+                                result = subprocess.run(['git', '--git-dir', str(directory / 'remote.git'), 'show', 'master:receipts/' + event + '.json'], text=True, capture_output=True)
+                                (directory / 'pre-offer-receipt.json').write_text(json.dumps({'verified': result.returncode == 0 and json.loads(result.stdout).get('event') == event}))
+                            identity = json.JSONDecoder().raw_decode(payload.split(', identity ', 1)[1])[0]
+                            shard = directory / 'repo' / '.git' / 'retirements' / (event + '.shard')
+                            data = shard_data(event, identity)
+                            if mode != 'waiting-bad':
+                                data['waiting'] = {'decision': 'Choose scope', 'owner': 'Ted'}
+                            if mode == 'resource':
+                                data['resources'] = [{'name': 'lease', 'status': 'pending'}]
+                            if mode == 'path':
+                                target = directory / 'outside.json'
+                                target.write_text(json.dumps(data))
+                                shard.symlink_to(target)
+                            elif mode != 'decline':
+                                shard.write_text(json.dumps(data))
+                            if mode == 'push-reject':
+                                hook = directory / 'remote.git' / 'hooks' / 'pre-receive'
+                                hook.write_text('#!/bin/sh\nexit 1\n')
+                                hook.chmod(0o700)
+                            if mode == 'commit-reject':
+                                hook = directory / 'repo' / '.git' / 'hooks' / 'pre-commit'
+                                hook.write_text('#!/bin/sh\nexit 1\n')
+                                hook.chmod(0o700)
+                        history = ('❯' if mode.startswith('claude') else '›') + ' [Pasted Content ' + str(len(payload)) + ' chars]\r\n'
+                        if mode.startswith('claude'):
+                            history = '• Messages to be submitted after next tool call\r\n  ↳ [Pasted Content ' + str(len(payload)) + ' chars]\r\n'
+                        if mode == 'ambiguous':
+                            history = 'Assistant continues without acceptance evidence.\r\n'
+                        else:
+                            history += '• Accepted\r\n'
+                            if payload != '/exit' and mode not in ('composer', 'claude-composer'):
+                                disposition = 'DECLINED' if mode.startswith('decline') else 'DONE'
+                                if mode == 'quoted':
+                                    history += 'RETIRE-DONE-' + event + '\r\n'
+                                elif mode == 'old':
+                                    history += '● RETIRE-DONE-' + ('0' * 32) + '\r\n'
+                                elif mode == 'prose-marker':
+                                    history += '● Shard written.\r\n  RETIRE-DONE-' + event + '\r\n'
+                                elif mode == 'late-done':
+                                    due = time.monotonic() + .2
+                                else:
+                                    history += '● RETIRE-' + disposition + '-' + event + '\r\n'
+                                    if mode == 'padded-marker':
+                                        history = history[:-2] + '   \t\r\n'
+                                    if mode.endswith('suffix'):
+                                        history += '  Do not retire yet; recovery still needs correction.\r\n'
+                                    elif mode.endswith('later-assistant'):
+                                        history += '● Recovery still needs correction.\r\n'
+                        draft = ('● RETIRE-DONE-' + event).encode() if mode in ('composer', 'claude-composer') else b''
+                        pasted_payload = False
+                    else:
+                        draft += char
+            # Buffer a bracketed paste as one composer update, rather than
+            # redrawing a changing collapsed-paste count for every byte. Typed
+            # input still redraws after each available input chunk.
+            if not pasting:
+                draw()
+    finally:
+        for child in children:
+            if mode != 'linger-core':
+                child.terminate()
+                child.wait()
+        termios.tcsetattr(0, termios.TCSADRAIN, old)
+
+
+class Tests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.directory = Path(self.temp.name)
+        self.label = 'retire-test-' + uuid.uuid4().hex
+        self.tmux = ['tmux', '-L', self.label]
+        self.repo = self.directory / 'repo'
+        self.command('git', 'init', '--bare', str(self.directory / 'remote.git'))
+        self.command('git', 'init', '-b', 'master', str(self.repo))
+        self.git('config', 'user.email', 'test@example.invalid')
+        self.git('config', 'user.name', 'Test')
+        (self.repo / 'seed').write_text('private test\n')
+        self.git('add', 'seed')
+        self.git('commit', '-m', 'seed')
+        self.git('remote', 'add', 'origin', str(self.directory / 'remote.git'))
+        self.git('push', '-u', 'origin', 'master')
+        shared = self.directory / 'shared' / 'scripts'
+        shared.mkdir(parents=True)
+        # Timing-only wrapper; real shared sender, real terminal, no transport stubs.
+        sender = shared / 'tmux-message.sh'
+        sender.write_text('#!/usr/bin/env bash\nphase=$1; pane=$2; shift 2\nexec ' + shlex.quote(str(SHARED / 'tmux-message.sh')) + ' "$phase" "$pane" "$@" --stable-wait .05 --max-wait .6 --submit-delay .05 --render-wait .5 --receipt-wait .5 --retry-wait .05 --poll-interval .02\n')
+        # Options after --prompt-file are accepted by argparse in shared sender.
+        sender.chmod(0o700)
+        (shared / 'tmux-message.py').symlink_to(SHARED / 'tmux-message.py')
+        spawn = shared / 'agent-spawn.sh'
+        spawn.write_text('#!/usr/bin/env python3\nimport json,sys\nfrom pathlib import Path\nargs=sys.argv[1:]\nbrief=Path(args[args.index("--prompt-file")+1]).read_text()\nPath(' + repr(str(self.directory / 'spawn.json')) + ').write_text(json.dumps({"args":args,"brief":brief}))\n')
+        spawn.chmod(0o700)
+        checker = self.directory / 'private-check'
+        checker.write_text('#!/bin/sh\n[ "$1" = ' + shlex.quote(str(self.directory / 'remote.git')) + ' ]\n')
+        checker.chmod(0o700)
+        self.roles = self.directory / 'ROLES.md'
+        self.roles.write_text('Common to every hat: first record before action.\n')
+        self.env = dict(os.environ, SPAWN_TMUX_LABEL=self.label, RETIRE_REPO=str(self.repo), RETIRE_PRIVATE_CHECK=str(checker), RETIRE_SPAWN_SKILL=str(shared.parent), RETIRE_TEST_PYTHON=sys.executable)
+        self.env.pop('SPAWN_TMUX_SOCKET', None)
+        self.env.pop('TMUX', None)
+
+    def tearDown(self):
+        owned = self.directory / 'owned-core-pid'
+        if owned.exists():
+            try:
+                pid = int(owned.read_text())
+                argv = Path(f'/proc/{pid}/cmdline').read_bytes()
+                if argv.startswith(str(self.directory / '@openai/codex/').encode()):
+                    os.kill(pid, signal.SIGTERM)
+            except (ProcessLookupError, FileNotFoundError):
+                pass
+        subprocess.run(self.tmux + ['kill-server'], capture_output=True)
+        self.temp.cleanup()
+
+    def command(self, *args):
+        return subprocess.check_output(args, text=True, stderr=subprocess.DEVNULL).strip()
+
+    def git(self, *args):
+        return self.command('git', '-C', str(self.repo), *args)
+
+    def actor(self, mode='done', node=False, relative=False):
+        (self.directory / 'terminal.json').unlink(missing_ok=True)
+        fixture = Path(__file__).resolve()
+        if node:
+            fixture = self.directory / '@openai' / 'codex' / 'bin' / 'codex.js'
+            fixture.parent.mkdir(parents=True)
+            fixture.write_bytes(Path(__file__).read_bytes())
+            link = self.directory / 'codex'
+            link.symlink_to(fixture)
+            fixture = link
+            if relative:
+                fixture = Path('codex')
+        command = shlex.join([sys.executable, str(fixture), '--terminal', str(self.directory), mode])
+        # argv[0] is the harness identity; outer shell survives process exit.
+        inner = 'exec -a ' + ('node' if node else ('claude' if mode.startswith('claude') else 'codex')) + ' ' + command
+        outer = shlex.join(['env', 'RETIRE_TEST_PYTHON=' + sys.executable, 'bash', '-c', inner]) + '; exec bash --norc'
+        options = ['-c', str(self.directory)] if relative else []
+        pane = self.command(*self.tmux, 'new-session', '-d', '-P', '-F', '#{pane_id}', '-x', '240', '-y', '40', *options, outer)
+        self.pane = pane
+        self.wait_for(lambda: (self.directory / 'terminal.json').exists())
+        return pane
+
+    def wait_for(self, predicate):
+        deadline = time.monotonic() + 4
+        while not predicate():
+            self.assertLess(time.monotonic(), deadline)
+            time.sleep(.02)
+
+    def invoke(self, *args):
+        return subprocess.run([os.environ.get('RETIRE_TEST_SCRIPT', str(HERE / 'retire.sh')), self.pane, '--wait', '.4', '--poll', '.02', *args], env=self.env, text=True, capture_output=True, timeout=12)
+
+    def state(self):
+        paths = list((self.repo / '.git' / 'retirements').glob('*.json'))
+        self.assertEqual(len(paths), 1)
+        return paths[0], json.loads(paths[0].read_text())
+
+    def observed(self):
+        return json.loads((self.directory / 'terminal.json').read_text())
+
+    def source(self):
+        entry = Path(os.environ.get('RETIRE_TEST_SCRIPT', str(HERE / 'retire.sh')))
+        return entry.with_name('retire.py').read_text()
+
+    def instrument(self, before, after):
+        stage = self.directory / ('instrumented-' + uuid.uuid4().hex)
+        stage.mkdir()
+        source = self.source()
+        if before not in source:
+            self.fail('INVALID-INSTRUMENTATION: missing stable anchor')
+        (stage / 'retire.py').write_text(source.replace(before, after, 1))
+        entry = stage / 'retire.sh'
+        entry.write_bytes((HERE / 'retire.sh').read_bytes())
+        entry.chmod(0o700)
+        return entry
+
+    def test_retire_exit_to_shell_and_path_only_commit(self):
+        self.actor()
+        (self.repo / 'unrelated').write_text('preserve staged content')
+        self.git('add', 'unrelated')
+        result = self.invoke()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertTrue(json.loads((self.directory / 'exit-order.json').read_text())['receipt_before_exit'])
+        self.assertIn('bash', self.command(*self.tmux, 'list-panes', '-a', '-F', '#{pane_current_command}'))
+        self.assertIn('A  unrelated', self.git('status', '--short'))
+        self.assertNotIn('unrelated', self.git('ls-tree', '-r', '--name-only', 'origin/master'))
+        path, state = self.state()
+        ledger = [json.loads(line) for line in path.with_suffix('.jsonl').read_text().splitlines()]
+        actions = [record['action'] for record in ledger]
+        self.assertLess(actions.index('handoff-receipt'), actions.index('original-exit-confirmed'))
+        exit_send = next(i for i, record in enumerate(ledger) if record['action'] == 'send-attempt' and record.get('phase') == 'exit')
+        self.assertLess(actions.index('handoff-receipt'), exit_send)
+        self.assertTrue(any(record.get('receipt_type') == 'submitted' for record in ledger))
+        self.assertFalse(any('payload' in record for record in ledger))
+        index = (self.repo / 'waiting' / 'INDEX.md').read_text()
+        self.assertIn('Session | Provider | Role | State | Last verified', index)
+        self.assertIn('test-session-id | OpenAI | Utility | retired', index)
+
+    def test_draft_preserved_without_paste(self):
+        self.actor('draft')
+        result = self.invoke()
+        self.assertEqual(result.returncode, 2)
+        self.assertEqual(self.observed()['pastes'], 0)
+        path, state = self.state()
+        self.assertEqual(state['offer']['status'], 'deferred')
+        self.assertTrue(Path('/proc/' + str(state['identity']['process']['pid'])).exists())
+        self.assertIn('human unfinished draft', self.command(*self.tmux, 'capture-pane', '-p', '-t', self.pane))
+
+    def test_modal(self):
+        self.actor('modal')
+        self.assertEqual(self.invoke().returncode, 2)
+        self.assertEqual(self.observed()['pastes'], 0)
+        self.assertIn('trust the contents', self.command(*self.tmux, 'capture-pane', '-p', '-t', self.pane))
+        self.assertEqual(self.state()[1]['offer']['status'], 'deferred')
+
+    def test_ambiguous_never_repastes(self):
+        self.actor('ambiguous')
+        self.assertEqual(self.invoke().returncode, 2)
+        path, state = self.state()
+        self.assertEqual(state['offer']['status'], 'ambiguous')
+        count = self.observed()['pastes']
+        self.assertEqual(count, 1)
+        self.assertEqual(self.invoke('--resume', str(path)).returncode, 2)
+        self.assertEqual(self.invoke('--resume', str(path), '--retry-deferred', 'offer').returncode, 2)
+        self.assertEqual(self.observed()['pastes'], count)
+
+    def test_private_and_missing_remotes_before_send(self):
+        self.actor()
+        public = self.directory / 'public.git'
+        self.command('git', 'clone', '--bare', str(self.directory / 'remote.git'), str(public))
+        self.git('remote', 'set-url', 'origin', str(public))
+        self.assertEqual(self.invoke().returncode, 2)
+        self.assertEqual(self.observed()['pastes'], 0)
+        self.git('remote', 'remove', 'origin')
+        self.assertEqual(self.invoke().returncode, 2)
+        self.assertEqual(self.observed()['pastes'], 0)
+
+    def test_decline_caller_continuation(self):
+        self.actor('decline')
+        self.assertEqual(self.invoke().returncode, 2)
+        path, state = self.state()
+        self.assertEqual(state['disposition'], 'DECLINED')
+        shard = path.parent / (state['id'] + '.shard')
+        data = shard_data(state['id'], state['identity'])
+        data.update(author='caller', declined=True, provenance='caller from committed artifacts; agent declined')
+        shard.write_text(json.dumps(data))
+        result = self.invoke('--resume', str(path), '--caller-shard')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.observed()['pastes'], 2)  # one offer and one bare exit
+        self.assertEqual(json.loads(shard.read_text())['author'], 'caller')
+
+    def test_waiting_requires_decision_owner(self):
+        self.actor('waiting-bad')
+        result = self.invoke('--waiting')
+        self.assertEqual(result.returncode, 2)
+        self.assertIn('pending decision', result.stderr)
+        path, state = self.state()
+        shard = path.parent / (state['id'] + '.shard')
+        data = json.loads(shard.read_text())
+        data['waiting'] = {'decision': 'Human scope decision', 'owner': 'Ted'}
+        shard.write_text(json.dumps(data))
+        self.assertEqual(self.invoke('--waiting', '--resume', str(path)).returncode, 0)
+
+    def test_resource_pending_blocks_exit(self):
+        self.actor('resource')
+        result = self.invoke()
+        self.assertEqual(result.returncode, 2)
+        self.assertIn('resources', result.stderr)
+        self.assertFalse((self.directory / 'exit-order.json').exists())
+
+    def test_symlink_shard_blocks_exit(self):
+        self.actor('path')
+        self.assertEqual(self.invoke().returncode, 2)
+        self.assertFalse((self.directory / 'exit-order.json').exists())
+
+    def test_handoff_brief_model_after_exit(self):
+        self.actor()
+        result = self.invoke('--handoff', 'codex', 'test-model', '--roles', str(self.roles))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        spawned = json.loads((self.directory / 'spawn.json').read_text())
+        self.assertIn('test-model', spawned['args'])
+        self.assertIn('Cold-start audit before action', spawned['brief'])
+        self.assertIn('Common to every hat', spawned['brief'])
+        self.assertIn('Mission authorized', spawned['brief'])
+        path, state = self.state()
+        ledger = [json.loads(line) for line in path.with_suffix('.jsonl').read_text().splitlines()]
+        actions = [record['action'] for record in ledger]
+        self.assertLess(actions.index('original-exit-confirmed'), actions.index('successor-attempt'))
+        self.assertLess(actions.index('successor-attempt'), actions.index('successor-result'))
+        self.assertFalse(Path('/proc/' + str(state['identity']['process']['pid'])).exists())
+        self.assertEqual(self.invoke('--handoff', 'codex', 'test-model', '--roles', str(self.roles), '--resume', str(path)).returncode, 2)
+
+    def test_no_successor_before_exit(self):
+        self.actor('hold')
+        result = self.invoke('--handoff', 'codex', 'test-model', '--roles', str(self.roles))
+        self.assertEqual(result.returncode, 2)
+        self.assertTrue((self.directory / 'exit-order.json').exists())
+        self.assertFalse((self.directory / 'spawn.json').exists())
+
+    def test_changed_identity_and_malformed_state(self):
+        self.actor('decline')
+        self.invoke()
+        path, state = self.state()
+        state['identity']['process']['start'] = 'wrong'
+        path.write_text(json.dumps(state))
+        result = self.invoke('--resume', str(path))
+        self.assertEqual(result.returncode, 2)
+        self.assertIn('identity changed', result.stderr)
+        state['id'] = '../../escape'
+        path.write_text(json.dumps(state))
+        self.assertIn('invalid retirement event', self.invoke('--resume', str(path)).stderr)
+
+    def test_push_failure_blocks_exit(self):
+        self.actor()
+        hook = self.directory / 'remote.git' / 'hooks' / 'pre-receive'
+        hook.write_text('#!/bin/sh\nexit 1\n')
+        hook.chmod(0o700)
+        self.assertEqual(self.invoke().returncode, 2)
+        self.assertFalse((self.directory / 'exit-order.json').exists())
+
+    def test_old_done_does_not_complete(self):
+        self.actor('old')
+        self.assertEqual(self.invoke().returncode, 2)
+        self.assertEqual(self.observed()['pastes'], 1)
+        self.assertFalse((self.directory / 'exit-order.json').exists())
+
+    def test_wrapped_user_done_does_not_complete(self):
+        self.actor('quoted')
+        self.assertEqual(self.invoke().returncode, 2)
+        self.assertEqual(self.observed()['pastes'], 1)
+        self.assertFalse((self.directory / 'exit-order.json').exists())
+
+    def assert_composer_marker_excluded(self, mode):
+        self.actor(mode)
+        self.assertEqual(self.invoke().returncode, 2)
+        self.assertEqual(self.observed()['pastes'], 1)
+        self.assertFalse((self.directory / 'exit-order.json').exists())
+        path, state = self.state()
+        self.assertIsNone(state['disposition'])
+        self.assertNotIn('handoff_receipt', state)
+        self.assertIn('● RETIRE-DONE-' + state['id'], self.command(*self.tmux, 'capture-pane', '-p', '-t', self.pane))
+        spec = importlib.util.spec_from_file_location('retire-composer-positive', SHARED / 'tmux-message.py')
+        shared = importlib.util.module_from_spec(spec)
+        sys.modules[spec.name] = shared
+        spec.loader.exec_module(shared)
+        rows = shared.read_response_rows(self.pane, state['socket'])
+        self.assertIsNotNone(rows)  # A recognized input surface, not unknown-layout vacuity.
+        self.assertIn('• Accepted', rows)
+        self.assertFalse(any('RETIRE-DONE-' + state['id'] in row for row in rows))
+
+    def test_composer_done_does_not_complete(self):
+        self.assert_composer_marker_excluded('composer')
+
+    def test_claude_composer_done_does_not_complete(self):
+        self.assert_composer_marker_excluded('claude-composer')
+
+    def test_agy_and_missing_launcher_preflight(self):
+        self.actor()
+        self.assertEqual(self.invoke('--handoff', 'agy', 'model', '--roles', str(self.roles)).returncode, 2)
+        self.assertEqual(self.observed()['pastes'], 0)
+        (self.directory / 'shared' / 'scripts' / 'agent-spawn.sh').unlink()
+        self.assertEqual(self.invoke().returncode, 2)
+        self.assertEqual(self.observed()['pastes'], 0)
+
+    def test_preserved_shard_mutation_blocks_resumed_exit(self):
+        self.actor('hold')
+        self.invoke('--handoff', 'codex', 'test-model', '--roles', str(self.roles))
+        path, state = self.state()
+        canonical = self.repo / state['shard']
+        canonical.write_text(canonical.read_text() + ' ')
+        before = self.observed()['pastes']
+        result = self.invoke('--handoff', 'codex', 'test-model', '--roles', str(self.roles), '--resume', str(path))
+        self.assertEqual(result.returncode, 2)
+        self.assertIn('shard changed', result.stderr)
+        self.assertEqual(self.observed()['pastes'], before)
+        self.assertFalse((self.directory / 'spawn.json').exists())
+
+    def test_real_node_entrypoint_and_claude_successor_model(self):
+        self.actor('node-core', node=True)
+        result = self.invoke('--handoff', 'claude', 'opus', '--roles', str(self.roles))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        spawned = json.loads((self.directory / 'spawn.json').read_text())
+        self.assertIn('claude', spawned['args'])
+        self.assertIn('opus', spawned['args'])
+
+    def test_required_recovery_fields(self):
+        self.actor('waiting-bad')
+        self.invoke('--waiting')
+        path, state = self.state()
+        shard = path.parent / (state['id'] + '.shard')
+        data = json.loads(shard.read_text())
+        data['waiting'] = {'decision': 'Human decision', 'owner': 'Ted'}
+        del data['recovery']['heads']
+        shard.write_text(json.dumps(data))
+        self.assertIn('recovery requires heads', self.invoke('--waiting', '--resume', str(path)).stderr)
+        self.assertFalse((self.directory / 'exit-order.json').exists())
+
+    def test_extra_native_core_is_not_collapsed(self):
+        self.actor('extra-core', node=True)
+        result = self.invoke()
+        self.assertEqual(result.returncode, 2)
+        self.assertIn('exactly one', result.stderr)
+        self.assertEqual(self.observed()['pastes'], 0)
+
+    def test_explicit_no_paste_deferral_retry(self):
+        self.actor('draft')
+        self.assertEqual(self.invoke().returncode, 2)
+        path, state = self.state()
+        self.assertFalse(state['offer']['paste_attempted'])
+        (self.directory / 'human-cleared-draft').touch()  # fixture human clears its own draft
+        self.wait_for(lambda: 'human unfinished draft' not in self.command(*self.tmux, 'capture-pane', '-p', '-t', self.pane))
+        result = self.invoke('--resume', str(path), '--retry-deferred', 'offer')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.observed()['pastes'], 2)
+
+    def test_legacy_index_metadata_preserved(self):
+        waiting = self.repo / 'waiting'
+        waiting.mkdir()
+        original = '# Steward index\n\n| Session | Provider | Role | State | Last verified |\n| legacy | Anthropic | Lead | parked by Ted | yesterday |\n\nException: keep decision owner.\n'
+        (waiting / 'INDEX.md').write_text(original)
+        (waiting / '2026-09-25-deadbeef-lead.md').write_text('Legacy shard and its evidence.\n')
+        self.git('add', 'waiting')
+        self.git('commit', '-m', 'legacy records')
+        self.git('push')
+        self.actor()
+        self.assertEqual(self.invoke().returncode, 0)
+        self.assertTrue((waiting / 'INDEX.md').read_text().startswith(original))
+        self.assertIn('retire-agent:begin', (waiting / 'INDEX.md').read_text())
+
+    def test_legacy_session_prefix_blocks_duplicate(self):
+        waiting = self.repo / 'waiting'
+        waiting.mkdir()
+        (waiting / '2026-09-25-test-ses-lead.md').write_text('Existing recovery for this session.\n')
+        self.actor()
+        result = self.invoke()
+        self.assertEqual(result.returncode, 2)
+        self.assertIn('legacy session shard', result.stderr)
+        self.assertFalse((self.directory / 'exit-order.json').exists())
+
+    def test_nonobject_shard_is_controlled_failure(self):
+        self.actor('waiting-bad')
+        self.invoke('--waiting')
+        path, state = self.state()
+        shard = path.with_suffix('.shard')
+        shard.write_text('[]')
+        before = self.observed()['pastes']
+        result = self.invoke('--waiting', '--resume', str(path))
+        self.assertEqual(result.returncode, 2, result.stderr)
+        self.assertIn('shard must be a JSON object', result.stderr)
+        self.assertEqual(self.observed()['pastes'], before)
+        self.assertFalse((self.directory / 'exit-order.json').exists())
+
+    def test_index_symlink_preserves_outside_file(self):
+        waiting = self.repo / 'waiting'
+        waiting.mkdir()
+        outside = self.directory / 'human-index'
+        original = 'Unrelated human record.\n'
+        outside.write_text(original)
+        (waiting / 'INDEX.md').symlink_to(outside)
+        self.actor()
+        result = self.invoke()
+        self.assertEqual(result.returncode, 2, result.stderr)
+        self.assertIn('unsafe index path', result.stderr)
+        self.assertEqual(outside.read_text(), original)
+        self.assertFalse((self.directory / 'exit-order.json').exists())
+
+    def test_gh_privacy_pins_remote_host(self):
+        gh = self.directory / 'gh'
+        log = self.directory / 'gh-args.json'
+        gh.write_text('#!/usr/bin/env python3\nimport json,os,sys\nfrom pathlib import Path\n'
+                      + 'Path(' + repr(str(log)) + ').write_text(json.dumps(sys.argv[1:]))\n'
+                      + 'repo=sys.argv[3]\n'
+                      + 'print("true" if repo == "https://github.com/owner/private" or (not repo.startswith("https://github.com/") and os.environ.get("GH_HOST") == "enterprise.invalid") else "false")\n')
+        gh.chmod(0o700)
+        spec = importlib.util.spec_from_file_location('retirement-test', Path(os.environ.get('RETIRE_TEST_SCRIPT', str(HERE / 'retire.sh'))).with_name('retire.py'))
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        env = dict(self.env, PATH=str(self.directory) + ':' + os.environ['PATH'], GH_HOST='enterprise.invalid')
+        env.pop('RETIRE_PRIVATE_CHECK')
+        with patch.dict(os.environ, env, clear=True):
+            retirement = module.Retirement(SimpleNamespace(pane='%0'))
+            self.git('remote', 'set-url', 'origin', 'https://github.com/owner/public.git')
+            with self.assertRaises(module.Stop):
+                retirement.private()
+            self.assertEqual(json.loads(log.read_text())[2], 'https://github.com/owner/public')
+            self.git('remote', 'set-url', 'origin', 'git@github.com:owner/private.git')
+            retirement.private()  # positive production-gh branch, still no network
+            self.assertEqual(json.loads(log.read_text())[2], 'https://github.com/owner/private')
+
+    def test_duplicate_session_transaction_race(self):
+        panes = [self.actor(), self.actor()]
+        barrier = ('        (self.path.parent / (self.state["id"] + ".validated")).touch()\n'
+                   '        until = time.monotonic() + .5\n'
+                   '        while len(list(self.path.parent.glob("*.validated"))) < 2 and time.monotonic() < until:\n'
+                   '            time.sleep(.01)\n'
+                   '        return data, content\n')
+        entry = self.instrument('        return data, content\n', barrier)
+        processes = [subprocess.Popen([str(entry), pane, '--wait', '2', '--poll', '.02'], env=self.env,
+                                      text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE) for pane in panes]
+        results = []
+        for process in processes:
+            out, err = process.communicate(timeout=15)
+            results.append((process.returncode, out, err))
+        self.assertEqual(sorted(result[0] for result in results), [0, 2], results)
+        self.assertTrue(any('session already has' in result[2] for result in results), results)
+        shards = [path for path in (self.repo / 'waiting').glob('*.md') if path.name != 'INDEX.md']
+        self.assertEqual(len(shards), 1)
+        self.assertEqual(json.loads(shards[0].read_text())['session_id'], 'test-session-id')
+        self.git('cat-file', '-e', 'origin/master:waiting/' + shards[0].name)
+
+    def test_independent_exit_after_handoff_allows_successor(self):
+        self.actor()
+        before = "        if not self.state.get('exit'):\n"
+        after = ('        (self.repo.parent / "human-independent-exit").touch()\n'
+                 '        until = time.monotonic() + 3\n'
+                 '        while not self.ended() and time.monotonic() < until:\n'
+                 '            time.sleep(.02)\n' + before)
+        entry = self.instrument(before, after)
+        with patch.dict(os.environ, {'RETIRE_TEST_SCRIPT': str(entry)}):
+            result = self.invoke('--handoff', 'codex', 'test-model', '--roles', str(self.roles))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        path, state = self.state()
+        self.assertEqual(state['exit']['status'], 'not-needed')
+        self.assertEqual(self.observed()['pastes'], 1)
+        self.assertFalse((self.directory / 'exit-order.json').exists())
+        self.assertTrue((self.directory / 'spawn.json').exists())
+        self.assertTrue(any(json.loads(line)['action'] == 'exit-not-needed' for line in path.with_suffix('.jsonl').read_text().splitlines()))
+
+    def test_independent_exit_with_replacement_refuses_successor(self):
+        self.actor()
+        inner = 'exec -a codex ' + shlex.join([sys.executable, str(Path(__file__).resolve()), '--terminal', str(self.directory), 'done'])
+        outer = shlex.join(['bash', '-c', inner]) + '; exec bash --norc'
+        before = "        if not self.state.get('exit'):\n"
+        after = ('        signal = self.repo.parent / "human-independent-exit"\n'
+                 '        signal.touch()\n'
+                 '        until = time.monotonic() + 3\n'
+                 '        while not self.ended() and time.monotonic() < until:\n'
+                 '            time.sleep(.02)\n'
+                 '        signal.unlink()\n'
+                 '        stats = self.repo.parent / "terminal.json"\n'
+                 '        stats.unlink(missing_ok=True)\n'
+                 '        checked(self.tmux + ["respawn-pane", "-k", "-t", self.args.pane, ' + repr(outer) + '])\n'
+                 '        until = time.monotonic() + 3\n'
+                 '        while not stats.exists() and time.monotonic() < until:\n'
+                 '            time.sleep(.02)\n'
+                 '        if not stats.exists():\n'
+                 '            raise Stop("fixture replacement did not become ready")\n' + before)
+        entry = self.instrument(before, after)
+        with patch.dict(os.environ, {'RETIRE_TEST_SCRIPT': str(entry)}):
+            result = self.invoke('--handoff', 'codex', 'test-model', '--roles', str(self.roles))
+        self.assertEqual(result.returncode, 2, result.stderr)
+        self.assertRegex(result.stderr, 'replacement actor found|pane root identity changed')
+        self.assertFalse((self.directory / 'spawn.json').exists())
+        self.assertFalse((self.directory / 'exit-order.json').exists())
+        self.assertEqual(self.observed()['pastes'], 0)  # replacement fixture is live and untouched
+
+    def test_malformed_state_and_history_preserved(self):
+        self.actor('decline')
+        self.invoke()
+        path, state = self.state()
+        original = path.read_text()
+        before = self.observed()['pastes']
+        for malformed in ('[]', '{"id": 9}', json.dumps(dict(state, offer=[])), json.dumps(dict(state, identity={'process': []})), json.dumps(dict(state, shard=[]))):
+            with self.subTest(malformed=malformed):
+                path.write_text(malformed)
+                result = self.invoke('--resume', str(path))
+                self.assertEqual(result.returncode, 2, result.stderr)
+                self.assertIn('malformed retirement', result.stderr)
+                self.assertNotIn('Traceback', result.stderr)
+                self.assertEqual(path.read_text(), malformed)
+                self.assertEqual(self.observed()['pastes'], before)
+        path.write_text(original)
+        history = path.parent / ('f' * 32 + '.json')
+        history.write_text('[]')
+        result = self.invoke()
+        self.assertEqual(result.returncode, 2, result.stderr)
+        self.assertIn('malformed retirement state', result.stderr)
+        self.assertEqual(history.read_text(), '[]')
+        self.assertEqual(self.observed()['pastes'], before)
+
+    def test_malformed_receipt_and_index_preserved(self):
+        self.actor('hold')
+        self.invoke()
+        path, state = self.state()
+        receipt = self.repo / state['handoff_receipt']
+        original = receipt.read_text()
+        before = self.observed()['pastes']
+        for malformed in ('[]', '{"event": []}', json.dumps({'event': state['id'], 'status': []})):
+            receipt.write_text(malformed)
+            result = self.invoke('--resume', str(path))
+            self.assertEqual(result.returncode, 2, result.stderr)
+            self.assertIn('malformed retirement receipt', result.stderr)
+            self.assertNotIn('Traceback', result.stderr)
+            self.assertEqual(receipt.read_text(), malformed)
+        receipt.write_text(original)
+        (self.directory / 'human-independent-exit').touch()
+        self.wait_for(lambda: not Path('/proc/' + str(state['identity']['process']['pid'])).exists())
+        index = self.repo / 'waiting' / 'INDEX.md'
+        original_index = index.read_text()
+        bad = self.repo / 'waiting' / 'malformed.md'
+        claimed_receipt = self.repo / 'receipts' / ('e' * 32 + '.json')
+        claimed_receipt.write_text(json.dumps({'event': 'e' * 32, 'shard': 'waiting/malformed.md', 'status': 'pending-exit'}))
+        for malformed in (json.dumps({'event': 'e' * 32, key: []}) for key in ('harness', 'session_id', 'role')):
+            bad.write_text(malformed)
+            result = self.invoke('--resume', str(path))
+            self.assertEqual(result.returncode, 2, result.stderr)
+            self.assertIn('malformed index shard', result.stderr)
+            self.assertNotIn('Traceback', result.stderr)
+            self.assertEqual(bad.read_text(), malformed)
+            self.assertEqual(index.read_text(), original_index)
+        self.assertEqual(self.observed()['pastes'], before)
+
+    def test_claude_literal_exit_real_terminal(self):
+        self.actor('claude')
+        result = self.invoke()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        observed = self.observed()
+        self.assertEqual(observed['pastes'], 1)  # offer only; literal exit never pasted
+        self.assertFalse(observed['exit_pasted'])
+        self.assertEqual(observed['exit_enters'], 1)
+        self.assertEqual(observed['enters'], 2)  # offer plus one exit Enter
+        self.assertTrue(json.loads((self.directory / 'exit-order.json').read_text())['receipt_before_exit'])
+        path, state = self.state()
+        self.assertEqual(state['exit']['receipt'], 'command')
+        self.assertEqual(state['exit']['transport'], 'literal')
+
+    def test_post_offer_push_failure_blocks_exit(self):
+        self.actor('push-reject')
+        result = self.invoke()
+        self.assertEqual(result.returncode, 2, result.stderr)
+        self.assertIn('command failed: git', result.stderr)
+        self.assertEqual(self.observed()['pastes'], 1)
+        path, state = self.state()
+        self.assertEqual(state['offer']['status'], 'delivered')
+        self.assertEqual(state['disposition'], 'DONE')
+        self.assertNotIn('exit', state)
+        self.assertFalse((self.directory / 'exit-order.json').exists())
+
+    def test_validated_snapshot_ignores_later_symlink_swap(self):
+        self.actor()
+        before = '        return data, content\n'
+        after = ('        (self.repo.parent / "validated-snapshot").write_bytes(content)\n'
+                 '        changed = json.loads(content)\n'
+                 '        changed["recovery"]["mission"] = "UNVALIDATED CHANGED MISSION"\n'
+                 '        outside = self.repo.parent / "swapped-source"\n'
+                 '        outside.write_text(json.dumps(changed))\n'
+                 '        path.unlink()\n'
+                 '        path.symlink_to(outside)\n' + before)
+        entry = self.instrument(before, after)
+        with patch.dict(os.environ, {'RETIRE_TEST_SCRIPT': str(entry)}):
+            result = self.invoke()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        path, state = self.state()
+        canonical = self.repo / state['shard']
+        self.assertEqual(canonical.read_bytes(), (self.directory / 'validated-snapshot').read_bytes())
+        self.assertNotIn('UNVALIDATED CHANGED MISSION', self.git('show', 'origin/master:' + state['shard']))
+
+    def test_wrapper_exit_waits_for_lingering_core(self):
+        self.actor('linger-core', node=True)
+        result = self.invoke('--handoff', 'codex', 'test-model', '--roles', str(self.roles))
+        self.assertEqual(result.returncode, 2, result.stderr)
+        self.assertIn('pending original process exit', result.stderr)
+        path, state = self.state()
+        self.assertFalse(Path('/proc/' + str(state['identity']['process']['pid'])).exists())
+        core = state['identity']['process']['cores'][0]
+        self.assertTrue(Path('/proc/' + str(core['pid'])).exists())
+        record = json.loads(self.git('show', 'origin/master:' + state['handoff_receipt']))
+        self.assertNotEqual(record['status'], 'retired')
+        self.assertFalse((self.directory / 'spawn.json').exists())
+        os.kill(core['pid'], signal.SIGTERM)  # exact test-owned lingering core
+        (self.directory / 'owned-core-pid').unlink()
+        time.sleep(.05)
+        result = self.invoke('--handoff', 'codex', 'test-model', '--roles', str(self.roles), '--resume', str(path))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertTrue((self.directory / 'spawn.json').exists())
+
+    def test_resume_uses_pinned_socket(self):
+        self.actor('waiting-bad')
+        self.invoke('--waiting')
+        path, state = self.state()
+        data = json.loads(path.with_suffix('.shard').read_text())
+        data['waiting'] = {'decision': 'scope', 'owner': 'Ted'}
+        path.with_suffix('.shard').write_text(json.dumps(data))
+        self.env['SPAWN_TMUX_LABEL'] = 'different-' + uuid.uuid4().hex
+        self.env.pop('TMUX', None)
+        result = self.invoke('--waiting', '--resume', str(path))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.observed()['pastes'], 2)
+
+    def test_socket_failure_is_not_pane_disappearance(self):
+        self.actor('hold')
+        self.invoke('--handoff', 'codex', 'model', '--roles', str(self.roles))
+        path, state = self.state()
+        (self.directory / 'human-independent-exit').touch()
+        self.wait_for(lambda: not Path('/proc/' + str(state['identity']['process']['pid'])).exists())
+        state['socket'] = str(self.directory / 'missing-socket')
+        path.write_text(json.dumps(state))
+        result = self.invoke('--handoff', 'codex', 'model', '--roles', str(self.roles), '--resume', str(path))
+        self.assertEqual(result.returncode, 2, result.stderr)
+        self.assertIn('command failed: tmux', result.stderr)
+        self.assertFalse((self.directory / 'spawn.json').exists())
+        self.assertNotEqual(json.loads(self.git('show', 'origin/master:' + state['handoff_receipt']))['status'], 'retired')
+
+    def test_steward_dirty_index_is_not_published(self):
+        waiting = self.repo / 'waiting'
+        waiting.mkdir()
+        index = waiting / 'INDEX.md'
+        original = '# Steward index\n\nDo not publish unfinished edits.\n\n'
+        index.write_text(original)
+        self.git('add', 'waiting')
+        self.git('commit', '-m', 'steward baseline')
+        self.git('push')
+        edited = original + 'Unfinished human draft.\n'
+        index.write_text(edited)
+        self.actor()
+        result = self.invoke()
+        self.assertEqual(result.returncode, 2, result.stderr)
+        self.assertIn('steward-owned index edits', result.stderr)
+        self.assertEqual(index.read_text(), edited)
+        self.assertEqual(self.git('show', 'origin/master:waiting/INDEX.md'), original.strip())
+        self.assertEqual(self.observed()['pastes'], 1)
+        self.assertFalse((self.directory / 'exit-order.json').exists())
+
+    def test_unowned_local_commit_is_not_pushed(self):
+        self.actor()
+        (self.repo / 'human-work').write_text('Not authorized for publication.\n')
+        self.git('add', 'human-work')
+        self.git('commit', '-m', 'unfinished human work')
+        result = self.invoke()
+        self.assertEqual(result.returncode, 2, result.stderr)
+        self.assertIn('unowned unpushed commits', result.stderr)
+        self.assertEqual(self.observed()['pastes'], 0)
+        self.assertNotIn('human-work', self.git('ls-tree', '-r', '--name-only', 'origin/master'))
+
+    def test_prose_before_done_stays_pending(self):
+        self.actor('prose-marker')
+        result = self.invoke()
+        self.assertEqual(result.returncode, 2, result.stderr)
+        self.assertIn('DONE not observed', result.stderr)
+        self.assertEqual(self.observed()['pastes'], 1)
+        self.assertEqual(self.state()[1]['offer']['status'], 'delivered')
+        self.assertFalse((self.directory / 'exit-order.json').exists())
+
+    def test_relative_node_entrypoint_uses_target_cwd(self):
+        self.actor(node=True, relative=True)
+        result = self.invoke()
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_retry_without_resume_has_no_attempt(self):
+        self.actor()
+        result = self.invoke('--retry-deferred', 'offer')
+        self.assertEqual(result.returncode, 2)
+        self.assertIn('require --resume', result.stderr)
+        self.assertFalse((self.repo / '.git' / 'retirements').exists())
+        self.assertEqual(self.observed()['pastes'], 0)
+
+    def test_saved_done_survives_cleared_screen(self):
+        self.actor('waiting-bad')
+        self.invoke('--waiting')
+        path, state = self.state()
+        self.assertEqual(state['disposition'], 'DONE')
+        data = json.loads(path.with_suffix('.shard').read_text())
+        data['waiting'] = {'decision': 'scope', 'owner': 'Ted'}
+        path.with_suffix('.shard').write_text(json.dumps(data))
+        (self.directory / 'human-cleared-history').touch()
+        self.wait_for(lambda: 'RETIRE-DONE' not in self.command(*self.tmux, 'capture-pane', '-p', '-t', self.pane))
+        result = self.invoke('--waiting', '--resume', str(path))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.observed()['pastes'], 2)
+
+    def test_last_poll_interval_is_observed(self):
+        self.actor('late-done')
+        result = self.invoke('--poll', '.4')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.state()[1]['disposition'], 'DONE')
+
+    def test_exit_deferral_reports_retry_without_waiting(self):
+        self.actor()
+        before = "        if not self.state.get('exit'):\n"
+        after = ('        (self.repo.parent / "human-typed-draft").touch()\n'
+                 '        time.sleep(.15)\n' + before)
+        entry = self.instrument(before, after)
+        with patch.dict(os.environ, {'RETIRE_TEST_SCRIPT': str(entry)}):
+            result = self.invoke()
+        self.assertEqual(result.returncode, 2, result.stderr)
+        self.assertIn('--retry-deferred exit', result.stderr)
+        self.assertEqual(self.state()[1]['exit']['status'], 'deferred')
+        self.assertEqual(self.observed()['pastes'], 1)
+        self.assertFalse((self.directory / 'exit-order.json').exists())
+
+    def test_failed_initial_push_is_verified_before_resumed_offer(self):
+        self.actor('initial-receipt')
+        hook = self.directory / 'remote.git' / 'hooks' / 'pre-receive'
+        hook.write_text('#!/bin/sh\nexit 1\n')
+        hook.chmod(0o700)
+        self.assertEqual(self.invoke().returncode, 2)
+        path, state = self.state()
+        self.assertNotIn('offer', state)
+        self.assertEqual(self.observed()['pastes'], 0)
+        hook.unlink()
+        result = self.invoke('--resume', str(path))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertTrue(json.loads((self.directory / 'pre-offer-receipt.json').read_text())['verified'])
+
+    def test_sender_timeout_is_ambiguous_and_not_replayed(self):
+        self.actor()
+        before = '    return subprocess.run([str(x) for x in args], text=True, capture_output=True,\n'
+        after = ('    if str(args[0]).endswith("tmux-message.sh"):\n'
+                 '        raise subprocess.TimeoutExpired(args, 45)\n' + before)
+        entry = self.instrument(before, after)
+        with patch.dict(os.environ, {'RETIRE_TEST_SCRIPT': str(entry)}):
+            result = self.invoke()
+        self.assertEqual(result.returncode, 2, result.stderr)
+        self.assertIn('timeout is ambiguous', result.stderr)
+        path, state = self.state()
+        self.assertEqual(state['offer']['status'], 'ambiguous')
+        self.assertEqual(self.invoke('--resume', str(path)).returncode, 2)
+        self.assertEqual(self.observed()['pastes'], 0)
+        self.assertIn('sender-timeout', path.with_suffix('.jsonl').read_text())
+
+    def test_launcher_timeout_is_unconfirmed_and_not_repeated(self):
+        self.actor()
+        before = '    return subprocess.run([str(x) for x in args], text=True, capture_output=True,\n'
+        after = ('    if str(args[0]).endswith("agent-spawn.sh"):\n'
+                 '        raise subprocess.TimeoutExpired(args, 45)\n' + before)
+        entry = self.instrument(before, after)
+        with patch.dict(os.environ, {'RETIRE_TEST_SCRIPT': str(entry)}):
+            result = self.invoke('--handoff', 'codex', 'model', '--roles', str(self.roles))
+        self.assertEqual(result.returncode, 2, result.stderr)
+        self.assertIn('timeout is unconfirmed', result.stderr)
+        path, state = self.state()
+        self.assertEqual(state['spawn']['status'], 'unconfirmed')
+        self.assertFalse((self.directory / 'spawn.json').exists())
+        self.assertEqual(self.invoke('--handoff', 'codex', 'model', '--roles', str(self.roles), '--resume', str(path)).returncode, 2)
+        self.assertFalse((self.directory / 'spawn.json').exists())
+        self.assertIn('successor-timeout', path.with_suffix('.jsonl').read_text())
+
+    def test_claude_ghost_literal_exit_real_terminal(self):
+        self.actor('claude-ghost')
+        result = self.invoke()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        observed = self.observed()
+        self.assertEqual(observed['pastes'], 1)
+        self.assertFalse(observed['exit_pasted'])
+        self.assertEqual(observed['exit_enters'], 1)
+        self.assertEqual(observed['enters'], 2)
+        self.assertEqual(self.state()[1]['exit']['transport'], 'literal')
+
+    def test_handoff_brief_reads_verified_blob(self):
+        self.actor()
+        before = "            brief = directory / (event + '-brief.txt')\n"
+        after = ('            (self.repo / self.state["shard"]).write_text("UNVERIFIED LOCAL TEXT")\n' + before)
+        entry = self.instrument(before, after)
+        with patch.dict(os.environ, {'RETIRE_TEST_SCRIPT': str(entry)}):
+            result = self.invoke('--handoff', 'codex', 'model', '--roles', str(self.roles))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        brief = json.loads((self.directory / 'spawn.json').read_text())['brief']
+        self.assertIn('Mission authorized', brief)
+        self.assertNotIn('UNVERIFIED LOCAL TEXT', brief)
+
+    def test_pending_fifo_swap_never_blocks(self):
+        self.actor()
+        before = '        descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW'
+        after = '        path.unlink()\n        os.mkfifo(path)\n' + before
+        entry = self.instrument(before, after)
+        try:
+            result = subprocess.run([str(entry), self.pane, '--wait', '.4', '--poll', '.02'], env=self.env,
+                                    text=True, capture_output=True, timeout=2)
+        except subprocess.TimeoutExpired:
+            self.fail('FIFO swap blocked the retirement controller')
+        self.assertEqual(result.returncode, 2, result.stderr)
+        self.assertIn('pending shard must be a regular file', result.stderr)
+        self.assertFalse((self.directory / 'exit-order.json').exists())
+
+    def test_foreign_adjacent_temp_preserved(self):
+        self.actor()
+        waiting = self.repo / 'waiting'
+        waiting.mkdir()
+        foreign = waiting / 'INDEX.tmp'
+        foreign.write_text('foreign unfinished data')
+        result = self.invoke()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(foreign.read_text(), 'foreign unfinished data')
+
+    def test_mcp_support_server_is_not_second_harness(self):
+        spec = importlib.util.spec_from_file_location('retirement-test', Path(os.environ.get('RETIRE_TEST_SCRIPT', str(HERE / 'retire.sh'))).with_name('retire.py'))
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        with patch.object(Path, 'read_bytes', return_value=b'codex\0mcp-server\0'):
+            self.assertIsNone(module.proc(os.getpid()))
+        with patch.object(Path, 'read_bytes', return_value=b'codex\0'):
+            self.assertEqual(module.proc(os.getpid())['agent'], 'codex')
+
+    def test_remote_requested_receipt_cannot_authorize_successor(self):
+        self.actor('hold')
+        self.invoke('--handoff', 'codex', 'model', '--roles', str(self.roles))
+        path, state = self.state()
+        receipt = self.repo / state['handoff_receipt']
+        data = json.loads(receipt.read_text())
+        data['status'] = 'retirement-requested'
+        receipt.write_text(json.dumps(data))
+        self.git('add', '--', state['handoff_receipt'])
+        self.git('commit', '-m', 'fixture remote tamper')
+        self.git('push')
+        (self.directory / 'human-independent-exit').touch()
+        self.wait_for(lambda: not Path('/proc/' + str(state['identity']['process']['pid'])).exists())
+        tampered = self.git('show', 'origin/master:' + state['handoff_receipt'])
+        for _ in range(2):
+            result = self.invoke('--handoff', 'codex', 'model', '--roles', str(self.roles), '--resume', str(path))
+            self.assertEqual(result.returncode, 2, result.stderr)
+            self.assertIn('does not establish handoff', result.stderr)
+            self.assertFalse((self.directory / 'spawn.json').exists())
+            self.assertEqual(self.git('show', 'origin/master:' + state['handoff_receipt']), tampered)
+            self.assertEqual(receipt.read_text(), json.dumps(data))
+
+    def test_resume_rereads_state_after_event_lock(self):
+        self.actor('waiting-bad')
+        self.invoke('--waiting')
+        path, state = self.state()
+        data = json.loads(path.with_suffix('.shard').read_text())
+        data['waiting'] = {'decision': 'scope', 'owner': 'Ted'}
+        path.with_suffix('.shard').write_text(json.dumps(data))
+        before = "        self.event_lock = (directory / (self.state['id'] + '.lock')).open('a')\n"
+        after = ('        if self.args.resume:\n'
+                 '            disk = json.loads(self.path.read_text())\n'
+                 '            disk["after_lock_fixture"] = True\n'
+                 '            save(self.path, disk)\n' + before)
+        entry = self.instrument(before, after)
+        with patch.dict(os.environ, {'RETIRE_TEST_SCRIPT': str(entry)}):
+            result = self.invoke('--waiting', '--resume', str(path))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertTrue(self.state()[1].get('after_lock_fixture'))
+
+    def test_remote_bad_commit_receipt_never_self_heals(self):
+        self.actor('hold')
+        self.invoke('--handoff', 'codex', 'model', '--roles', str(self.roles))
+        path, state = self.state()
+        receipt = self.repo / state['handoff_receipt']
+        data = json.loads(receipt.read_text())
+        data['commit'] = self.git('rev-list', '--max-parents=0', 'HEAD')
+        receipt.write_text(json.dumps(data))
+        self.git('add', '--', state['handoff_receipt'])
+        self.git('commit', '-m', 'fixture mismatched commit')
+        self.git('push')
+        (self.directory / 'human-independent-exit').touch()
+        self.wait_for(lambda: not Path('/proc/' + str(state['identity']['process']['pid'])).exists())
+        tampered = self.git('show', 'origin/master:' + state['handoff_receipt'])
+        for _ in range(2):
+            result = self.invoke('--handoff', 'codex', 'model', '--roles', str(self.roles), '--resume', str(path))
+            self.assertEqual(result.returncode, 2, result.stderr)
+            self.assertIn('private receipt commit lacks preserved shard path', result.stderr)
+            self.assertFalse((self.directory / 'spawn.json').exists())
+            self.assertEqual(self.git('show', 'origin/master:' + state['handoff_receipt']), tampered)
+            self.assertEqual(receipt.read_text(), json.dumps(data))
+
+    def assert_completion_block_pending(self, mode):
+        self.actor(mode)
+        result = self.invoke()
+        self.assertEqual(result.returncode, 2, result.stderr)
+        self.assertIn('DONE not observed', result.stderr)
+        self.assertEqual(self.observed()['pastes'], 1)
+        path, state = self.state()
+        self.assertIsNone(state['disposition'])
+        self.assertNotIn('handoff_receipt', state)
+        self.assertFalse((self.directory / 'exit-order.json').exists())
+        self.assertTrue(Path('/proc/' + str(state['identity']['process']['pid'])).exists())
+
+    def test_codex_marker_suffix_is_not_completion(self):
+        self.assert_completion_block_pending('done-suffix')
+
+    def test_claude_marker_suffix_is_not_completion(self):
+        self.assert_completion_block_pending('claude-suffix')
+
+    def test_codex_later_assistant_invalidates_marker(self):
+        self.assert_completion_block_pending('done-later-assistant')
+
+    def test_claude_later_assistant_invalidates_marker(self):
+        self.assert_completion_block_pending('claude-later-assistant')
+
+    def test_decline_suffix_is_not_disposition(self):
+        self.assert_completion_block_pending('decline-suffix')
+
+    def legacy_index(self):
+        waiting = self.repo / 'waiting'
+        waiting.mkdir(exist_ok=True)
+        index = waiting / 'INDEX.md'
+        text = '# Steward record\n\n| Legacy session | Anthropic | Utility | Waiting on Ted |\n'
+        index.write_text(text)
+        self.git('add', '--', 'waiting/INDEX.md')
+        self.git('commit', '-m', 'legacy steward index')
+        self.git('push')
+        return index, text
+
+    def test_index_preflight_failure_preserves_legacy_then_resumes(self):
+        index, original = self.legacy_index()
+        self.actor()
+        before = '    def publication_preflight(self):\n'
+        after = (before + '        if self.state.get("shard") and not self.args.resume:\n'
+                 '            raise Stop("fixture-fetch-precondition-failure")\n')
+        entry = self.instrument(before, after)
+        with patch.dict(os.environ, {'RETIRE_TEST_SCRIPT': str(entry)}):
+            result = self.invoke()
+        self.assertEqual(result.returncode, 2, result.stderr)
+        self.assertIn('fixture-fetch-precondition-failure', result.stderr)
+        self.assertEqual(index.read_text(), original)
+        path, state = self.state()
+        self.assertEqual(state['disposition'], 'DONE')
+        result = self.invoke('--resume', str(path))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertTrue(index.read_text().startswith(original))
+        self.assertIn('Steward record', self.git('show', 'origin/master:waiting/INDEX.md'))
+
+    def test_own_legacy_index_write_recovers_after_commit_hook_failure(self):
+        index, original = self.legacy_index()
+        self.actor('commit-reject')
+        result = self.invoke()
+        self.assertEqual(result.returncode, 2, result.stderr)
+        self.assertIn('command failed: git', result.stderr)
+        self.assertTrue(index.read_text().startswith(original))
+        self.assertIn('<!-- retire-agent:begin -->', index.read_text())
+        path, state = self.state()
+        (self.repo / '.git' / 'hooks' / 'pre-commit').unlink()
+        result = self.invoke('--resume', str(path))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertTrue(index.read_text().startswith(original))
+
+    def test_foreign_json_metadata_is_not_claimed(self):
+        index, original = self.legacy_index()
+        files = {'list.md': '[]', 'foreign.md': '{"event":"foreign-owner","harness":[]}',
+                 'unclaimed.md': json.dumps({'event': 'e' * 32, 'harness': []})}
+        for name, content in files.items():
+            (index.parent / name).write_text(content)
+        other_receipt = self.repo / 'receipts' / ('e' * 32 + '.json')
+        other_receipt.parent.mkdir(exist_ok=True)
+        other_bytes = json.dumps({'event': 'e' * 32, 'status': 'pending-exit', 'shard': 'waiting/another-owner.md'})
+        other_receipt.write_text(other_bytes)
+        self.actor()
+        result = self.invoke()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertTrue(index.read_text().startswith(original))
+        self.assertEqual(other_receipt.read_text(), other_bytes)
+        for name, content in files.items():
+            self.assertEqual((index.parent / name).read_text(), content)
+            self.assertNotIn('[' + name + ']', index.read_text())
+
+    def test_tracked_deleted_index_is_not_recreated(self):
+        index, original = self.legacy_index()
+        index.unlink()
+        self.actor()
+        result = self.invoke()
+        self.assertEqual(result.returncode, 2, result.stderr)
+        self.assertIn('tracked INDEX deleted', result.stderr)
+        self.assertFalse(index.exists())
+        self.assertEqual(self.git('show', 'origin/master:waiting/INDEX.md'), original.strip())
+        self.assertFalse((self.directory / 'exit-order.json').exists())
+
+    def test_padded_final_marker_completes(self):
+        self.actor('padded-marker')
+        result = self.invoke()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.state()[1]['disposition'], 'DONE')
+        self.assertTrue(json.loads((self.directory / 'exit-order.json').read_text())['receipt_before_exit'])
+
+    def test_wrong_blob_receipt_never_self_heals(self):
+        self.actor('hold')
+        self.invoke('--handoff', 'codex', 'model', '--roles', str(self.roles))
+        path, state = self.state()
+        canonical = self.repo / state['shard']
+        verified = canonical.read_bytes()
+        canonical.write_text('different shard bytes')
+        self.git('add', '--', state['shard'])
+        self.git('commit', '-m', 'fixture different shard snapshot')
+        wrong_commit = self.git('rev-parse', 'HEAD')
+        canonical.write_bytes(verified)
+        receipt = self.repo / state['handoff_receipt']
+        data = json.loads(receipt.read_text())
+        data['commit'] = wrong_commit
+        receipt.write_text(json.dumps(data))
+        self.git('add', '--', state['shard'], state['handoff_receipt'])
+        self.git('commit', '-m', 'fixture restored shard with wrong receipt')
+        self.git('push')
+        (self.directory / 'human-independent-exit').touch()
+        self.wait_for(lambda: not Path('/proc/' + str(state['identity']['process']['pid'])).exists())
+        tampered = self.git('show', 'origin/master:' + state['handoff_receipt'])
+        for _ in range(2):
+            result = self.invoke('--handoff', 'codex', 'model', '--roles', str(self.roles), '--resume', str(path))
+            self.assertEqual(result.returncode, 2, result.stderr)
+            self.assertIn('private receipt commit contains different shard bytes', result.stderr)
+            self.assertFalse((self.directory / 'spawn.json').exists())
+            self.assertEqual(self.git('show', 'origin/master:' + state['handoff_receipt']), tampered)
+            self.assertEqual(receipt.read_text(), json.dumps(data))
+
+    def test_corrupt_other_receipt_preserves_generated_index(self):
+        waiting = self.repo / 'waiting'
+        waiting.mkdir()
+        event = 'e' * 32
+        shard = waiting / 'other.md'
+        shard.write_text(json.dumps({'event': event, 'session_id': 'other-session', 'harness': 'claude', 'role': 'Utility'}))
+        receipt = self.repo / 'receipts' / (event + '.json')
+        receipt.parent.mkdir()
+        receipt.write_text(json.dumps({'event': event, 'shard': 'waiting/other.md', 'status': 'pending-exit'}))
+        self.git('add', '--', 'waiting', 'receipts')
+        self.git('commit', '-m', 'fixture other owned record')
+        self.git('push')
+        self.actor('hold')
+        self.invoke('--handoff', 'codex', 'model', '--roles', str(self.roles))
+        path, state = self.state()
+        index = waiting / 'INDEX.md'
+        original_index = index.read_text()
+        self.assertIn('[other.md]', original_index)
+        remote_index = self.git('show', 'origin/master:waiting/INDEX.md')
+        (self.directory / 'human-independent-exit').touch()
+        self.wait_for(lambda: not Path('/proc/' + str(state['identity']['process']['pid'])).exists())
+        for malformed in ('not JSON', '[]', json.dumps({'status': 'retired'}), json.dumps({'event': [], 'status': 'retired'}), json.dumps({'event': 'f' * 32, 'status': 'retired', 'shard': 'waiting/other.md'})):
+            receipt.write_text(malformed)
+            for _ in range(2):
+                result = self.invoke('--handoff', 'codex', 'model', '--roles', str(self.roles), '--resume', str(path))
+                self.assertEqual(result.returncode, 2, result.stderr)
+                self.assertIn('malformed retirement receipt', result.stderr)
+                self.assertEqual(receipt.read_text(), malformed)
+                self.assertEqual(index.read_text(), original_index)
+                self.assertEqual(self.git('show', 'origin/master:waiting/INDEX.md'), remote_index)
+                self.assertFalse((self.directory / 'spawn.json').exists())
+
+
+if __name__ == '__main__':
+    if len(sys.argv) > 1 and sys.argv[1] == '--terminal':
+        terminal(sys.argv[2], sys.argv[3])
+    else:
+        unittest.main()
