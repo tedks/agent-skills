@@ -89,7 +89,7 @@ case "$cmd" in
     if [[ "${*: -1}" == '#{pid}:#{pane_id}' ]]; then printf '4242:%%7\n'
     elif [[ "${*: -1}" == '#{cursor_x}:#{cursor_y}' ]]; then
       if [[ "$(<"$FAKE_STATE/mode")" == busyqueue && -s "$FAKE_STATE/pasted" ]]; then cursor='37:27'
-      elif [[ "$(<"$FAKE_STATE/mode")" == busyqueue ]]; then cursor='2:1'
+      elif [[ "$(<"$FAKE_STATE/mode")" == busyqueue ]]; then cursor='2:27'
       elif [[ "$(<"$FAKE_STATE/mode")" == persistent-empty-after-paste && -s "$FAKE_STATE/pasted" ]]; then cursor='2:1'
       elif [[ "$(<"$FAKE_STATE/mode")" == render-stale-empty && -s "$FAKE_STATE/pasted" && $(<"$FAKE_STATE/captures") -eq 4 ]]; then cursor='2:1'
       elif [[ -s "$FAKE_STATE/composer" ]]; then
@@ -123,8 +123,12 @@ PY
     if [[ "$mode" == human-during-delay && -s "$FAKE_STATE/pasted" && $n -ge 5 ]]; then
       printf 'a human began typing\n' > "$FAKE_STATE/composer"
     fi
-    if [[ -s "$FAKE_STATE/pasted" && "$mode" == busyqueue ]]; then
-      cat "$FAKE_STATE/busyqueue" > "$FAKE_STATE/last-screen"
+    if [[ "$mode" == busyqueue ]]; then
+      if [[ -s "$FAKE_STATE/pasted" ]]; then
+        cat "$FAKE_STATE/busyqueue" > "$FAKE_STATE/last-screen"
+      else
+        sed 's/Reply with exactly P141-QUEUED-TEST//' "$FAKE_STATE/busyqueue" > "$FAKE_STATE/last-screen"
+      fi
     elif [[ -s "$FAKE_STATE/pasted" && "$mode" == render-stale-empty && $n -eq 4 ]]; then
       cat "$FAKE_STATE/empty" > "$FAKE_STATE/last-screen"
     elif [[ -s "$FAKE_STATE/pasted" && "$mode" == persistent-empty-after-paste ]]; then
@@ -317,6 +321,18 @@ assert classify_fixture('codex-empty-dim.ansi', 'outgoing', 2, 26) == 'empty'
 assert classify_fixture('codex-typed-home.ansi', 'outgoing', 2, 26) == 'busy'
 queue_payload = 'Reply with exactly P141-QUEUED-TEST'
 queue_screen = (Path(fixtures) / 'codex-generating-queue.ansi').read_bytes()
+queue_empty = queue_screen.replace(queue_payload.encode(), b'', 1)
+Path(payload).write_text(queue_payload)
+assert subprocess.check_output(
+    [sys.executable, parser, payload, '2', '27'], input=queue_empty
+).decode().strip() == 'empty'
+assert subprocess.check_output(
+    [sys.executable, parser, payload, '3', '27'], input=queue_empty
+).decode().strip() == 'busy'
+Path(payload).write_text(queue_payload + '\n')
+assert subprocess.check_output(
+    [sys.executable, parser, payload, '37', '27'], input=queue_screen
+).decode().strip() == 'unknown'
 Path(payload).write_text(queue_payload)
 assert Path(fixtures, 'codex-generating-queue.cursor').read_text().strip() == '37:27'
 assert subprocess.check_output(

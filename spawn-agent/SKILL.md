@@ -387,6 +387,9 @@ composers may be unverifiable and produce an ambiguous outcome. During Codex
 generation, only the measured short, single-line composer followed by a blank
 row and styled `tab to queue message` hint is recognized; wrapped or multiline
 queue layouts remain ambiguous.
+This includes a prompt file ending in a newline: its pasted cursor geometry
+cannot be verified by the single-line queue shape. Preserve those bytes rather
+than trimming them for a retry; broader support is tracked in ditz.
 
 There is no reliable screen-only way to tell Claude Code's rotating `Try …`
 suggestion from a person who typed the same text and moved the cursor Home;

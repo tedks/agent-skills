@@ -165,6 +165,8 @@ def codex_state(lines: list[str], raw_lines: list[str], payload: str, cx: int, c
         if fragment.startswith(" "):
             fragment = fragment[1:]
         observed = fragment.rstrip()
+        if observed == "":
+            return "empty" if cy == idx and cx == 2 else "busy"
         expected_y = idx
         expected_x = 2 + cell_width(payload.rsplit("\n", 1)[-1])
         return "own" if observed == payload.rstrip("\n") and (cy, cx) == (expected_y, expected_x) else "busy"
