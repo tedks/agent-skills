@@ -23,10 +23,9 @@ waiting for their turn to finish.
 2. Use `scripts/agent-spawn.sh SESSION:WINDOW AGENT DIRECTORY [PROMPT]`.
    `AGENT` is `claude`, `codex`, or `agy`. For larger prompts pass
    `--prompt-file FILE`; the launcher preserves caller files.
-3. Report the window, pane and socket. A successful task send reports transport
-   success with receipt unverified. Inspect its new receipt through tmux before
-   claiming delivery. If delivery fails, the child remains running: inspect it,
-   rather than blindly creating another child or sending again.
+3. Report the window, pane and socket. A successful task send confirms a new
+   application receipt. If delivery fails, the child remains running: inspect
+   the reported pane and reason before retrying; never blindly spawn again.
 
 ```bash
 ~/.claude/skills/spawn-agent/scripts/agent-spawn.sh \
@@ -56,39 +55,37 @@ tmux-message send chaos:review 'MSG-unique Please prioritize the failing test.'
 tmux-message send chaos:review --prompt-file /tmp/task-prompt
 ```
 
-`send` defaults to submit-delay 8, render-wait 3, max-wait 10 seconds. The
-launcher uses the same sender with a 30-second startup composer wait. Timing
-options before the message override those defaults. Claude and Codex share the
-measured baseline; add a different harness timing only with receipt evidence.
-Agy launches interactively without a task; prompted Agy launches are rejected
-before creating a window until its composer is supported by the shared guard.
-Unknown layouts defer; do not bypass the guard with a local fork.
+`send` blocks until it observes a NEW submitted message or pending queue entry.
+It compares the input before and after one paste, allows wrapped text and
+collapsed paste markers, and makes at most one Enter-only recovery. Receipt is
+acceptance, not completion of the task. Busy agent output can continue.
 
-`read` resolves the target to a stable pane and shows 200 history rows plus the
-visible pane. `send` waits for an empty recognized composer, pastes once under a
-shared pane lock, verifies its exact payload, then sends Enter once. Busy agent
-output is allowed. No agent name, transcript, process registry, native message
-queue or daemon is required for ordinary messaging.
+The input must remain stable for three seconds before paste. Changing input
+returns `human-typing`; a stable existing draft returns `existing-input`.
+Use `--backoff --max-wait 60` to wait for the human to finish instead. A stable
+Claude suggestion may be probed once with Space/Backspace; if actual text
+remains, it is preserved. One pane lock prevents cooperating senders from
+pasting into the same input concurrently. It cannot lock out human typing.
 
-Before reporting delivery, inspect a NEW exact submitted user-history row or
-explicit pending-message row outside the composer. Transport exit 0,
-disappearing input, and quoted output are insufficient. If the UI hides
-acceptance, request an explicit acknowledgement and leave receipt unverified
-until it arrives. Receipt and task completion are separate.
+Results are JSON: exit 0 is `status=delivered` with a `submitted`, `queued`, or
+`command` receipt. Exit 2 is deferred before paste; exit 3 is ambiguous after
+paste may have occurred. Failure reports include `reason`, `pending_file`,
+`pane` when resolved, and `needs_review`. The private file holds the actual
+outgoing message; it is never automatically replayed.
 
-Exit 2 means deferred before paste; exit 3 means input may have changed and is
-ambiguous. Preserve the private outgoing payload for deliberate recovery.
-Never clear unrelated/mixed drafts, repaste an ambiguous attempt, or replay an
-archived pending file. Inspect prior receipt evidence first. Ted authorizes a
-bounded manual relay when needed: paste once into a verified empty agent input,
-settle eight seconds, then Enter; or one Enter-only continuation for provably
-exact own unsubmitted input. Recheck immediately before Enter and verify the
-new receipt. Stop on unknown/mixed input or a modal. Screen polling cannot
-atomically exclude concurrent human typing.
+For `needs_review=true`, read the pane and inspect the reported stage. If a new
+receipt is visible, record acceptance. If this attempt's paste is still in the
+input, Ted permits deliberate Enter-only recovery based on sufficient evidence
+including its collapsed paste marker. Preserve unrelated/mixed drafts and
+modals. Do not repaste an ambiguous attempt. Return to other useful work when
+human typing is the blocker; a model call is unnecessary for that case.
 
-Read [transport details](references/tmux-messaging.md) for byte constraints,
-UI limitations and retained-payload handling. The old `claude-send.sh` name is
-an internal compatibility backend; examples and callers use `tmux-message`.
+`read` shows 200 history rows plus the visible pane. No agent implementation,
+transcript, native queue API, process registry or daemon is needed. Agy task
+submission remains unsupported; interactive launch is available.
+Read [transport details](references/tmux-messaging.md) for options, evidence
+limits and extending screen recognition. The old `claude-send.sh` entrypoint
+retains its legacy transport-only behavior; use `tmux-message` for confirmation.
 
 ## Fork and completion
 

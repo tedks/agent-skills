@@ -34,12 +34,13 @@ done
 # Isolate send forwarding from the live transport while keeping both alias hops.
 mkdir -p "$TEST_DIR/source scripts" "$TEST_DIR/repo bin"
 cp "$SCRIPT_DIR/tmux-message.sh" "$SCRIPT_DIR/tmux-ctx.sh" "$TEST_DIR/source scripts/"
-cat > "$TEST_DIR/source scripts/claude-send.sh" <<'STUB'
-#!/usr/bin/env bash
-printf '%s\0' "$@" > "$TMUX_TEST_ARGS"
-exit 3
+cat > "$TEST_DIR/source scripts/tmux-message.py" <<'STUB'
+import os, sys
+with open(os.environ['TMUX_TEST_ARGS'], 'wb') as f:
+    f.write(b''.join(s.encode() + b'\0' for s in sys.argv[1:]))
+sys.exit(3)
 STUB
-chmod +x "$TEST_DIR/source scripts/claude-send.sh"
+chmod +x "$TEST_DIR/source scripts/tmux-message.py"
 ln -s "$TEST_DIR/source scripts/tmux-message.sh" "$TEST_DIR/repo bin/tmux-message"
 ln -s "$TEST_DIR/repo bin/tmux-message" "$TEST_DIR/installed bin/send-message"
 message=$'Actual Unicode λ text\nwith $literal content'
@@ -47,7 +48,7 @@ for entry in "$TEST_DIR/repo bin/tmux-message" "$TEST_DIR/installed bin/send-mes
     status=0
     "$entry" send %88 --submit-delay 8 "$message" || status=$?
     [[ $status == 3 ]]
-    printf '%s\0' %88 --submit-delay 8 --render-wait 3 --max-wait 10 --submit-delay 8 "$message" > "$TEST_DIR/expected"
+    printf '%s\0' %88 --submit-delay 8 "$message" > "$TEST_DIR/expected"
     cmp "$TEST_DIR/expected" "$TEST_DIR/args"
 done
 printf 'tmux-message alias tests passed\n'

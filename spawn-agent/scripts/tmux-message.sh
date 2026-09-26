@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Shared tmux read/write interface. No agent registry or transcript dependency.
-# Send forwards actual text/options to the installed guarded transport.
+# Send blocks for receipt using the shared screen-driven state machine.
 # Read shows terminal history; it does not infer delivery from transport success.
 set -euo pipefail
 SCRIPT_PATH="$(readlink -f -- "${BASH_SOURCE[0]}")"
@@ -18,7 +18,7 @@ case "$command" in
     send)
         (($# >= 2)) || usage
         target=$1; shift
-        exec "$SCRIPT_DIR/claude-send.sh" "$target" --submit-delay 8 --render-wait 3 --max-wait 10 "$@";;
+        exec python3 "$SCRIPT_DIR/tmux-message.py" "$target" "$@";;
     read)
         (($# == 1)) || usage
         [[ -n "$1" && "$1" != -* ]] || usage

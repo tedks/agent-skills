@@ -445,7 +445,7 @@ if [[ -n "$prompt_file" ]]; then
             :
         else
             status=$?
-            echo "Error: /compact transport failed; task not sent. Inspect $target before retrying." >&2
+            echo "Error: /compact delivery unconfirmed; task not sent. Inspect $target before retrying." >&2
             exit "$status"
         fi
         echo "Waiting for Codex to finish the requested history compaction..." >&2
@@ -468,7 +468,7 @@ if [[ -n "$prompt_file" ]]; then
     fi
 
     if "$SCRIPT_DIR/tmux-message.sh" send "$pane_id" --max-wait 30 --prompt-file "$prompt_file"; then
-        echo "Spawned $agent in $target ($pane_id, dir: $directory); task transport sent, receipt unverified"
+        echo "Spawned $agent in $target ($pane_id, dir: $directory); task delivery confirmed"
         exit 0
     else
         status=$?

@@ -93,7 +93,7 @@ sys.exit(status)
                 messages=self.messages(); self.assertEqual(len(messages),1)
                 self.assertEqual(messages[0]['args'][:4],['send','%88','--max-wait','30'])
                 self.assertEqual(messages[0]['text'],self.task.read_text())
-                self.assertIn('receipt unverified',result.stdout)
+                self.assertIn('task delivery confirmed',result.stdout)
                 if agent=='codex':
                     self.assertIn('check_for_update_on_startup=false',(self.root/'launch').read_text())
                 commands=[json.loads(line)[0] for line in (self.root/'tmux.jsonl').read_text().splitlines()]
