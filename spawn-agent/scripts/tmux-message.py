@@ -379,7 +379,7 @@ def options(argv=None):
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("target")
     p.add_argument("--prompt-file", "-f", type=Path)
-    for name, default in (("stable-wait", 3), ("max-wait", 10), ("submit-delay", 1),
+    for name, default in (("stable-wait", 3), ("max-wait", 10), ("submit-delay", 8),
                           ("render-wait", 3), ("receipt-wait", 15), ("retry-wait", 3),
                           ("poll-interval", 0.25)):
         p.add_argument("--" + name, type=float, default=default)

@@ -48,7 +48,7 @@ Options precede actual message text or `--prompt-file FILE`:
 | --- | ---: | --- |
 | `--stable-wait` | 3 | Unchanging input before paste |
 | `--max-wait` | 10 | Input readiness budget (launcher uses 30) |
-| `--submit-delay` | 1 | Earliest first Enter after paste |
+| `--submit-delay` | 8 | Earliest first Enter after paste |
 | `--render-wait` | 3 | Wait for initial paste evidence |
 | `--receipt-wait` | 15 | Additional confirmation budget |
 | `--retry-wait` | 3 | Minimum interval before the second Enter |
@@ -56,6 +56,8 @@ Options precede actual message text or `--prompt-file FILE`:
 
 `--backoff` waits within `--max-wait` for a draft/typing to clear, rather than
 returning immediately when detected. Stability resets when input changes.
+The 8/3/10 submit/render/readiness defaults preserve the operational baseline;
+receipt confirmation and recovery do not depend on shortening that delay.
 The lock wait has a separate `--max-wait` budget. Confirmation is bounded by
 render + submit-delay + receipt-wait; operations also have subprocess timeouts.
 The launcher gives `/compact` its configured compaction timeout as the receipt
