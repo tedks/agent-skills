@@ -154,7 +154,7 @@ def paste_evidence(inp, payload):
         return True
     # Codex also collapses a whole paste into a character-count marker.
     # Require the entire input to be that marker: surrounding text is mixed.
-    content = re.fullmatch(r"\[Pasted Content ([0-9]+) chars\]", inp.text.strip(), re.I)
+    content = re.fullmatch(r"\[Pasted Content ([0-9]+) chars\]", inp.text, re.I)
     if content:
         # Terminal clients count either Unicode code points or UTF-16 units.
         counts = {str(len(payload)), str(len(payload.encode("utf-16-le")) // 2)}

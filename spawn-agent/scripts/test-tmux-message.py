@@ -203,6 +203,7 @@ class DeliveryTests(unittest.TestCase):
                 self.assertTrue(m.paste_evidence(m.Input('text', marker), payload))
                 self.assertFalse(m.paste_evidence(m.Input('text', marker + ' human'), payload))
                 self.assertFalse(m.paste_evidence(m.Input('text', 'human ' + marker), payload))
+                self.assertFalse(m.paste_evidence(m.Input('text', ' ' + marker), payload))
         self.assertFalse(m.paste_evidence(m.Input('text', '[Pasted Content 1034 chars]'), 'short'))
 
     def test_content_marker_drop_enter_recovers_and_confirms(self):
