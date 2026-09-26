@@ -1,120 +1,322 @@
 #!/bin/bash
-# Hermetic concurrency test for claude-send's per-target paste/submit lock.
+# Fake-tmux regression tests for human-composer-safe claude-send delivery.
 set -euo pipefail
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+FIXTURES="$SCRIPT_DIR/fixtures/claude-send"
 TEST_DIR=$(mktemp -d /tmp/test-claude-send.XXXXXX)
 trap 'rm -rf "$TEST_DIR"' EXIT
-mkdir "$TEST_DIR/bin"
-export FAKE_TMUX_LOG="$TEST_DIR/tmux.log"
+mkdir -p "$TEST_DIR/bin" "$TEST_DIR/state" "$TEST_DIR/buffers"
+mkdir -p "$TEST_DIR/runtime"
+export FAKE_STATE="$TEST_DIR/state"
+export FAKE_LOG="$TEST_DIR/tmux.log"
 export FAKE_BUFFER_DIR="$TEST_DIR/buffers"
-export FAKE_SLEEP_LOG="$TEST_DIR/sleeps.log"
-export FAKE_FLOCK_LOG="$TEST_DIR/flock.log"
-mkdir "$FAKE_BUFFER_DIR"
+export XDG_STATE_HOME="$TEST_DIR/state-home"
+export XDG_RUNTIME_DIR="$TEST_DIR/runtime"
+export SPAWN_TMUX_SOCKET="$TEST_DIR/tmux.sock"
+export PATH="$TEST_DIR/bin:$PATH"
 
 cat > "$TEST_DIR/bin/tmux" <<'STUB'
 #!/bin/bash
 set -euo pipefail
 while [[ "${1:-}" == -S || "${1:-}" == -L ]]; do shift 2; done
-command="$1"
-shift
-case "$command" in
-    display-message)
-        printf '%s\n' '4242:%7'
+cmd=$1; shift
+printf '%s\n' "$cmd" >> "$FAKE_STATE/tmux-calls"
+case "$cmd" in
+  display-message)
+    if [[ "${*: -1}" == '#{pid}:#{pane_id}' ]]; then printf '4242:%%7\n'
+    elif [[ "${*: -1}" == '#{cursor_x}:#{cursor_y}' ]]; then
+      if [[ -s "$FAKE_STATE/composer" ]]; then
+        python3 - "$FAKE_STATE/composer" <<'PY'
+from pathlib import Path
+import sys
+rows = Path(sys.argv[1]).read_text().splitlines()
+print(f"{2 + len(rows[-1])}:{1 + len(rows) - 1}")
+PY
+      elif [[ "$(<"$FAKE_STATE/mode")" == streaming ]]; then printf '2:2\n'
+      else printf '2:1\n'; fi
+    else printf '0\n'; fi
+    ;;
+  capture-pane)
+    n=0; [[ -f "$FAKE_STATE/captures" ]] && n=$(<"$FAKE_STATE/captures")
+    n=$((n + 1)); printf '%s' "$n" > "$FAKE_STATE/captures"
+    mode=$(<"$FAKE_STATE/mode")
+    if [[ "$mode" == slow-second-empty && $n -eq 2 ]]; then /usr/bin/sleep 1.2; fi
+    if [[ "$mode" == human-before-paste && $n -ge 3 ]]; then
+      printf 'human text before paste\n' > "$FAKE_STATE/composer"
+    fi
+    if [[ "$mode" == human-during-delay && -f "$FAKE_STATE/pasted" && $n -ge 5 ]]; then
+      printf 'a human began typing\n' > "$FAKE_STATE/composer"
+    fi
+    case "$mode" in
+      modal) cat "$FAKE_STATE/modal" ;;
+      unknown) printf 'Starting Claude Code\n';;
+      *)
+        if [[ -s "$FAKE_STATE/composer" ]]; then
+          python3 - "$FAKE_STATE/composer" <<'PY'
+from pathlib import Path
+import sys
+rows = Path(sys.argv[1]).read_text().splitlines()
+print('─' * 40)
+print('❯\u00a0' + (rows[0] if rows else ''))
+for row in rows[1:]: print('  ' + row)
+print('─' * 40)
+PY
+        elif [[ "$mode" == human || "$mode" == slash ]]; then
+          if [[ "$mode" == slash ]]; then printf '────────────────────────────────────────\n❯ /compact\n────────────────────────────────────────\n'
+          else printf '────────────────────────────────────────\n❯ human draft\n────────────────────────────────────────\n'; fi
+        elif [[ "$mode" == streaming ]]; then
+          printf 'Assistant is thinking…\n────────────────────────────────────────\n❯ Try "how do I log an error?"\n────────────────────────────────────────\n'
+        else cat "$FAKE_STATE/empty"; fi
         ;;
-    load-buffer)
-        while (($#)); do
-            if [[ "$1" == -b ]]; then buffer="$2"; shift 2; else file="$1"; shift; fi
-        done
-        cp "$file" "$FAKE_BUFFER_DIR/$buffer"
-        ;;
-    paste-buffer)
-        target=''
-        buffer=''
-        while (($#)); do
-            case "$1" in
-                -t) target="$2"; shift 2 ;;
-                -b) buffer="$2"; shift 2 ;;
-                *) shift ;;
-            esac
-        done
-        if [[ "${FAKE_FAIL_PASTE:-0}" == 1 ]]; then exit 1; fi
-        printf 'paste-start %s %s\n' "$target" "$(<"$FAKE_BUFFER_DIR/$buffer")" >> "$FAKE_TMUX_LOG"
-        sleep 0.2
-        printf 'paste-end %s\n' "$target" >> "$FAKE_TMUX_LOG"
-        rm "$FAKE_BUFFER_DIR/$buffer"
-        ;;
-    delete-buffer) printf 'delete-buffer\n' >> "$FAKE_TMUX_LOG" ;;
-    send-keys)
-        [[ "${!#}" == Enter ]]
-        printf 'enter\n' >> "$FAKE_TMUX_LOG"
-        ;;
-    *) echo "unexpected tmux command: $command" >&2; exit 64 ;;
+    esac
+    ;;
+  load-buffer)
+    while (($#)); do if [[ "$1" == -b ]]; then b=$2; shift 2; else f=$1; shift; fi; done
+    cp "$f" "$FAKE_BUFFER_DIR/$b" ;;
+  paste-buffer)
+    b=''; while (($#)); do if [[ "$1" == -b ]]; then b=$2; shift 2; else shift; fi; done
+    printf 'paste-start\n' >> "$FAKE_LOG"
+    python3 -c 'import time; print(time.monotonic_ns())' >> "$FAKE_STATE/times"
+    if [[ "${FAKE_FAIL_PASTE:-0}" == 1 ]]; then exit 1; fi
+    cp "$FAKE_BUFFER_DIR/$b" "$FAKE_STATE/composer"
+    : > "$FAKE_STATE/pasted"
+    if [[ "${FAKE_INTERRUPT_AFTER_PASTE:-0}" == 1 ]]; then
+      kill -TERM "$PPID"
+      exit 143
+    fi
+    sleep 0.05
+    printf 'paste-end\n' >> "$FAKE_LOG"
+    rm -f "$FAKE_BUFFER_DIR/$b" ;;
+  delete-buffer) printf 'delete-buffer\n' >> "$FAKE_LOG" ;;
+  send-keys)
+    [[ "${!#}" == Enter ]]
+    printf 'enter\n' >> "$FAKE_LOG"
+    python3 -c 'import time; print(time.monotonic_ns())' >> "$FAKE_STATE/times"
+    : > "$FAKE_STATE/composer"
+    ;;
+  *) echo "unexpected tmux command: $cmd" >&2; exit 64 ;;
 esac
-STUB
-chmod +x "$TEST_DIR/bin/tmux"
-cat > "$TEST_DIR/bin/flock" <<'STUB'
-#!/bin/bash
-printf '%s\n' "$*" >> "$FAKE_FLOCK_LOG"
-if [[ "${FAKE_FAIL_FLOCK:-0}" == 1 ]]; then exit 1; fi
-exec /usr/bin/flock "$@"
 STUB
 cat > "$TEST_DIR/bin/sleep" <<'STUB'
 #!/bin/bash
-if [[ "$1" == 0.2 ]]; then exec /usr/bin/sleep "$@"; fi
-printf '%s\n' "$1" >> "$FAKE_SLEEP_LOG"
+printf '%s\n' "$1" >> "$FAKE_STATE/sleeps"
+if [[ "${FAKE_REAL_SLEEP:-0}" == 1 ]]; then exec /usr/bin/sleep "$1"; fi
 exec /usr/bin/sleep 0.01
 STUB
-chmod +x "$TEST_DIR/bin/flock" "$TEST_DIR/bin/sleep"
-export PATH="$TEST_DIR/bin:$PATH"
-export SPAWN_TMUX_SOCKET="$TEST_DIR/tmux.sock"
+cat > "$TEST_DIR/bin/flock" <<'STUB'
+#!/bin/bash
+if [[ "${FAKE_FAIL_FLOCK:-0}" == 1 ]]; then exit 1; fi
+exec /usr/bin/flock "$@"
+STUB
+chmod +x "$TEST_DIR/bin/tmux" "$TEST_DIR/bin/sleep" "$TEST_DIR/bin/flock"
 
-"$SCRIPT_DIR/claude-send.sh" test:agent alpha & first=$!
-env -u SPAWN_TMUX_SOCKET SPAWN_TMUX_LABEL=personal \
-    "$SCRIPT_DIR/claude-send.sh" test:7 --submit-delay 08 beta & second=$!
-wait "$first"
-wait "$second"
+reset_case() {
+  : > "$FAKE_LOG"
+  : > "$FAKE_STATE/composer"
+  : > "$FAKE_STATE/pasted"
+  : > "$FAKE_STATE/captures"
+  : > "$FAKE_STATE/sleeps"
+  : > "$FAKE_STATE/times"
+  : > "$FAKE_STATE/tmux-calls"
+  printf '%s\n' "${1:-empty}" > "$FAKE_STATE/mode"
+  cp "$FIXTURES/empty.txt" "$FAKE_STATE/empty"
+  cp "$FIXTURES/modal.txt" "$FAKE_STATE/modal"
+}
+run_sender() { bash "$SCRIPT_DIR/claude-send.sh" "$@"; }
+assert_pending() {
+  local status=$1 output=$2 path
+  grep -q "status=$status" "$output"
+  path=$(sed -n 's/.*pending_file=//p' "$output" | tail -n1)
+  [[ -n "$path" && -f "$path" && $(stat -c %a "$(dirname "$path")") == 700 && $(stat -c %a "$path") == 600 ]]
+  printf '%s' "$path"
+}
 
-python3 - "$FAKE_TMUX_LOG" <<'PY'
+# The live Claude frame has a suggestion in an otherwise empty composer.
+prompt_file="$TEST_DIR/payload"
+printf 'alpha\nbeta' > "$prompt_file"
+
+# Invalid byte sequences, control characters, blank content, and trailing
+# whitespace are rejected before any tmux operation, so they cannot be pasted.
+python3 - "$TEST_DIR" <<'PY'
 from pathlib import Path
 import sys
+root = Path(sys.argv[1])
+payloads = {
+    'malformed-utf8': b'valid then \xff',
+    'carriage-return': b'left\rright',
+    'delete': b'left\x7fright',
+    'c1-control': b'left\xc2\x85right',
+    'blank': b' \n\t\n',
+    'trailing-space': b'valid text \n',
+}
+for name, content in payloads.items():
+    (root / name).write_bytes(content)
+PY
+for invalid in malformed-utf8 carriage-return delete c1-control blank trailing-space; do
+  reset_case empty
+  if run_sender target --submit-delay 0 --max-wait 1 --poll-interval 0.1 --prompt-file "$TEST_DIR/$invalid" 2>"$TEST_DIR/$invalid.err"; then
+    echo "FAIL: invalid $invalid payload was accepted" >&2; exit 1
+  fi
+  [[ ! -s "$FAKE_STATE/tmux-calls" ]]
+  [[ $(grep -c '^paste-start$' "$FAKE_LOG" || true) -eq 0 ]]
+done
 
+# Numeric inputs too large for the documented ranges are rejected before the
+# sender attempts to resolve or mutate a pane.
+for option in --submit-delay --max-wait --poll-interval; do
+  reset_case empty
+  if run_sender target "$option" 999999999999999999999 --prompt-file "$prompt_file" 2>"$TEST_DIR/numeric.err"; then
+    echo "FAIL: overflowing $option was accepted" >&2; exit 1
+  fi
+  [[ ! -s "$FAKE_STATE/tmux-calls" ]]
+done
+python3 - "$SCRIPT_DIR/claude-send-screen.py" "$FIXTURES" "$prompt_file" <<'PY'
+from pathlib import Path
+import subprocess, sys
+parser, fixtures, payload = sys.argv[1:]
+def classify(frame, text, x='2', y='1'):
+    Path(payload).write_text(text)
+    return subprocess.check_output([sys.executable, parser, payload, x, y], input=(Path(fixtures) / frame).read_bytes()).decode().strip()
+assert classify('empty.txt', 'outgoing') == 'empty'
+assert classify('multiline.txt', 'first harmless line\nsecond harmless line', str(2 + len('second harmless line')), '2') == 'own'
+assert classify('multiline.txt', 'different') == 'busy'
+assert classify('modal.txt', 'outgoing') == 'unknown'
+assert classify('empty.txt', 'different') == 'empty'
+codex = ('\n' * 26 + '› Ask Codex to do anything\nWorking (12s • esc to interrupt)\n'
+         '  GPT-6-Astra · Context 100% left · disposable\n'
+         '  ← for agents · ? for shortcuts\n')
+Path(payload).write_text('unused')
+assert subprocess.check_output([sys.executable, parser, payload, '2', '26'], input=codex.encode()).decode().strip() == 'empty'
+Path(payload).write_text('harmless draft')
+codex_own = codex.replace('Ask Codex to do anything', 'harmless draft').replace('Working (12s • esc to interrupt)\n', '')
+assert subprocess.check_output([sys.executable, parser, payload, '16', '26'], input=codex_own.encode()).decode().strip() == 'own'
+PY
+printf 'alpha\nbeta' > "$prompt_file"
+
+# The stable-empty pair and pre-paste recheck must finish before max-wait.
+# Simulate a second capture that itself returns only after the deadline.
+reset_case slow-second-empty
+if run_sender target --submit-delay 0 --max-wait 1 --poll-interval 0.1 --prompt-file "$prompt_file" 2>"$TEST_DIR/slow-capture.err"; then
+  echo 'FAIL: late empty observation was delivered after max-wait' >&2; exit 1
+else rc=$?; [[ $rc -eq 2 ]]; fi
+pending=$(assert_pending deferred "$TEST_DIR/slow-capture.err")
+[[ $(grep -c '^paste-start$' "$FAKE_LOG" || true) -eq 0 ]]
+[[ $(grep -c '^enter$' "$FAKE_LOG" || true) -eq 0 ]]
+rm -rf "$(dirname "$pending")"
+
+# Empty composer plus unrelated generation output still accepts queued input.
+reset_case streaming
+out=$(run_sender target --submit-delay 0 --max-wait 3 --poll-interval 0.1 --prompt-file "$prompt_file")
+[[ "$out" == 'status=sent receipt=unverified' ]]
+[[ $(grep -c '^enter$' "$FAKE_LOG") -eq 1 ]]
+[[ $(grep -c '^paste-start$' "$FAKE_LOG") -eq 1 ]]
+
+# Existing human text, slash commands, and modal screens time out without paste/Enter.
+for mode in human slash modal; do
+  reset_case "$mode"
+  if run_sender target --submit-delay 0 --max-wait 1 --poll-interval 0.1 --prompt-file "$prompt_file" 2>"$TEST_DIR/$mode.err"; then
+    echo "FAIL: $mode composer was sent" >&2; exit 1
+  else rc=$?; [[ $rc -eq 2 ]]; fi
+  pending=$(assert_pending deferred "$TEST_DIR/$mode.err")
+  [[ $(grep -c '^paste-start$' "$FAKE_LOG" || true) -eq 0 ]]
+  [[ $(grep -c '^enter$' "$FAKE_LOG" || true) -eq 0 ]]
+  [[ $(<"$pending") == $'alpha\nbeta' ]]
+  rm -rf "$(dirname "$pending")"
+done
+
+# A new human draft between stable-empty observations and paste defers safely.
+reset_case human-before-paste
+if run_sender target --submit-delay 0 --max-wait 3 --poll-interval 0.1 --prompt-file "$prompt_file" 2>"$TEST_DIR/before-paste.err"; then
+  echo 'FAIL: pre-paste human draft was sent' >&2; exit 1
+else rc=$?; [[ $rc -eq 2 ]]; fi
+pending=$(assert_pending deferred "$TEST_DIR/before-paste.err")
+[[ $(grep -c '^paste-start$' "$FAKE_LOG" || true) -eq 0 ]]
+[[ $(grep -c '^enter$' "$FAKE_LOG" || true) -eq 0 ]]
+rm -rf "$(dirname "$pending")"
+
+# If human input appears after our paste, do not Enter, erase, or paste again.
+reset_case human-during-delay
+if run_sender target --submit-delay 1 --max-wait 3 --poll-interval 0.1 --prompt-file "$prompt_file" 2>"$TEST_DIR/midflight.err"; then
+  echo 'FAIL: changed composer was submitted' >&2; exit 1
+else rc=$?; [[ $rc -eq 3 ]]; fi
+pending=$(assert_pending ambiguous "$TEST_DIR/midflight.err")
+[[ $(grep -c '^paste-start$' "$FAKE_LOG") -eq 1 ]]
+[[ $(grep -c '^enter$' "$FAKE_LOG" || true) -eq 0 ]]
+[[ $(<"$FAKE_STATE/composer") == 'a human began typing' ]]
+# A second attempt while the ambiguous composer is occupied must defer, never duplicate.
+if run_sender target --submit-delay 0 --max-wait 1 --poll-interval 0.1 --prompt-file "$pending" 2>"$TEST_DIR/retry-occupied.err"; then
+  echo 'FAIL: retry was pasted over occupied composer' >&2; exit 1
+else rc=$?; [[ $rc -eq 2 ]]; fi
+[[ $(grep -c '^paste-start$' "$FAKE_LOG") -eq 1 ]]
+[[ $(grep -c '^enter$' "$FAKE_LOG" || true) -eq 0 ]]
+# A deliberate retry after the composer is empty delivers the retained payload exactly once.
+rm -f "$FAKE_STATE/pasted"
+: > "$FAKE_STATE/composer"
+printf empty > "$FAKE_STATE/mode"
+out=$(run_sender target --submit-delay 0 --max-wait 3 --poll-interval 0.1 --prompt-file "$pending")
+[[ "$out" == 'status=sent receipt=unverified' ]]
+[[ $(grep -c '^enter$' "$FAKE_LOG") -eq 1 ]]
+rm -rf "$(dirname "$pending")"
+
+# If the sender stops after paste, its pending message must not be pasted over
+# the same exact visible payload on a deliberate retry.
+reset_case empty
+if FAKE_INTERRUPT_AFTER_PASTE=1 run_sender target --submit-delay 0 --max-wait 3 --poll-interval 0.1 --prompt-file "$prompt_file" 2>"$TEST_DIR/interrupted.err"; then
+  echo 'FAIL: injected post-paste interruption returned success' >&2; exit 1
+else rc=$?; [[ $rc -ne 0 ]]; fi
+pending=$(assert_pending ambiguous "$TEST_DIR/interrupted.err")
+[[ $(<"$FAKE_STATE/composer") == $'alpha\nbeta' ]]
+if run_sender target --submit-delay 0 --max-wait 1 --poll-interval 0.1 --prompt-file "$pending" 2>"$TEST_DIR/retry-own.err"; then
+  echo 'FAIL: exact visible payload was submitted twice' >&2; exit 1
+else rc=$?; [[ $rc -eq 2 ]]; fi
+[[ $(grep -c '^paste-start$' "$FAKE_LOG") -eq 1 ]]
+[[ $(grep -c '^enter$' "$FAKE_LOG" || true) -eq 0 ]]
+rm -rf "$(dirname "$pending")"
+
+# Paste failure retains payload and never submits; the named buffer is cleaned.
+reset_case empty
+if FAKE_FAIL_PASTE=1 run_sender target --submit-delay 0 --max-wait 3 --poll-interval 0.1 --prompt-file "$prompt_file" 2>"$TEST_DIR/paste.err"; then
+  echo 'FAIL: paste failure reported success' >&2; exit 1
+else rc=$?; [[ $rc -eq 3 ]]; fi
+pending=$(assert_pending ambiguous "$TEST_DIR/paste.err")
+[[ $(grep -c '^delete-buffer$' "$FAKE_LOG") -eq 1 ]]
+[[ $(grep -c '^enter$' "$FAKE_LOG" || true) -eq 0 ]]
+rm -rf "$(dirname "$pending")"
+
+# The default submit delay remains eight seconds, measured from paste to Enter.
+reset_case empty
+FAKE_REAL_SLEEP=1 out=$(run_sender target --max-wait 3 --poll-interval 0.1 --prompt-file "$prompt_file")
+[[ "$out" == 'status=sent receipt=unverified' ]]
+python3 - "$FAKE_STATE/times" <<'PY'
+from pathlib import Path
+import sys
+values = [int(x) for x in Path(sys.argv[1]).read_text().splitlines()]
+assert len(values) == 2, values
+elapsed = (values[1] - values[0]) / 1_000_000_000
+assert 7.8 <= elapsed <= 11.5, elapsed
+PY
+
+# A target-lock timeout is a deferred, privately retained delivery.
+reset_case empty
+if FAKE_FAIL_FLOCK=1 run_sender target --submit-delay 0 --max-wait 3 --poll-interval 0.1 --prompt-file "$prompt_file" 2>"$TEST_DIR/lock.err"; then
+  echo 'FAIL: failed target lock was ignored' >&2; exit 1
+else rc=$?; [[ $rc -eq 2 ]]; fi
+pending=$(assert_pending deferred "$TEST_DIR/lock.err")
+grep -q 'reason=target-lock-timeout' "$TEST_DIR/lock.err"
+[[ ! -s "$FAKE_LOG" ]]
+rm -rf "$(dirname "$pending")"
+
+# Aliases resolving to the same pane serialize the full paste/delay/submit sequence.
+reset_case empty
+run_sender alias-one --submit-delay 0 --max-wait 3 --poll-interval 0.1 --prompt-file "$prompt_file" & one=$!
+run_sender alias-two --submit-delay 0 --max-wait 3 --poll-interval 0.1 --prompt-file "$prompt_file" & two=$!
+wait "$one"; wait "$two"
+python3 - "$FAKE_LOG" <<'PY'
+from pathlib import Path
+import sys
 lines = Path(sys.argv[1]).read_text().splitlines()
-assert len(lines) == 6, lines
-for offset in (0, 3):
-    start, end, enter = lines[offset:offset + 3]
-    assert start.startswith("paste-start %7 "), lines
-    assert end == "paste-end %7", lines
-    assert enter == "enter", lines
-    assert start.split()[-1] in {"alpha", "beta"}, lines
-assert {lines[0].split()[-1], lines[3].split()[-1]} == {"alpha", "beta"}, lines
+assert lines == ['paste-start','paste-end','enter','paste-start','paste-end','enter'], lines
 PY
 
-[[ $(wc -l < "$FAKE_SLEEP_LOG") -eq 2 ]]
-python3 - "$FAKE_SLEEP_LOG" <<'PY'
-from pathlib import Path
-import sys
-assert Path(sys.argv[1]).read_text().splitlines() == ["8", "8"]
-PY
-python3 - "$FAKE_FLOCK_LOG" <<'PY'
-from pathlib import Path
-import sys
-assert all(line.startswith("-w 90 ") for line in Path(sys.argv[1]).read_text().splitlines())
-PY
-
-: > "$FAKE_TMUX_LOG"
-if FAKE_FAIL_PASTE=1 "$SCRIPT_DIR/claude-send.sh" test:agent should-fail 2>"$TEST_DIR/paste-error"; then
-    echo "paste failure unexpectedly succeeded" >&2
-    exit 1
-fi
-[[ $(grep -c '^delete-buffer$' "$FAKE_TMUX_LOG") -eq 1 ]]
-[[ $(grep -c '^enter$' "$FAKE_TMUX_LOG") -eq 0 ]]
-# A failed paste cleans up and releases the target lock.
-"$SCRIPT_DIR/claude-send.sh" test:agent after-failure
-[[ $(grep -c '^enter$' "$FAKE_TMUX_LOG") -eq 1 ]]
-if FAKE_FAIL_FLOCK=1 "$SCRIPT_DIR/claude-send.sh" test:agent lock-fails 2>"$TEST_DIR/flock-error"; then
-    echo "lock failure unexpectedly succeeded" >&2
-    exit 1
-fi
-grep -q 'timed out waiting' "$TEST_DIR/flock-error"
-echo "claude-send serialization test passed"
+echo 'claude-send composer protection tests passed'
