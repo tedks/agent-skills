@@ -124,7 +124,7 @@ PY
       printf 'a human began typing\n' > "$FAKE_STATE/composer"
     fi
     if [[ -s "$FAKE_STATE/pasted" && "$mode" == busyqueue ]]; then
-      cat "$FIXTURES/codex-generating-queue.ansi" > "$FAKE_STATE/last-screen"
+      cat "$FAKE_STATE/busyqueue" > "$FAKE_STATE/last-screen"
     elif [[ -s "$FAKE_STATE/pasted" && "$mode" == render-stale-empty && $n -eq 4 ]]; then
       cat "$FAKE_STATE/empty" > "$FAKE_STATE/last-screen"
     elif [[ -s "$FAKE_STATE/pasted" && "$mode" == persistent-empty-after-paste ]]; then
@@ -211,6 +211,7 @@ reset_case() {
   printf '%s\n' "${1:-empty}" > "$FAKE_STATE/mode"
   cp "$FIXTURES/claude-blank.ansi" "$FAKE_STATE/empty"
   cp "$FIXTURES/modal.txt" "$FAKE_STATE/modal"
+  cp "$FIXTURES/codex-generating-queue.ansi" "$FAKE_STATE/busyqueue"
 }
 run_sender() {
   if [[ "$(<"$FAKE_STATE/mode")" == interrupt-before-paste ]]; then
