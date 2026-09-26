@@ -133,7 +133,7 @@ def records(frame, inp):
         while end < len(lines) and lines[end].startswith("  ") and lines[end].strip():
             if FOOTER.match(lines[end]) or PROMPT.match(lines[end]) or re.match(r"^\s*↳", lines[end]):
                 break
-            text += "\n" + lines[end][2:]
+            text += "\n" + lines[end][2:].rstrip()
             end += 1
         following = next((row for row in lines[end:] if row.strip()), "")
         previous = next((row for row in reversed(lines[:index]) if row.strip()), "")
@@ -261,6 +261,10 @@ class Sender:
             frame, inp = self.sample()
             now = self.clock()
             fp = inp.fingerprint()
+            if now >= deadline:
+                break
+            if previous is None:
+                stable_since = now
             if previous is not None and fp != previous:
                 # Text/cursor changes within a known input indicate typing.
                 # A startup unknown -> empty transition is ordinary readiness.
@@ -303,12 +307,15 @@ class Sender:
         start = self.clock()
         deadline = start + self.o.render_wait + self.o.submit_delay + self.o.receipt_wait
         owned = None
+        evidence_since = None
         last_enter = None
         input_disappeared = False
         accepted_forms = {normalized(self.payload)}
         while self.clock() < deadline:
             frame, current = self.sample()
             now = self.clock()
+            if now >= deadline:
+                break
             receipt = records(frame, current)
             if (self.payload == "/compact" and self.enters and current.kind == "empty"
                     and styles.strip_ansi(frame.history or frame.raw).count("• Context compacted") > compact_before):
@@ -325,12 +332,15 @@ class Sender:
             evidence = paste_evidence(current, self.payload)
             if evidence:
                 fp = current.fingerprint()
-                if owned is not None and fp != owned:
+                if owned is not None and fp != owned and self.enters:
                     raise DeliveryError("input-changed-after-paste", 3)
+                if owned != fp:
+                    evidence_since = now
                 owned = fp
                 accepted_forms.add(normalized(current.text))
                 due = start + self.o.submit_delay if last_enter is None else last_enter + self.o.retry_wait
-                if now >= due and self.enters < 2 and not input_disappeared:
+                if (now >= due and now - evidence_since >= self.o.poll_interval
+                        and self.enters < 2 and not input_disappeared):
                     # Refresh receipt AND input immediately before each Enter.
                     confirm, live = self.sample()
                     fresh = records(confirm, live)
@@ -342,7 +352,7 @@ class Sender:
                     self.tmux.keys("Enter")
                     self.enters += 1
                     last_enter = self.clock()
-            elif current.kind in {"text", "suggestion"}:
+            elif current.kind in {"text", "suggestion"} and (owned is not None or now - start >= self.o.render_wait):
                 raise DeliveryError("mixed-input-after-paste", 3)
             elif owned is None and now - start >= self.o.render_wait:
                 raise DeliveryError("paste-not-observed", 3)

@@ -159,6 +159,29 @@ class DeliveryTests(unittest.TestCase):
         f = screen(history='› [Pasted text #1 +20 lines]\n\n')
         self.assertEqual(m.records(f, m.composer(f))[('submitted', 'hello')], 0)
 
+    def test_partial_paste_render_settles_before_enter(self):
+        t = Terminal(payload='hello long message')
+        original = t.frame
+        def frame():
+            if t.pastes and t.now < 4:
+                return screen('hello')
+            return original()
+        t.frame = frame
+        self.assertEqual(deliver(t)['status'], 'delivered')
+        self.assertGreaterEqual(t.accepted_at, 4.25)
+        self.assertEqual(t.enters, 1)
+
+    def test_collapsed_marker_render_updates_before_enter(self):
+        t = Terminal(collapsed=True)
+        original = t.frame
+        def frame():
+            if t.pastes and t.now < 3.5:
+                return screen('[Pasted text #1 +2 lines]')
+            return original()
+        t.frame = frame
+        self.assertEqual(deliver(t)['status'], 'delivered')
+        self.assertEqual(t.enters, 1)
+
     def test_new_receipt_wins_over_stale_composer(self):
         t = Terminal(queued=True)
         original = t.keys
