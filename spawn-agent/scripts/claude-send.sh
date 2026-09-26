@@ -1,8 +1,8 @@
 #!/bin/bash
 # claude-send.sh - Send a message to a Claude Code instance in tmux
 #
-# Usage: claude-send.sh <window> <message>
-#        claude-send.sh <window> --prompt-file <file>
+# Usage: claude-send.sh <window> [--submit-delay <seconds>] <message>
+#        claude-send.sh <window> [--submit-delay <seconds>] --prompt-file <file>
 #
 # Automatically targets the correct tmux server socket when run inside tmux.
 # Override with SPAWN_TMUX_SOCKET or SPAWN_TMUX_LABEL env vars.
@@ -16,16 +16,35 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPT_DIR/tmux-ctx.sh"
 
 if [[ $# -lt 2 ]]; then
-    echo "Usage: claude-send.sh <window> <message>" >&2
-    echo "       claude-send.sh <window> --prompt-file <file>" >&2
+    echo "Usage: claude-send.sh <window> [--submit-delay <seconds>] <message>" >&2
+    echo "       claude-send.sh <window> [--submit-delay <seconds>] --prompt-file <file>" >&2
     echo "  window: tmux window target (e.g., 'chaos:newchan-review')" >&2
     echo "  message: the prompt to send to Claude" >&2
     echo "  --prompt-file: read message from file (avoids ARG_MAX)" >&2
+    echo "  --submit-delay: seconds between paste and Enter (integer 0-30; default 8)" >&2
     exit 1
 fi
 
 window="$1"
 shift
+
+submit_delay=8
+if [[ "${1:-}" == "--submit-delay" ]]; then
+    if [[ $# -lt 2 || ! "$2" =~ ^[0-9]+$ ]]; then
+        echo "Error: --submit-delay requires an integer from 0 to 30" >&2
+        exit 1
+    fi
+    submit_delay=$((10#$2))
+    if (( submit_delay > 30 )); then
+        echo "Error: --submit-delay requires an integer from 0 to 30" >&2
+        exit 1
+    fi
+    shift 2
+fi
+if [[ $# -lt 1 ]]; then
+    echo "Error: message or --prompt-file is required" >&2
+    exit 1
+fi
 
 # Get message from --prompt-file or positional args
 prompt_file=""
@@ -64,22 +83,30 @@ else
     printf '%s' "$message" > "$prompt_file"
 fi
 
-# Serialize the full interaction. Buffer names prevent buffer collisions, but
-# without this lock two callers can paste into the same composer before either
-# submits. Include the socket identity so separate tmux servers do not block.
-socket_key="${TMUX_CMD[*]}"
-lock_key=$(printf '%s\0%s' "$socket_key" "$window" | sha256sum | cut -d' ' -f1)
+identity=$("${TMUX_CMD[@]}" display-message -p -t "$window" '#{pid}:#{pane_id}') || {
+    echo "Error: failed to resolve tmux target: $window" >&2
+    exit 1
+}
+if [[ ! "$identity" =~ ^[0-9]+:%[0-9]+$ ]]; then
+    echo "Error: tmux returned an invalid target identity" >&2
+    exit 1
+fi
+pane_id="${identity#*:}"
+lock_key=$(printf '%s' "$identity" | sha256sum | cut -d' ' -f1)
 exec {lock_fd}>"/tmp/claude-send-${UID}-${lock_key}.lock"
-flock "$lock_fd"
+if ! flock -w 90 "$lock_fd"; then
+    echo "Error: timed out waiting to send to $window" >&2
+    exit 1
+fi
 
 # The named buffer (keyed by PID) avoids buffer collisions. The -d flag
 # deletes it after paste; clean up explicitly if paste fails.
 buf_name="claude-send-$$"
 "${TMUX_CMD[@]}" load-buffer -b "$buf_name" "$prompt_file"
-if ! "${TMUX_CMD[@]}" paste-buffer -d -t "$window" -b "$buf_name"; then
+if ! "${TMUX_CMD[@]}" paste-buffer -p -r -d -t "$pane_id" -b "$buf_name"; then
     "${TMUX_CMD[@]}" delete-buffer -b "$buf_name" 2>/dev/null || true
     echo "Error: failed to paste to $window (window may not exist)" >&2
     exit 1
 fi
-sleep 1.5
-"${TMUX_CMD[@]}" send-keys -t "$window" Enter
+sleep "$submit_delay"
+"${TMUX_CMD[@]}" send-keys -t "$pane_id" Enter

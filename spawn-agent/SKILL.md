@@ -362,10 +362,14 @@ Send a message to a running Claude instance:
 ```
 
 Uses tmux load-buffer/paste-buffer for the message body (avoids ARG_MAX),
-then sends Enter with a 1.5 second delay to avoid the swallowed-Enter issue.
-Concurrent calls to the same tmux target are serialized through submission.
-Submission is sent once; an ambiguous pane state must be checked by the caller
-before any manual retry, to avoid duplicating a message that was accepted.
+then sends Enter after an 8 second delay by default. Override the pause with
+`--submit-delay <seconds>` (integer 0-30); for example:
+`claude-send.sh chaos:review --submit-delay 10 "run the tests"`.
+Targets are resolved to a server and pane identity before locking, so aliases
+for the same pane serialize together. Lock waits are bounded to 90 seconds.
+Submission is sent once. Tmux command success confirms the key was sent to the
+pane, not that the application accepted the message; inspect the pane before
+any manual retry to avoid duplicating a message that was accepted.
 
 ### claude-trust-dir.sh
 
