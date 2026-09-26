@@ -381,7 +381,7 @@ justify a different `--submit-delay`. This override is independent of render
 waiting; model identity alone does not select a timing default. See
 `docs/control-delivery-tuning.md` in the repository for measurements.
 
-- `--render-wait <seconds>`: integer 0-30, default 1, initial render budget.
+- `--render-wait <seconds>`: integer 1-30, default 1, initial render budget.
 - `--submit-delay <seconds>`: integer 0-30, default 8, paste-to-Enter pause.
 - `--max-wait <seconds>`: integer 1-600, default 30, composer wait budget.
 - `--poll-interval <seconds>`: decimal 0.1-2, default 0.5. Composer deferral

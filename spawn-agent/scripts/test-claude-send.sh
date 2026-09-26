@@ -118,6 +118,7 @@ PY
       kill -TERM "$(<"$FAKE_STATE/sender-pid")"
       exit 143
     fi
+    if [[ "$mode" == slow-first-own && $n -eq 4 ]]; then /usr/bin/sleep 1.2; fi
     if [[ "$mode" == slow-third-empty && $n -eq 3 ]]; then /usr/bin/sleep 1.2; fi
     if [[ "$mode" == slow-second-empty && $n -eq 2 ]]; then /usr/bin/sleep 1.2; fi
     if [[ "$mode" == human-before-paste && $n -ge 3 ]]; then
@@ -289,6 +290,11 @@ for option in --submit-delay --render-wait --max-wait --poll-interval; do
   fi
   [[ ! -s "$FAKE_STATE/tmux-calls" ]]
 done
+reset_case empty
+if run_sender target --render-wait 0 --prompt-file "$prompt_file" 2>"$TEST_DIR/zero-render-wait.err"; then
+  echo 'FAIL: zero render budget was accepted' >&2; exit 1
+fi
+[[ ! -s "$FAKE_STATE/tmux-calls" ]]
 reset_case empty
 if run_sender target --max-wait 0 --prompt-file "$prompt_file" 2>"$TEST_DIR/zero-max-wait.err"; then
   echo 'FAIL: zero max-wait was accepted' >&2; exit 1
@@ -500,13 +506,13 @@ out=$(run_sender target --submit-delay 0 --max-wait 3 --poll-interval 0.1 --prom
 [[ $(grep -c '^enter$' "$FAKE_LOG") -eq 1 ]]
 
 # Initial unknown repaint may settle, but a known mixed composer stops.
-for mode in render-unknown render-late-unknown; do
+for mode in render-unknown render-late-unknown slow-first-own; do
   reset_case "$mode"
   out=$(run_sender target --render-wait 2 --submit-delay 0 --max-wait 3 --poll-interval 0.1 --prompt-file "$prompt_file")
   [[ "$out" == 'status=sent receipt=unverified' ]]
   [[ $(grep -c '^enter$' "$FAKE_LOG") -eq 1 ]]
 done
-for mode in render-late-unknown render-unknown-human; do
+for mode in render-late-unknown render-unknown-human slow-first-own; do
   reset_case "$mode"
   if run_sender target --render-wait 1 --submit-delay 0 --max-wait 3 --poll-interval 0.1 --prompt-file "$prompt_file" 2>"$TEST_DIR/render-limit.err"; then
     echo 'FAIL: timeout or mixed render was submitted' >&2; exit 1

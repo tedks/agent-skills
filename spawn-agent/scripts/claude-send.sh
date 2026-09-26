@@ -16,7 +16,7 @@ usage() {
     echo "Usage: claude-send.sh <window> [--submit-delay SEC] [--max-wait SEC] [--render-wait SEC] [--poll-interval SEC] <message>" >&2
     echo "       claude-send.sh <window> [options] --prompt-file FILE" >&2
     echo "  --submit-delay SEC  seconds after paste before submit (integer 0-30; default 8)" >&2
-    echo "  --render-wait SEC   initial post-paste render budget (integer 0-30; default 1)" >&2
+    echo "  --render-wait SEC   initial post-paste render budget (integer 1-30; default 1)" >&2
     echo "  --max-wait SEC      maximum wait for an empty composer (integer 1-600; default 30)" >&2
     echo "  --poll-interval SEC base poll interval (decimal 0.1-2; default 0.5); backoff caps at 8s" >&2
 }
@@ -34,9 +34,15 @@ while (($#)); do
             option=$1; value=$2; shift 2
             case "$option" in
                 --submit-delay|--render-wait)
-                    [[ "$value" =~ ^[0-9]+$ && ${#value} -le 2 ]] || { echo "Error: $option requires an integer from 0 to 30" >&2; exit 1; }
-                    if ((10#$value > 30)); then echo "Error: $option requires an integer from 0 to 30" >&2; exit 1; fi
-                    if [[ "$option" == --submit-delay ]]; then submit_delay=$((10#$value)); else render_wait=$((10#$value)); fi;;
+                    minimum=0
+                    if [[ "$option" == --render-wait ]]; then minimum=1; fi
+                    [[ "$value" =~ ^[0-9]+$ && ${#value} -le 2 ]] || { echo "Error: $option requires an integer from $minimum to 30" >&2; exit 1; }
+                    if ((10#$value < minimum || 10#$value > 30)); then echo "Error: $option requires an integer from $minimum to 30" >&2; exit 1; fi
+                    if [[ "$option" == --submit-delay ]]; then
+                        submit_delay=$((10#$value))
+                    else
+                        render_wait=$((10#$value))
+                    fi;;
                 --max-wait)
                     [[ "$value" =~ ^[0-9]+$ && ${#value} -le 3 ]] || { echo 'Error: --max-wait requires an integer from 1 to 600' >&2; exit 1; }
                     if ((10#$value < 1 || 10#$value > 600)); then echo 'Error: --max-wait requires an integer from 1 to 600' >&2; exit 1; fi
@@ -229,14 +235,11 @@ start_ns=$(python3 -c 'import time; print(time.monotonic_ns())')
 # is observed, every later transition must remain exact.
 render_grace_ns=$((render_wait * 1000000000))
 own_seen=0
-grace_used=0
 while ((own_seen == 0)); do
     state=$(screen_state 2>/dev/null || printf unknown)
     if [[ "$state" == own ]]; then
-        if ((grace_used)); then
-            elapsed_ns=$(python3 -c 'import time,sys; print(time.monotonic_ns()-int(sys.argv[1]))' "$start_ns")
-            ((elapsed_ns < render_grace_ns)) || { preserve_pending ambiguous post-paste-render-timeout; exit 3; }
-        fi
+        elapsed_ns=$(python3 -c 'import time,sys; print(time.monotonic_ns()-int(sys.argv[1]))' "$start_ns")
+        ((elapsed_ns < render_grace_ns)) || { preserve_pending ambiguous post-paste-render-timeout; exit 3; }
         own_seen=1
         break
     fi
@@ -246,7 +249,6 @@ while ((own_seen == 0)); do
     fi
     elapsed_ns=$(python3 -c 'import time,sys; print(time.monotonic_ns()-int(sys.argv[1]))' "$start_ns")
     ((elapsed_ns < render_grace_ns)) || { preserve_pending ambiguous post-paste-render-timeout; exit 3; }
-    grace_used=1
     remaining_ns=$((render_grace_ns - elapsed_ns))
     sleep_for=$(awk -v d="$poll_interval" -v r="$remaining_ns" 'BEGIN { r=r/1000000000; if (d>r) d=r; printf "%.3f",d }')
     sleep "$sleep_for"
