@@ -4,7 +4,7 @@ set -euo pipefail
 export PYTHONDONTWRITEBYTECODE=1
 
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
-FIXTURES="$SCRIPT_DIR/fixtures/claude-send"
+export FIXTURES="$SCRIPT_DIR/fixtures/claude-send"
 TEST_DIR=$(mktemp -d /tmp/test-claude-send.XXXXXX)
 TEST_REAL_PYTHON3=$(command -v python3)
 export TEST_REAL_PYTHON3
@@ -89,7 +89,9 @@ case "$cmd" in
   display-message)
     if [[ "${*: -1}" == '#{pid}:#{pane_id}' ]]; then printf '4242:%%7\n'
     elif [[ "${*: -1}" == '#{cursor_x}:#{cursor_y}' ]]; then
-      if [[ "$(<"$FAKE_STATE/mode")" == busycontext && -s "$FAKE_STATE/pasted" ]]; then cursor='57:2'
+      if [[ "$(<"$FAKE_STATE/mode")" == forkcompact && -s "$FAKE_STATE/pasted" ]]; then cursor='10:50'
+      elif [[ "$(<"$FAKE_STATE/mode")" == forkcompact ]]; then cursor='2:50'
+      elif [[ "$(<"$FAKE_STATE/mode")" == busycontext && -s "$FAKE_STATE/pasted" ]]; then cursor='57:2'
       elif [[ "$(<"$FAKE_STATE/mode")" == busycontext ]]; then cursor='2:2'
       elif [[ "$(<"$FAKE_STATE/mode")" == busyqueue && -s "$FAKE_STATE/pasted" ]]; then cursor='37:27'
       elif [[ "$(<"$FAKE_STATE/mode")" == busyqueue ]]; then cursor='2:27'
@@ -131,7 +133,13 @@ PY
     if [[ "$mode" == human-during-delay && -s "$FAKE_STATE/pasted" && $n -ge 5 ]]; then
       printf 'a human began typing\n' > "$FAKE_STATE/composer"
     fi
-    if [[ "$mode" == busycontext ]]; then
+    if [[ "$mode" == forkcompact ]]; then
+      if [[ -s "$FAKE_STATE/pasted" ]]; then
+        cat "$FIXTURES/codex-fork-compact.ansi" > "$FAKE_STATE/last-screen"
+      else
+        cat "$FIXTURES/codex-fork-empty.ansi" > "$FAKE_STATE/last-screen"
+      fi
+    elif [[ "$mode" == busycontext ]]; then
       if [[ -s "$FAKE_STATE/pasted" ]]; then
         cat "$FIXTURE_CURRENT" > "$FAKE_STATE/last-screen"
       else
@@ -406,6 +414,44 @@ for color_sgr in ('\x1b[38;5;2m', '\x1b[38;2;2;2;2m', '\x1b[38:2:2:2:2m'):
     ).decode().strip() == 'busy'
 PY
 printf 'alpha\nbeta' > "$prompt_file"
+
+# Measured fresh fork lacks a Context percentage. Require the exact model and
+# shortcuts/warnings frame; dim suggestion style and exact cursor still matter.
+python3 - "$SCRIPT_DIR/claude-send-screen.py" "$FIXTURES" <<'PYTEST'
+import importlib.util, sys
+from pathlib import Path
+sys.dont_write_bytecode = True
+spec = importlib.util.spec_from_file_location("screen", sys.argv[1])
+m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
+screen = Path(sys.argv[2], "codex-fork-empty.ansi").read_text()
+x, y = map(int, Path(sys.argv[2], "codex-fork-empty.cursor").read_text().split(':'))
+assert m.state(screen, '/compact', x, y) == 'empty'
+assert m.state(screen.replace('GPT-6-Sol', 'Unrecognized'), '/compact', x, y) == 'unknown'
+assert m.state(screen.replace('shortcuts', 'unrecognized footer'), '/compact', x, y) == 'unknown'
+assert m.state(screen.replace('warnings', 'unrecognized-warning'), '/compact', x, y) == 'unknown'
+compact = Path(sys.argv[2], "codex-fork-compact.ansi").read_text()
+cx, cy = map(int, Path(sys.argv[2], "codex-fork-compact.cursor").read_text().split(':'))
+assert m.state(compact, '/compact', cx, cy) == 'own'
+assert m.state(compact, '/compact', cx + 1, cy) == 'busy'
+assert m.state(compact, 'different', cx, cy) == 'unknown'
+assert m.state(compact.replace('summarize conversation', 'unrecognized command'), '/compact', cx, cy) == 'unknown'
+# Text painted into the measured composer must own its exact bytes and cursor.
+raw_lines = screen.splitlines()
+index = next(i for i, line in enumerate(raw_lines) if i == y)
+raw_lines[index] = '› /compact'
+owned = '\n'.join(raw_lines)
+assert m.state(owned, '/compact', 10, y) == 'own'
+assert m.state(owned, '/compact', 11, y) == 'busy'
+assert m.state(owned, 'different', 10, y) == 'busy'
+PYTEST
+
+# Fresh fork command/menu shape runs through the real sender once.
+reset_case forkcompact
+out=$(run_sender target --submit-delay 0 --render-wait 3 --max-wait 3 '/compact')
+[[ "$out" == 'status=sent receipt=unverified' ]]
+[[ $(grep -c '^paste-buffer$' "$FAKE_STATE/tmux-calls") -eq 1 ]]
+[[ $(grep -c '^send-keys$' "$FAKE_STATE/tmux-calls") -eq 1 ]]
+[[ $(cat "$FAKE_STATE/submitted") == '/compact' ]]
 
 # A measured Codex busy-queue composer accepts one exact short payload once.
 reset_case busyqueue

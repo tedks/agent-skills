@@ -224,10 +224,11 @@ def main() -> int:
                     sys.stdout.write(message)
                     sys.stdout.flush()
                     return 0
-            elif (
-                record.get("type") == "event_msg"
-                and isinstance(record.get("payload"), dict)
-                and record["payload"].get("type") == "context_compacted"
+            elif isinstance(record.get("payload"), dict) and (
+                record.get("type") == "compacted" or (
+                    record.get("type") == "event_msg"
+                    and record["payload"].get("type") == "context_compacted"
+                )
             ):
                 return 0
         return 1

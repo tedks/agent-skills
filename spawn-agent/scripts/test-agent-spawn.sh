@@ -89,4 +89,12 @@ if wait "$truncated_pid"; then
 fi
 grep -Fq 'rollout was truncated' "$STDERR"
 
+# New Codex compaction record is accepted only after the supplied cursor.
+printf '%s\n' '{"type":"compacted","payload":{}}' > "$JSONL"
+old_compact_after=$("$WATCH" cursor "$JSONL")
+if "$WATCH" compaction "$JSONL" "$old_compact_after" 0.1 > /dev/null 2> "$STDERR"; then
+    echo 'FAIL: inherited compacted record accepted' >&2; exit 1
+fi
+printf '%s\n' '{"type":"compacted","payload":{}}' >> "$JSONL"
+"$WATCH" compaction "$JSONL" "$old_compact_after" 1 > /dev/null
 echo 'PASS: shared tmux launcher delivery and optional JSONL completion'

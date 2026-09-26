@@ -179,7 +179,7 @@ screen_state() {
        [[ "$screen" == *'Do you trust the contents of this project?'* ]]; then
         printf modal; return
     fi
-    if [[ ( "$screen" == *'Context '* || "$screen" == *'tab to queue message'* ) && "$screen" == *'› '* ]]; then
+    if [[ ( "$screen" == *'Context '* || "$screen" == *'tab to queue message'* || "$screen" == *'  GPT-6-Sol · '* ) && "$screen" == *'› '* ]]; then
         printf '%s' "$screen_raw" | python3 "$SCRIPT_DIR/claude-send-screen.py" "$prompt_file" "$cursor_x" "$cursor_y"
         return
     fi

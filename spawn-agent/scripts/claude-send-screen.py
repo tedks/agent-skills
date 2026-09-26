@@ -81,12 +81,18 @@ def cell_width(text: str) -> int:
     return width
 
 
+def codex_surface(screen: str) -> bool:
+    clean = strip_ansi(screen)
+    return "›" in clean and ("Context " in clean or "tab to queue message" in clean
+                             or re.search(r"^  GPT-6-Sol · [^›❯\n]+$", clean, re.MULTILINE) is not None)
+
+
 def state(screen: str, payload: str, cx: int, cy: int) -> str:
     if any(ord(ch) < 32 and ch not in "\n\t" for ch in payload):
         return "unknown"
     clean_screen = strip_ansi(screen)
     lines = clean_screen.splitlines()
-    if ("Context " in clean_screen or "tab to queue message" in clean_screen) and "›" in clean_screen:
+    if codex_surface(screen):
         return codex_state(lines, screen.splitlines(), payload, cx, cy)
     # Current Claude Code renders the live composer between two horizontal
     # rules, with no side gutters. Require that exact frame around the last
@@ -196,9 +202,24 @@ def codex_state(lines: list[str], raw_lines: list[str], payload: str, cx: int, c
         return "own" if observed == payload and (cy, cx) == (idx, 2 + cell_width(payload)) else "busy"
 
     contexts = [i for i, line in enumerate(lines) if i > idx and "Context " in line]
-    if not contexts:
-        return "unknown"
-    footer = contexts[0]
+    if contexts:
+        footer = contexts[0]
+    else:
+        # Codex 0.157.1 fresh fork: known model/branch footer, no Context yet.
+        # Require its shortcuts/warnings suffix rather than arbitrary prompt text.
+        model_rows = [i for i in range(idx + 1, len(lines))
+                      if re.fullmatch(r"  GPT-6-Sol · [^›❯]+", lines[i])]
+        if len(model_rows) != 1:
+            return "unknown"
+        footer = model_rows[0]
+        suffix = [line for line in lines[footer + 1:] if line.strip()]
+        shortcuts = len(suffix) == 1 and re.fullmatch(
+            r"  \? for shortcuts +⚠ \d+ warnings · f2 to view", suffix[0])
+        compact_menu = (payload == "/compact" and not suffix and idx >= 2
+                        and lines[idx - 2] == "› /compact  summarize conversation to prevent hitting the context limit"
+                        and not lines[idx - 1].strip() and lines[idx] == "› /compact")
+        if not shortcuts and not compact_menu:
+            return "unknown"
     if footer - idx > 2:
         return "unknown"
     if any(line.strip() and not ("? for shortcuts" in line or "warning" in line.lower() or "agents" in line.lower()) for line in lines[footer + 1 :]):

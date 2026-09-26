@@ -222,6 +222,11 @@ case "$agent" in
         ;;
 esac
 
+if [[ "$agent" == agy && ( -n "$prompt_file" || -n "$prompt" ) ]]; then
+    echo "Error: agy task delivery is not yet supported by the shared tmux guard; launch without a prompt." >&2
+    exit 1
+fi
+
 if [[ -n "$codex_options_set" && "$agent" != codex ]]; then
     echo "Error: --codex-bin and --model apply to codex only" >&2
     exit 1

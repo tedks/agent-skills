@@ -40,7 +40,9 @@ composers may be unverifiable and produce an ambiguous outcome. During Codex
 generation, only the measured short, single-line composer followed by a blank
 row and styled `tab to queue message` hint is recognized, either combined with
 the context percentage or below the measured model/context row; wrapped or multiline
-queue layouts remain ambiguous.
+queue layouts remain ambiguous. The measured Codex0.157.1/Sol fresh-fork
+model/branch footer and exact `/compact` completion-menu frame are also
+recognized. Other context-free model/footer shapes remain unknown.
 This includes a prompt file ending in a newline: its pasted cursor geometry
 cannot be verified by the single-line queue shape. Preserve those bytes rather
 than trimming them for a retry; broader support is tracked in ditz.
@@ -82,6 +84,6 @@ Never use a fresh send to retry an ambiguous attempt blindly.
 Screen polling is a conservative guard, not atomic human-input exclusion.
 Invisible input, cursor movement, clipped/collapsed pasted blocks, and TUI
 layout changes limit what can be verified. Unsupported surfaces fail closed.
-See [the delivery boundaries](../../../docs/control-delivery.md) and the
+See [the delivery boundaries](../../../../docs/control-delivery.md) and the
 fixture-based regression suite `scripts/test-claude-send.sh`.
 

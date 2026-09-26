@@ -85,7 +85,7 @@ sys.exit(status)
         return [json.loads(line) for line in self.log.read_text().splitlines()] if self.log.exists() else []
 
     def test_every_harness_routes_task_once_to_spawned_pane(self):
-        for agent in ['codex','claude','agy']:
+        for agent in ['codex','claude']:
             with self.subTest(agent=agent):
                 self.log.unlink(missing_ok=True)
                 result=self.launch(agent)
@@ -94,8 +94,17 @@ sys.exit(status)
                 self.assertEqual(messages[0]['args'][:4],['send','%88','--max-wait','30'])
                 self.assertEqual(messages[0]['text'],self.task.read_text())
                 self.assertIn('receipt unverified',result.stdout)
+                if agent=='codex':
+                    self.assertIn('check_for_update_on_startup=false',(self.root/'launch').read_text())
                 commands=[json.loads(line)[0] for line in (self.root/'tmux.jsonl').read_text().splitlines()]
                 self.assertFalse(set(commands)&{'load-buffer','paste-buffer','send-keys'})
+
+    def test_unsupported_agy_task_rejected_before_window(self):
+        result=self.launch('agy')
+        self.assertNotEqual(result.returncode,0)
+        self.assertIn('launch without a prompt',result.stderr)
+        self.assertFalse((self.root/'tmux.jsonl').exists())
+        self.assertEqual(self.messages(),[])
 
     def test_no_prompt_needs_no_message_or_transcript(self):
         self.assertEqual(self.launch('agy',task=False).returncode,0)
@@ -144,6 +153,28 @@ sys.exit(status)
             with self.subTest(agent=agent,extra=extra):
                 self.assertNotEqual(self.launch(agent,extra).returncode,0)
                 self.assertFalse((self.root/'tmux.jsonl').exists())
+
+    def test_environment_model_binary_and_shell_escaping(self):
+        binary=self.bin/'chosen codex'
+        shutil.copy2(self.bin/'codex',binary)
+        result=self.launch(env={'SPAWN_CODEX_BIN':str(binary),'SPAWN_CODEX_MODEL':'env model'})
+        self.assertEqual(result.returncode,0,result.stderr)
+        command=shlex.split((self.root/'launch').read_text())
+        self.assertEqual(command[0],str(binary))
+        self.assertEqual(command[command.index('-m')+1],'env model')
+        self.assertIn('check_for_update_on_startup=false',command)
+        result=self.launch(extra=['--model','cli-model'],env={'SPAWN_CODEX_MODEL':'env-model'})
+        self.assertEqual(result.returncode,0,result.stderr)
+        command=shlex.split((self.root/'launch').read_text())
+        self.assertEqual(command[command.index('-m')+1],'cli-model')
+
+    def test_parent_identity_and_partial_metadata_never_send(self):
+        for metadata in [json.dumps({'type':'session_meta','payload':{'id':PARENT,'forked_from_id':PARENT}})+'\n',
+                         '{"type":"session_meta"']:
+            self.rollout.write_text(metadata)
+            result=self.launch(extra=['--fork-session',PARENT])
+            self.assertNotEqual(result.returncode,0)
+            self.assertEqual(self.messages(),[])
 
     def test_wrong_fork_ancestry_never_sends(self):
         self.metadata['payload']['forked_from_id']='00000000-0000-0000-0000-000000000000'

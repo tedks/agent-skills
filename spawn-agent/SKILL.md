@@ -60,8 +60,9 @@ tmux-message send chaos:review --prompt-file /tmp/task-prompt
 launcher uses the same sender with a 30-second startup composer wait. Timing
 options before the message override those defaults. Claude and Codex share the
 measured baseline; add a different harness timing only with receipt evidence.
-Agy launches interactively, but its task composer is not yet supported by the
-shared guard. Unknown layouts defer; do not bypass the guard with a local fork.
+Agy launches interactively without a task; prompted Agy launches are rejected
+before creating a window until its composer is supported by the shared guard.
+Unknown layouts defer; do not bypass the guard with a local fork.
 
 `read` resolves the target to a stable pane and shows 200 history rows plus the
 visible pane. `send` waits for an empty recognized composer, pastes once under a

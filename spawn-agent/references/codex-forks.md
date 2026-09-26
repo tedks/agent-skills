@@ -81,7 +81,8 @@ installed executable is not the one on PATH.
 Codex `/compact` accepts no inline argument. The launcher supplies the
 step-specific policy **and task** through a private, process-local
 `experimental_compact_prompt_file` config override, submits bare `/compact`,
-and waits for the rollout's `context_compacted` event. Both bare `/compact`
+and waits for a new compaction record (`context_compacted` on older releases,
+`compacted` on Codex0.157.1). Both bare `/compact`
 and the subsequent exact task go through `tmux-message send` to the stable child
 pane. No native queue is used. The launcher verifies the fork's ancestry before
 this optional fork workflow continues; ordinary messaging does not discover a
