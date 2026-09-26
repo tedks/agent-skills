@@ -13,6 +13,7 @@ import fcntl
 import hashlib
 import importlib.util
 import json
+import math
 import os
 from pathlib import Path
 import re
@@ -375,8 +376,9 @@ def options(argv=None):
     o = p.parse_intermixed_args(argv)
     for name in ("stable_wait", "max_wait", "submit_delay", "render_wait", "receipt_wait", "retry_wait", "poll_interval"):
         value = getattr(o, name)
-        if not 0 < value <= 600 and not (name == "submit_delay" and value == 0):
-            p.error(name.replace("_", "-") + " must be positive and at most 600 seconds (submit-delay may be zero)")
+        maximum = math.inf if name == "receipt_wait" else 600
+        if not math.isfinite(value) or (not 0 < value <= maximum and not (name == "submit_delay" and value == 0)):
+            p.error(name.replace("_", "-") + " must be finite and positive (submit-delay may be zero); options except receipt-wait are capped at 600 seconds")
     if bool(o.prompt_file) == (o.message is not None):
         p.error("provide exactly one message or --prompt-file")
     if not o.target or o.target.startswith("-"):

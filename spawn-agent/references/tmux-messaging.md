@@ -52,6 +52,9 @@ Options precede actual message text or `--prompt-file FILE`:
 returning immediately when detected. Stability resets when input changes.
 The lock wait has a separate `--max-wait` budget. Confirmation is bounded by
 render + submit-delay + receipt-wait; operations also have subprocess timeouts.
+The launcher gives `/compact` its configured compaction timeout as the receipt
+budget, because some layouts show only completion rather than an initial user
+row. Receipt waits may exceed 600 seconds when explicitly configured.
 Payloads are nonblank UTF-8 with no control characters except newlines. Message
 bytes, including trailing whitespace/newlines, are preserved in the paste.
 

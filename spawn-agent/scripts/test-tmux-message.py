@@ -159,6 +159,9 @@ class DeliveryTests(unittest.TestCase):
         f = screen(history='› [Pasted text #1 +20 lines]\n\n')
         self.assertEqual(m.records(f, m.composer(f))[('submitted', 'hello')], 0)
 
+    def test_long_compaction_receipt_budget_is_supported(self):
+        self.assertEqual(m.options(['%1', '--receipt-wait', '900', '/compact']).receipt_wait, 900)
+
     def test_partial_paste_render_settles_before_enter(self):
         t = Terminal(payload='hello long message')
         original = t.frame

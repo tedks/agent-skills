@@ -45,7 +45,7 @@ usage() {
     echo "  --trust: pre-grant Claude Code workspace trust for <directory> (claude only)" >&2
     echo "  --fork-session: interactively fork a Codex session UUID" >&2
     echo "  --compact-prompt-file: compact inherited history with this prompt before the task" >&2
-    echo "  --compact-timeout: seconds to wait for structured compaction completion" >&2
+    echo "  --compact-timeout: seconds to wait for compaction receipt and structured completion" >&2
     echo "  --rollout-path-file: atomically write the child Codex rollout path" >&2
     echo "  --recap-cursor-file: atomically write the safe JSONL recap start offset" >&2
     echo "  --startup-cursor-file: atomically write the pre-compaction JSONL offset" >&2
@@ -441,7 +441,7 @@ if [[ -n "$prompt_file" ]]; then
             mv -f -- "$_cleanup_startup_output" "$startup_cursor_file"
             _cleanup_startup_output=""
         fi
-        if "$SCRIPT_DIR/tmux-message.sh" send "$pane_id" --max-wait 30 '/compact'; then
+        if "$SCRIPT_DIR/tmux-message.sh" send "$pane_id" --max-wait 30 --receipt-wait "$compact_timeout" '/compact'; then
             :
         else
             status=$?

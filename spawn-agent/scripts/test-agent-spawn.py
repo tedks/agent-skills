@@ -123,9 +123,10 @@ sys.exit(status)
         result=self.launch(extra=['--fork-session',PARENT,'--compact-prompt-file',str(self.policy),
                                   '--rollout-path-file',str(self.root/'rollout-out'),
                                   '--recap-cursor-file',str(self.root/'cursor-out'),
-                                  '--startup-cursor-file',str(self.root/'startup-out')],env={'MUTATE_TASK':'1'})
+                                  '--startup-cursor-file',str(self.root/'startup-out'),'--compact-timeout','900'],env={'MUTATE_TASK':'1'})
         self.assertEqual(result.returncode,0,result.stderr)
         self.assertEqual([item['text'] for item in self.messages()],['/compact',original])
+        self.assertEqual(self.messages()[0]['args'][4:6], ['--receipt-wait','900'])
         self.assertIn(original,(self.root/'compact-copy').read_text())
         self.assertEqual((self.root/'rollout-out').read_text().strip(),str(self.rollout))
         self.assertEqual(int((self.root/'cursor-out').read_text()),self.rollout.stat().st_size)
