@@ -5,7 +5,34 @@ set -euo pipefail
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 FIXTURES="$SCRIPT_DIR/fixtures/claude-send"
 TEST_DIR=$(mktemp -d /tmp/test-claude-send.XXXXXX)
-trap 'rm -rf "$TEST_DIR"' EXIT
+TEST_REAL_PYTHON3=$(command -v python3)
+export TEST_REAL_PYTHON3
+cleanup_test() {
+  local rc=$?
+  if ((rc == 0)); then
+    rm -rf "$TEST_DIR"
+  else
+    echo "fake-tmux diagnostics preserved at $TEST_DIR" >&2
+    if [[ -s "$FAKE_STATE/last-screen" && -s "$FAKE_STATE/last-cursor" ]]; then
+      printf 'fake tmux command/exit trace:\n' >&2
+      cat "$FAKE_STATE/tmux-trace" >&2 2>/dev/null || true
+      printf 'fake parser command/exit trace:\n' >&2
+      cat "$FAKE_STATE/parser-trace" >&2 2>/dev/null || true
+      if [[ -f "$FAKE_STATE/last-parser-input" ]]; then
+        printf 'last parser input:\n' >&2; cat "$FAKE_STATE/last-parser-input" >&2
+      fi
+      printf 'last fake pane mode: ' >&2; cat "$FAKE_STATE/mode" >&2
+      printf 'last fake cursor: '; cat "$FAKE_STATE/last-cursor" >&2
+      printf 'last fake screen:\n' >&2; cat "$FAKE_STATE/last-screen" >&2
+      IFS=: read -r diag_x diag_y < "$FAKE_STATE/last-cursor"
+      printf 'classifier result for synthetic payload: ' >&2
+      python3 "$SCRIPT_DIR/claude-send-screen.py" "$TEST_DIR/payload" "$diag_x" "$diag_y" \
+        < "$FAKE_STATE/last-screen" >&2 || true
+    fi
+  fi
+  return "$rc"
+}
+trap cleanup_test EXIT
 mkdir -p "$TEST_DIR/bin" "$TEST_DIR/state" "$TEST_DIR/buffers"
 mkdir -p "$TEST_DIR/runtime"
 export FAKE_STATE="$TEST_DIR/state"
@@ -13,28 +40,61 @@ export FAKE_LOG="$TEST_DIR/tmux.log"
 export FAKE_BUFFER_DIR="$TEST_DIR/buffers"
 export XDG_STATE_HOME="$TEST_DIR/state-home"
 export XDG_RUNTIME_DIR="$TEST_DIR/runtime"
+export CLAUDE_SEND_LOCK_DIR="$TEST_DIR/locks"
 export SPAWN_TMUX_SOCKET="$TEST_DIR/tmux.sock"
 export PATH="$TEST_DIR/bin:$PATH"
+
+cat > "$TEST_DIR/bin/python3" <<'STUB'
+#!/bin/bash
+if [[ "${1:-}" == */claude-send-screen.py ]]; then
+  input=$(mktemp "$FAKE_STATE/parser-input.XXXXXX")
+  output=$(mktemp "$FAKE_STATE/parser-output.XXXXXX")
+  errors=$(mktemp "$FAKE_STATE/parser-errors.XXXXXX")
+  cat > "$input"
+  if [[ "${FAKE_FAIL_PARSER_AFTER_PASTE:-0}" == 1 && -s "$FAKE_STATE/pasted" ]]; then
+    printf 'injected classifier subprocess failure\n' > "$errors"
+    rc=64
+  else
+    "$TEST_REAL_PYTHON3" "$@" < "$input" > "$output" 2> "$errors"
+    rc=$?
+  fi
+  cp "$input" "$FAKE_STATE/last-parser-input"
+  printf 'exit=%s args=%q output=%q stderr=%q\n' "$rc" "$*" "$(<"$output")" "$(<"$errors")" >> "$FAKE_STATE/parser-trace"
+  cat "$output"
+  cat "$errors" >&2
+  exit "$rc"
+fi
+exec "$TEST_REAL_PYTHON3" "$@"
+STUB
 
 cat > "$TEST_DIR/bin/tmux" <<'STUB'
 #!/bin/bash
 set -euo pipefail
 while [[ "${1:-}" == -S || "${1:-}" == -L ]]; do shift 2; done
 cmd=$1; shift
+original_args=$*
+record_tmux_exit() {
+  local rc=$?
+  printf 'exit=%s command=%q args=%q\n' "$rc" "$cmd" "$original_args" >> "$FAKE_STATE/tmux-trace"
+}
+trap record_tmux_exit EXIT
 printf '%s\n' "$cmd" >> "$FAKE_STATE/tmux-calls"
 case "$cmd" in
   display-message)
     if [[ "${*: -1}" == '#{pid}:#{pane_id}' ]]; then printf '4242:%%7\n'
     elif [[ "${*: -1}" == '#{cursor_x}:#{cursor_y}' ]]; then
       if [[ -s "$FAKE_STATE/composer" ]]; then
-        python3 - "$FAKE_STATE/composer" <<'PY'
+        cursor=$(python3 - "$FAKE_STATE/composer" <<'PY'
 from pathlib import Path
 import sys
 rows = Path(sys.argv[1]).read_text().splitlines()
 print(f"{2 + len(rows[-1])}:{1 + len(rows) - 1}")
 PY
-      elif [[ "$(<"$FAKE_STATE/mode")" == streaming ]]; then printf '2:2\n'
-      else printf '2:1\n'; fi
+        )
+      elif [[ "$(<"$FAKE_STATE/mode")" == streaming ]]; then cursor='2:2'
+      else cursor='2:1'; fi
+      printf '%s\n' "$cursor" > "$FAKE_STATE/last-cursor"
+      printf '%s\n' "$cursor"
     else printf '0\n'; fi
     ;;
   capture-pane)
@@ -45,7 +105,7 @@ PY
     if [[ "$mode" == human-before-paste && $n -ge 3 ]]; then
       printf 'human text before paste\n' > "$FAKE_STATE/composer"
     fi
-    if [[ "$mode" == human-during-delay && -f "$FAKE_STATE/pasted" && $n -ge 5 ]]; then
+    if [[ "$mode" == human-during-delay && -s "$FAKE_STATE/pasted" && $n -ge 5 ]]; then
       printf 'a human began typing\n' > "$FAKE_STATE/composer"
     fi
     case "$mode" in
@@ -69,7 +129,8 @@ PY
           printf 'Assistant is thinking…\n────────────────────────────────────────\n❯ Try "how do I log an error?"\n────────────────────────────────────────\n'
         else cat "$FAKE_STATE/empty"; fi
         ;;
-    esac
+    esac > "$FAKE_STATE/last-screen"
+    cat "$FAKE_STATE/last-screen"
     ;;
   load-buffer)
     while (($#)); do if [[ "$1" == -b ]]; then b=$2; shift 2; else f=$1; shift; fi; done
@@ -80,7 +141,7 @@ PY
     python3 -c 'import time; print(time.monotonic_ns())' >> "$FAKE_STATE/times"
     if [[ "${FAKE_FAIL_PASTE:-0}" == 1 ]]; then exit 1; fi
     cp "$FAKE_BUFFER_DIR/$b" "$FAKE_STATE/composer"
-    : > "$FAKE_STATE/pasted"
+    printf 'pasted\n' > "$FAKE_STATE/pasted"
     if [[ "${FAKE_INTERRUPT_AFTER_PASTE:-0}" == 1 ]]; then
       kill -TERM "$PPID"
       exit 143
@@ -109,7 +170,7 @@ cat > "$TEST_DIR/bin/flock" <<'STUB'
 if [[ "${FAKE_FAIL_FLOCK:-0}" == 1 ]]; then exit 1; fi
 exec /usr/bin/flock "$@"
 STUB
-chmod +x "$TEST_DIR/bin/tmux" "$TEST_DIR/bin/sleep" "$TEST_DIR/bin/flock"
+chmod +x "$TEST_DIR/bin/python3" "$TEST_DIR/bin/tmux" "$TEST_DIR/bin/sleep" "$TEST_DIR/bin/flock"
 
 reset_case() {
   : > "$FAKE_LOG"
@@ -119,11 +180,14 @@ reset_case() {
   : > "$FAKE_STATE/sleeps"
   : > "$FAKE_STATE/times"
   : > "$FAKE_STATE/tmux-calls"
+  : > "$FAKE_STATE/tmux-trace"
+  : > "$FAKE_STATE/parser-trace"
   printf '%s\n' "${1:-empty}" > "$FAKE_STATE/mode"
   cp "$FIXTURES/empty.txt" "$FAKE_STATE/empty"
   cp "$FIXTURES/modal.txt" "$FAKE_STATE/modal"
 }
 run_sender() { bash "$SCRIPT_DIR/claude-send.sh" "$@"; }
+run_sender_without_xdg_runtime() { env -u XDG_RUNTIME_DIR bash "$SCRIPT_DIR/claude-send.sh" "$@"; }
 assert_pending() {
   local status=$1 output=$2 path
   grep -q "status=$status" "$output"
@@ -274,6 +338,17 @@ else rc=$?; [[ $rc -eq 2 ]]; fi
 [[ $(grep -c '^enter$' "$FAKE_LOG" || true) -eq 0 ]]
 rm -rf "$(dirname "$pending")"
 
+# A parser subprocess failure after paste becomes unknown and keeps the payload.
+reset_case empty
+if FAKE_FAIL_PARSER_AFTER_PASTE=1 run_sender target --submit-delay 0 --max-wait 3 --poll-interval 0.1 --prompt-file "$prompt_file" 2>"$TEST_DIR/parser-failure.err"; then
+  echo 'FAIL: parser failure after paste was treated as success' >&2; exit 1
+else rc=$?; [[ $rc -eq 3 ]]; fi
+pending=$(assert_pending ambiguous "$TEST_DIR/parser-failure.err")
+grep -q 'reason=post-paste-unknown' "$TEST_DIR/parser-failure.err"
+[[ $(grep -c '^paste-start$' "$FAKE_LOG") -eq 1 ]]
+[[ $(grep -c '^enter$' "$FAKE_LOG" || true) -eq 0 ]]
+rm -rf "$(dirname "$pending")"
+
 # Paste failure retains payload and never submits; the named buffer is cleaned.
 reset_case empty
 if FAKE_FAIL_PASTE=1 run_sender target --submit-delay 0 --max-wait 3 --poll-interval 0.1 --prompt-file "$prompt_file" 2>"$TEST_DIR/paste.err"; then
@@ -314,7 +389,7 @@ rm -rf "$(dirname "$pending")"
 # Aliases resolving to the same pane serialize the full paste/delay/submit sequence.
 reset_case empty
 run_sender alias-one --submit-delay 0 --max-wait 3 --poll-interval 0.1 --prompt-file "$prompt_file" & one=$!
-run_sender alias-two --submit-delay 0 --max-wait 3 --poll-interval 0.1 --prompt-file "$prompt_file" & two=$!
+run_sender_without_xdg_runtime alias-two --submit-delay 0 --max-wait 3 --poll-interval 0.1 --prompt-file "$prompt_file" & two=$!
 wait "$one"; wait "$two"
 python3 - "$FAKE_LOG" <<'PY'
 from pathlib import Path
