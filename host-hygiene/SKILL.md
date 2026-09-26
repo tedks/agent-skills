@@ -21,13 +21,15 @@ Buildx versions may render human sizes: `size_display` preserves them,
 byte measurement. Unsupported size formats disable cache eligibility. `/tmp`
 uses allocated inode blocks for nondirectories. Directories use GNU `du` in
 batches of at most 256 exact paths, with NUL input/output and a shared 60s
-measurement budget. Symlinks are not followed; mounted roots or directories
+measurement budget. Symlinks are not followed; path aliases, mounted roots or directories
 containing mounts are retained without traversal. Directory sizes count every
 hardlink to avoid cross-operand deduplication and are marked `size_exact=false`:
 they can exceed an independent per-root deduplicated measurement and do not
 predict freed bytes. Missing/unsupported output, stderr, nonzero exit, timeout,
 or changed directory/mount identity discards every size in that affected batch;
-all entries remain in the plan with unknown sizes and diagnostics. CLI snapshots
+all entries remain in the plan with unknown sizes and diagnostics. Failed batches
+include output byte counts and at most 512-byte excerpts per stream; subprocess
+capture itself is not a streaming memory bound. CLI snapshots
 cannot exclude a concurrent mount or inode change atomically.
 Measure `df -h` before and after separately and retain the plan and apply output.
 

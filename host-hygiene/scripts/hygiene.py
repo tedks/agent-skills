@@ -77,6 +77,9 @@ def directory_sizes(paths):
         for path in paths[offset:offset + 256]:
             name = os.fsencode(path)
             try:
+                # Kernel mount paths and operands must use the same namespace.
+                if not path.is_absolute() or path.resolve(strict=True) != path:
+                    raise RuntimeError("directory path alias; no traversal")
                 if any(m == name or m.startswith(name + b"/") for m in original_mounts):
                     raise RuntimeError("directory is or contains a mount; no traversal")
                 before[name] = identity(path)
@@ -98,8 +101,10 @@ def directory_sizes(paths):
                 timeout=remaining)
             if result.returncode or result.stderr:
                 raise RuntimeError("GNU du batch failed (exit " + str(result.returncode) +
-                                   "); partial sizes discarded; stderr=" + repr(os.fsdecode(result.stderr)) +
-                                   "; partial stdout (first 4096 bytes)=" + repr(result.stdout[:4096]))
+                                   "); partial sizes discarded; stderr_bytes=" + str(len(result.stderr)) +
+                                   "; stderr (first 512 bytes)=" + repr(os.fsdecode(result.stderr[:512])) +
+                                   "; partial stdout_bytes=" + str(len(result.stdout)) +
+                                   "; partial stdout (first 512 bytes)=" + repr(result.stdout[:512]))
             if not result.stdout.endswith(b"\0"):
                 raise RuntimeError("unsupported GNU du output: missing NUL terminator")
             measured = {}
