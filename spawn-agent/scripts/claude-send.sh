@@ -261,5 +261,6 @@ done
 state=$(screen_state 2>/dev/null || printf unknown)
 [[ "$state" == own ]] || { preserve_pending ambiguous "pre-submit-$state"; exit 3; }
 "${TMUX_CMD[@]}" send-keys -t "$pane_id" Enter
-paste_started=0
+# A paste attempt remains irreversible even if reporting fails after Enter.
+# Only a normal exit suppresses retention; never classify this phase deferred.
 printf 'status=sent receipt=unverified\n'

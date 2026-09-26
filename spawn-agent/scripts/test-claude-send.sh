@@ -364,6 +364,17 @@ out=$(run_sender target --submit-delay 0 --max-wait 3 --poll-interval 0.1 --prom
 [[ $(<"$FAKE_STATE/submitted") == 'Reply with exactly P141-QUEUED-TEST' ]]
 [[ ! -s "$FAKE_STATE/composer" ]]
 
+# Reporting can fail after Enter: retain as ambiguous, never safe-to-retry deferred.
+reset_case empty
+if run_sender target --submit-delay 0 --max-wait 3 --poll-interval 0.1 --prompt-file "$prompt_file" >/dev/full 2>"$TEST_DIR/report-failure.err"; then
+  echo 'FAIL: failed success reporting returned success' >&2; exit 1
+else rc=$?; [[ $rc -eq 1 ]]; fi
+pending=$(assert_pending ambiguous "$TEST_DIR/report-failure.err")
+[[ $(<"$pending") == $'alpha\nbeta' ]]
+[[ $(grep -c '^paste-start$' "$FAKE_LOG") -eq 1 ]]
+[[ $(grep -c '^enter$' "$FAKE_LOG") -eq 1 ]]
+rm -rf "$(dirname "$pending")"
+
 # The stable-empty pair and pre-paste recheck must finish before max-wait.
 # Simulate a second capture that itself returns only after the deadline.
 reset_case slow-second-empty
