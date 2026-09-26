@@ -30,4 +30,23 @@ for entry in "$REPO_ROOT/.bin/tmux-message" "$TEST_DIR/installed bin/tmux-messag
     printf '%s\n' -L alias-test capture-pane -e -p -t %88 -S -200 > "$TEST_DIR/expected"
     cmp "$TEST_DIR/expected" "$TEST_DIR/args"
 done
-printf 'tmux-message alias tests passed\n'
+# Isolate send forwarding from the live transport while keeping both alias hops.
+mkdir -p "$TEST_DIR/source scripts" "$TEST_DIR/repo bin"
+cp "$SCRIPT_DIR/tmux-message.sh" "$SCRIPT_DIR/tmux-ctx.sh" "$TEST_DIR/source scripts/"
+cat > "$TEST_DIR/source scripts/claude-send.sh" <<'STUB'
+#!/usr/bin/env bash
+printf '%s\0' "$@" > "$TMUX_TEST_ARGS"
+exit 3
+STUB
+chmod +x "$TEST_DIR/source scripts/claude-send.sh"
+ln -s "$TEST_DIR/source scripts/tmux-message.sh" "$TEST_DIR/repo bin/tmux-message"
+ln -s "$TEST_DIR/repo bin/tmux-message" "$TEST_DIR/installed bin/send-message"
+message=$'Actual Unicode λ text\nwith $literal content'
+for entry in "$TEST_DIR/repo bin/tmux-message" "$TEST_DIR/installed bin/send-message"; do
+    status=0
+    "$entry" send %88 --submit-delay 8 "$message" || status=$?
+    [[ $status == 3 ]]
+    printf '%s\0' %88 --submit-delay 8 "$message" > "$TEST_DIR/expected"
+    cmp "$TEST_DIR/expected" "$TEST_DIR/args"
+done
+printf 'tmux-message alias tests passed\n' 
