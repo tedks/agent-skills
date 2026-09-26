@@ -1196,10 +1196,15 @@ class Tests(unittest.TestCase):
                  'unclaimed.md': json.dumps({'event': 'e' * 32, 'harness': []})}
         for name, content in files.items():
             (index.parent / name).write_text(content)
+        other_receipt = self.repo / 'receipts' / ('e' * 32 + '.json')
+        other_receipt.parent.mkdir(exist_ok=True)
+        other_bytes = json.dumps({'event': 'e' * 32, 'status': 'pending-exit', 'shard': 'waiting/another-owner.md'})
+        other_receipt.write_text(other_bytes)
         self.actor()
         result = self.invoke()
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertTrue(index.read_text().startswith(original))
+        self.assertEqual(other_receipt.read_text(), other_bytes)
         for name, content in files.items():
             self.assertEqual((index.parent / name).read_text(), content)
             self.assertNotIn('[' + name + ']', index.read_text())
@@ -1272,7 +1277,7 @@ class Tests(unittest.TestCase):
         remote_index = self.git('show', 'origin/master:waiting/INDEX.md')
         (self.directory / 'human-independent-exit').touch()
         self.wait_for(lambda: not Path('/proc/' + str(state['identity']['process']['pid'])).exists())
-        for malformed in ('not JSON', '[]'):
+        for malformed in ('not JSON', '[]', json.dumps({'status': 'retired'}), json.dumps({'event': [], 'status': 'retired'}), json.dumps({'event': 'f' * 32, 'status': 'retired', 'shard': 'waiting/other.md'})):
             receipt.write_text(malformed)
             for _ in range(2):
                 result = self.invoke('--handoff', 'codex', 'model', '--roles', str(self.roles), '--resume', str(path))

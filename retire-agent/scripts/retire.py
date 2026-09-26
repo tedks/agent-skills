@@ -397,10 +397,11 @@ class Retirement:
                 if not receipt.exists():
                     continue
                 receipt_text = receipt.read_text()
-                claim = object_record(receipt_text, 'retirement receipt')
-                if claim.get('event') != data['event'] or claim.get('shard') != 'waiting/' + path.name:
-                    continue  # Existing external/legacy metadata has another owner.
                 record = receipt_record(receipt_text)
+                if record['event'] != data['event']:
+                    raise Stop('malformed retirement receipt event identity')
+                if record.get('shard') != 'waiting/' + path.name:
+                    continue  # Existing external/legacy metadata has another owner.
                 if any(key in data and not isinstance(data[key], str) for key in ('harness', 'session_id', 'role')):
                     raise Stop('malformed index shard metadata')
                 status = record['status']

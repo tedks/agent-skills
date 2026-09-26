@@ -45,7 +45,8 @@ mutations = [
     ('padded completion marker', 'rows[position].rstrip()', 'rows[position]', 'test_padded_final_marker_completes'),
     ('receipt missing path', ['if evidence.returncode:', "if evidence.stdout.strip() != self.state['shard_hash']:"], ['if False:', 'if False:'], 'test_remote_bad_commit_receipt_never_self_heals'),
     ('receipt wrong blob', "if evidence.stdout.strip() != self.state['shard_hash']:", 'if False:', 'test_wrong_blob_receipt_never_self_heals'),
-    ('corrupt index receipt', "                claim = object_record(receipt_text, 'retirement receipt')", '                try:\n                    claim = json.loads(receipt_text)\n                except ValueError:\n                    continue\n                if not isinstance(claim, dict):\n                    continue', 'test_corrupt_other_receipt_preserves_generated_index'),
+    ('index receipt identity', "if record['event'] != data['event']:", 'if False:', 'test_corrupt_other_receipt_preserves_generated_index'),
+    ('corrupt index receipt', "                record = receipt_record(receipt_text)", '                try:\n                    record = json.loads(receipt_text)\n                except ValueError:\n                    continue\n                if not isinstance(record, dict):\n                    continue', 'test_corrupt_other_receipt_preserves_generated_index'),
 ]
 for label, before, after, test in mutations:
     replacements = list(zip(before, after)) if isinstance(before, list) else [(before, after)]
