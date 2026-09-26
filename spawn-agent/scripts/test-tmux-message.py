@@ -486,6 +486,7 @@ class DeliveryTests(unittest.TestCase):
 
 def typed_mutations():
     """Compile-valid changes must fail assertions, not merely fail to import."""
+    subprocess.run([sys.executable, __file__], check=True, timeout=30)
     root = Path(__file__).parent
     original = (root / 'tmux-message.py').read_text()
     cases = [
