@@ -367,14 +367,21 @@ aliases of the same server/pane. Human or unknown unsent text and modals defer
 delivery; unrelated agent output can continue while the empty composer accepts
 a pending message. After paste, the visible composer must match the outgoing
 payload throughout the wait and immediately before a single Enter.
-After paste, only a stale empty composer gets up to one second to repaint; an
-unknown, busy, or modal screen immediately becomes ambiguous, and every later
-check after ownership is first visible must remain an exact match.
-Slow captures or scheduler jitter can make a render miss that deadline; the
-sender stops as ambiguous and retains the payload even if it appears later.
+During initial rendering, empty or unknown frames may settle within the
+`--render-wait` budget without sending keys. A recognized mismatch or modal
+stops immediately. Unknown frames never authorize Enter. After exact ownership
+is first observed, every later check must remain an exact match. A late render
+stops as ambiguous with the original payload retained.
 
 Options before the message or `--prompt-file`:
 
+Timing policy is explicit per call. Keep the 8-second baseline unless repeated
+receipt measurements for the receiver CLI/version/model/state and geometry
+justify a different `--submit-delay`. This override is independent of render
+waiting; model identity alone does not select a timing default. See
+`docs/control-delivery-tuning.md` in the repository for measurements.
+
+- `--render-wait <seconds>`: integer 0-30, default 1, initial render budget.
 - `--submit-delay <seconds>`: integer 0-30, default 8, paste-to-Enter pause.
 - `--max-wait <seconds>`: integer 1-600, default 30, composer wait budget.
 - `--poll-interval <seconds>`: decimal 0.1-2, default 0.5. Composer deferral
@@ -385,7 +392,8 @@ Payloads must be nonblank UTF-8 text, with no control characters except
 newlines and no trailing spaces or tabs on a line. Wrapped or collapsed
 composers may be unverifiable and produce an ambiguous outcome. During Codex
 generation, only the measured short, single-line composer followed by a blank
-row and styled `tab to queue message` hint is recognized; wrapped or multiline
+row and styled `tab to queue message` hint is recognized, either combined with
+the context percentage or below the measured model/context row; wrapped or multiline
 queue layouts remain ambiguous.
 This includes a prompt file ending in a newline: its pasted cursor geometry
 cannot be verified by the single-line queue shape. Preserve those bytes rather

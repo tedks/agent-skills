@@ -171,6 +171,30 @@ def codex_state(lines: list[str], raw_lines: list[str], payload: str, cx: int, c
         expected_x = 2 + cell_width(payload.rsplit("\n", 1)[-1])
         return "own" if observed == payload.rstrip("\n") and (cy, cx) == (expected_y, expected_x) else "busy"
 
+    # Codex 0.157.1 also renders the model/context row ABOVE a separate
+    # queue hint. Require the whole measured suffix, including bold "tab";
+    # neither arbitrary footer text nor an echoed hint proves a live composer.
+    separate_queue = [i for i in range(idx + 1, len(lines))
+                      if lines[i] == "  tab to queue message"]
+    if separate_queue:
+        hint = separate_queue[0]
+        if (len(separate_queue) != 1 or hint - idx != 3 or "\n" in payload
+                or lines[idx + 1].strip()
+                or not re.fullmatch(r"  [^›❯]+ · Context \d{1,3}% left(?: · [^›❯]+)?", lines[idx + 2])
+                or any(line.strip() for line in lines[hint + 1 :])
+                or hint >= len(raw_lines)
+                or not sgr_span(raw_lines[hint], "tab", "bold")):
+            return "unknown"
+        fragment = lines[idx].split("›", 1)[1]
+        if not fragment.startswith(" "):
+            return "unknown"
+        observed = fragment[1:].rstrip()
+        if observed == "":
+            return "empty" if (cy, cx) == (idx, 2) else "busy"
+        if observed == "Ask Codex to do anything":
+            return "empty" if (cy, cx) == (idx, 2) and dim_span(raw_lines[idx], observed) else "busy"
+        return "own" if observed == payload and (cy, cx) == (idx, 2 + cell_width(payload)) else "busy"
+
     contexts = [i for i, line in enumerate(lines) if i > idx and "Context " in line]
     if not contexts:
         return "unknown"

@@ -5,7 +5,7 @@
 # This is not atomic exclusion: a person can type between any two observations.
 #
 # Usage: claude-send.sh <window> [--submit-delay SEC] [--max-wait SEC]
-#        [--poll-interval SEC] <message|--prompt-file FILE>
+#        [--render-wait SEC] [--poll-interval SEC] <message|--prompt-file FILE>
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -13,9 +13,10 @@ source "$SCRIPT_DIR/tmux-ctx.sh"
 source "$SCRIPT_DIR/claude-pane-detect.sh"
 
 usage() {
-    echo "Usage: claude-send.sh <window> [--submit-delay SEC] [--max-wait SEC] [--poll-interval SEC] <message>" >&2
+    echo "Usage: claude-send.sh <window> [--submit-delay SEC] [--max-wait SEC] [--render-wait SEC] [--poll-interval SEC] <message>" >&2
     echo "       claude-send.sh <window> [options] --prompt-file FILE" >&2
     echo "  --submit-delay SEC  seconds after paste before submit (integer 0-30; default 8)" >&2
+    echo "  --render-wait SEC   initial post-paste render budget (integer 0-30; default 1)" >&2
     echo "  --max-wait SEC      maximum wait for an empty composer (integer 1-600; default 30)" >&2
     echo "  --poll-interval SEC base poll interval (decimal 0.1-2; default 0.5); backoff caps at 8s" >&2
 }
@@ -23,18 +24,19 @@ if (($# < 2)); then usage; exit 1; fi
 
 window=$1; shift
 submit_delay=8
+render_wait=1
 max_wait=30
 poll_interval=0.5
 while (($#)); do
     case "$1" in
-        --submit-delay|--max-wait|--poll-interval)
+        --submit-delay|--render-wait|--max-wait|--poll-interval)
             (($# >= 2)) || { echo "Error: $1 requires a value" >&2; exit 1; }
             option=$1; value=$2; shift 2
             case "$option" in
-                --submit-delay)
-                    [[ "$value" =~ ^[0-9]+$ && ${#value} -le 2 ]] || { echo 'Error: --submit-delay requires an integer from 0 to 30' >&2; exit 1; }
-                    if ((10#$value > 30)); then echo 'Error: --submit-delay requires an integer from 0 to 30' >&2; exit 1; fi
-                    submit_delay=$((10#$value));;
+                --submit-delay|--render-wait)
+                    [[ "$value" =~ ^[0-9]+$ && ${#value} -le 2 ]] || { echo "Error: $option requires an integer from 0 to 30" >&2; exit 1; }
+                    if ((10#$value > 30)); then echo "Error: $option requires an integer from 0 to 30" >&2; exit 1; fi
+                    if [[ "$option" == --submit-delay ]]; then submit_delay=$((10#$value)); else render_wait=$((10#$value)); fi;;
                 --max-wait)
                     [[ "$value" =~ ^[0-9]+$ && ${#value} -le 3 ]] || { echo 'Error: --max-wait requires an integer from 1 to 600' >&2; exit 1; }
                     if ((10#$value < 1 || 10#$value > 600)); then echo 'Error: --max-wait requires an integer from 1 to 600' >&2; exit 1; fi
@@ -222,10 +224,10 @@ buffer_loaded=0
 # or press Enter in that case. Agent generation outside the composer is allowed.
 delay=$poll_interval
 start_ns=$(python3 -c 'import time; print(time.monotonic_ns())')
-# Tolerate only a brief stale-empty capture immediately after paste. An unknown
-# frame or any nonempty mismatch is ambiguous at once; after exact ownership is
-# first observed, every later transition must remain exact.
-render_grace_ns=1000000000
+# Wait without keys for initial empty/unknown render frames. Unknown never
+# authorizes Enter; a known mismatch or modal stops immediately. Once ownership
+# is observed, every later transition must remain exact.
+render_grace_ns=$((render_wait * 1000000000))
 own_seen=0
 grace_used=0
 while ((own_seen == 0)); do
@@ -238,12 +240,12 @@ while ((own_seen == 0)); do
         own_seen=1
         break
     fi
-    if [[ "$state" != empty ]]; then
+    if [[ "$state" != empty && "$state" != unknown ]]; then
         preserve_pending ambiguous "post-paste-$state"
         exit 3
     fi
     elapsed_ns=$(python3 -c 'import time,sys; print(time.monotonic_ns()-int(sys.argv[1]))' "$start_ns")
-    ((elapsed_ns < render_grace_ns)) || { preserve_pending ambiguous post-paste-empty-timeout; exit 3; }
+    ((elapsed_ns < render_grace_ns)) || { preserve_pending ambiguous post-paste-render-timeout; exit 3; }
     grace_used=1
     remaining_ns=$((render_grace_ns - elapsed_ns))
     sleep_for=$(awk -v d="$poll_interval" -v r="$remaining_ns" 'BEGIN { r=r/1000000000; if (d>r) d=r; printf "%.3f",d }')

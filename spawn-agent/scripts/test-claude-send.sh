@@ -36,6 +36,7 @@ cleanup_test() {
 trap cleanup_test EXIT
 mkdir -p "$TEST_DIR/bin" "$TEST_DIR/state" "$TEST_DIR/buffers"
 mkdir -p "$TEST_DIR/runtime"
+export FIXTURE_CURRENT="$FIXTURES/codex-context-queue.ansi"
 export FAKE_STATE="$TEST_DIR/state"
 export FAKE_LOG="$TEST_DIR/tmux.log"
 export FAKE_BUFFER_DIR="$TEST_DIR/buffers"
@@ -88,7 +89,9 @@ case "$cmd" in
   display-message)
     if [[ "${*: -1}" == '#{pid}:#{pane_id}' ]]; then printf '4242:%%7\n'
     elif [[ "${*: -1}" == '#{cursor_x}:#{cursor_y}' ]]; then
-      if [[ "$(<"$FAKE_STATE/mode")" == busyqueue && -s "$FAKE_STATE/pasted" ]]; then cursor='37:27'
+      if [[ "$(<"$FAKE_STATE/mode")" == busycontext && -s "$FAKE_STATE/pasted" ]]; then cursor='57:2'
+      elif [[ "$(<"$FAKE_STATE/mode")" == busycontext ]]; then cursor='2:2'
+      elif [[ "$(<"$FAKE_STATE/mode")" == busyqueue && -s "$FAKE_STATE/pasted" ]]; then cursor='37:27'
       elif [[ "$(<"$FAKE_STATE/mode")" == busyqueue ]]; then cursor='2:27'
       elif [[ "$(<"$FAKE_STATE/mode")" == persistent-empty-after-paste && -s "$FAKE_STATE/pasted" ]]; then cursor='2:1'
       elif [[ "$(<"$FAKE_STATE/mode")" == render-stale-empty && -s "$FAKE_STATE/pasted" && $(<"$FAKE_STATE/captures") -eq 4 ]]; then cursor='2:1'
@@ -120,10 +123,20 @@ PY
     if [[ "$mode" == human-before-paste && $n -ge 3 ]]; then
       printf 'human text before paste\n' > "$FAKE_STATE/composer"
     fi
+    if [[ "$mode" == render-unknown-human && -s "$FAKE_STATE/pasted" && $n -ge 5 ]]; then
+      printf 'human mixed input\n' > "$FAKE_STATE/composer"
+    fi
+    if [[ "$mode" == render-late-unknown && -s "$FAKE_STATE/pasted" && $n -eq 4 ]]; then /usr/bin/sleep 1.2; fi
     if [[ "$mode" == human-during-delay && -s "$FAKE_STATE/pasted" && $n -ge 5 ]]; then
       printf 'a human began typing\n' > "$FAKE_STATE/composer"
     fi
-    if [[ "$mode" == busyqueue ]]; then
+    if [[ "$mode" == busycontext ]]; then
+      if [[ -s "$FAKE_STATE/pasted" ]]; then
+        cat "$FIXTURE_CURRENT" > "$FAKE_STATE/last-screen"
+      else
+        sed 's/S short control: reply S-BUSY-1 after the current task.//' "$FIXTURE_CURRENT" > "$FAKE_STATE/last-screen"
+      fi
+    elif [[ "$mode" == busyqueue ]]; then
       if [[ -s "$FAKE_STATE/pasted" ]]; then
         cat "$FAKE_STATE/busyqueue" > "$FAKE_STATE/last-screen"
       else
@@ -133,7 +146,7 @@ PY
       cat "$FAKE_STATE/empty" > "$FAKE_STATE/last-screen"
     elif [[ -s "$FAKE_STATE/pasted" && "$mode" == persistent-empty-after-paste ]]; then
       cat "$FAKE_STATE/empty" > "$FAKE_STATE/last-screen"
-    elif [[ -s "$FAKE_STATE/pasted" && "$mode" == unknown-after-paste ]]; then
+    elif [[ -s "$FAKE_STATE/pasted" && ( "$mode" == unknown-after-paste || "$mode" == unknown-after-own && $n -ge 5 || ( "$mode" == render-unknown || "$mode" == render-late-unknown || "$mode" == render-unknown-human ) && $n -eq 4 ) ]]; then
       printf 'Starting Claude Code\n' > "$FAKE_STATE/last-screen"
     else
     case "$mode" in
@@ -269,7 +282,7 @@ done
 
 # Numeric inputs too large for the documented ranges are rejected before the
 # sender attempts to resolve or mutate a pane.
-for option in --submit-delay --max-wait --poll-interval; do
+for option in --submit-delay --render-wait --max-wait --poll-interval; do
   reset_case empty
   if run_sender target "$option" 999999999999999999999 --prompt-file "$prompt_file" 2>"$TEST_DIR/numeric.err"; then
     echo "FAIL: overflowing $option was accepted" >&2; exit 1
@@ -360,6 +373,25 @@ extra_queue_row = queue_screen.replace(
 assert subprocess.check_output(
     [sys.executable, parser, payload, '37', '27'], input=extra_queue_row
 ).decode().strip() == 'unknown'
+# Measured current Codex separate model/context and queue-hint footer.
+current = (Path(fixtures) / 'codex-context-queue.ansi').read_bytes()
+text = 'S short control: reply S-BUSY-1 after the current task.'
+x, y = map(int, Path(fixtures, 'codex-context-queue.cursor').read_text().split(':'))
+def current_state(frame, wanted=text, px=x, py=y):
+    Path(payload).write_text(wanted)
+    return subprocess.check_output([sys.executable, parser, payload, str(px), str(py)], input=frame).decode().strip()
+assert current_state(current) == 'own'
+assert current_state(current, px=x-1) == 'busy'
+assert current_state(current, py=y-1) == 'busy'
+assert current_state(current, wanted=text+'\n') == 'unknown'
+assert current_state(current.replace(text.encode(), b''), px=2) == 'empty'
+assert current_state(current.replace(text.encode(), b'human draft'), px=13) == 'busy'
+assert current_state(current.replace(text.encode(), (text+' HUMAN').encode()), px=x+6) == 'busy'
+assert current_state(current.replace(b'\x1b[1mtab\x1b[0m', b'tab')) == 'unknown'
+assert current_state(current+b'  unrelated modal\n') == 'unknown'
+assert current_state(current.replace(b'  GPT-6-Sol', b'  arbitrary footer\n  GPT-6-Sol')) == 'unknown'
+assert current_state(current.replace(text.encode(), b'Ask Codex to do anything'), px=2) == 'busy'
+assert current_state(current.replace(text.encode(), b'\x1b[2mAsk Codex to do anything\x1b[0m'), px=2) == 'empty'
 codex_dim = (Path(fixtures) / 'codex-empty-dim.ansi').read_text()
 for color_sgr in ('\x1b[38;5;2m', '\x1b[38;2;2;2;2m', '\x1b[38:2:2:2:2m'):
     color_only = codex_dim.replace('\x1b[2mAsk Codex to do anything', color_sgr + 'Ask Codex to do anything')
@@ -379,6 +411,25 @@ out=$(run_sender target --submit-delay 0 --max-wait 3 --poll-interval 0.1 --prom
 [[ $(grep -c '^enter$' "$FAKE_LOG") -eq 1 ]]
 [[ $(<"$FAKE_STATE/submitted") == 'Reply with exactly P141-QUEUED-TEST' ]]
 [[ ! -s "$FAKE_STATE/composer" ]]
+
+# The current separate model/context queue footer works end-to-end too.
+reset_case busycontext
+printf 'S short control: reply S-BUSY-1 after the current task.' > "$queue_prompt"
+out=$(run_sender target --submit-delay 0 --render-wait 2 --max-wait 3 --poll-interval 0.1 --prompt-file "$queue_prompt")
+[[ "$out" == 'status=sent receipt=unverified' ]]
+[[ $(grep -c '^paste-start$' "$FAKE_LOG") -eq 1 ]]
+[[ $(grep -c '^enter$' "$FAKE_LOG") -eq 1 ]]
+cmp "$queue_prompt" "$FAKE_STATE/submitted"
+
+# Once ownership was visible, an unknown frame stops even with a large budget.
+reset_case unknown-after-own
+if run_sender target --submit-delay 8 --render-wait 30 --max-wait 3 --poll-interval 0.1 --prompt-file "$prompt_file" 2>"$TEST_DIR/ownership-loss.err"; then
+  echo 'FAIL: unknown frame after ownership was submitted' >&2; exit 1
+else rc=$?; [[ $rc -eq 3 ]]; fi
+grep -q 'reason=post-paste-unknown' "$TEST_DIR/ownership-loss.err"
+pending=$(assert_pending ambiguous "$TEST_DIR/ownership-loss.err")
+[[ $(grep -c '^enter$' "$FAKE_LOG" || true) -eq 0 ]]
+rm -rf "$(dirname "$pending")"
 
 # Reporting can fail after Enter: retain as ambiguous, never safe-to-retry deferred.
 reset_case empty
@@ -448,6 +499,23 @@ out=$(run_sender target --submit-delay 0 --max-wait 3 --poll-interval 0.1 --prom
 [[ $(grep -c '^paste-start$' "$FAKE_LOG") -eq 1 ]]
 [[ $(grep -c '^enter$' "$FAKE_LOG") -eq 1 ]]
 
+# Initial unknown repaint may settle, but a known mixed composer stops.
+for mode in render-unknown render-late-unknown; do
+  reset_case "$mode"
+  out=$(run_sender target --render-wait 2 --submit-delay 0 --max-wait 3 --poll-interval 0.1 --prompt-file "$prompt_file")
+  [[ "$out" == 'status=sent receipt=unverified' ]]
+  [[ $(grep -c '^enter$' "$FAKE_LOG") -eq 1 ]]
+done
+for mode in render-late-unknown render-unknown-human; do
+  reset_case "$mode"
+  if run_sender target --render-wait 1 --submit-delay 0 --max-wait 3 --poll-interval 0.1 --prompt-file "$prompt_file" 2>"$TEST_DIR/render-limit.err"; then
+    echo 'FAIL: timeout or mixed render was submitted' >&2; exit 1
+  else rc=$?; [[ $rc -eq 3 ]]; fi
+  pending=$(assert_pending ambiguous "$TEST_DIR/render-limit.err")
+  [[ $(grep -c '^enter$' "$FAKE_LOG" || true) -eq 0 ]]
+  rm -rf "$(dirname "$pending")"
+done
+
 # Persistently stale empty rendering times out ambiguously; it never presses Enter.
 reset_case persistent-empty-after-paste
 if run_sender target --submit-delay 0 --max-wait 3 --poll-interval 0.1 --prompt-file "$prompt_file" 2>"$TEST_DIR/persistent-empty.err"; then
@@ -459,7 +527,7 @@ pending=$(assert_pending ambiguous "$TEST_DIR/persistent-empty.err")
 [[ $(<"$FAKE_STATE/composer") == $'alpha\nbeta' ]]
 rm -rf "$(dirname "$pending")"
 
-# An unreadable post-paste frame is immediately ambiguous and is never submitted.
+# A persistent unknown render frame exhausts its budget without Enter.
 reset_case unknown-after-paste
 if run_sender target --submit-delay 0 --max-wait 3 --poll-interval 0.1 --prompt-file "$prompt_file" 2>"$TEST_DIR/unknown-after-paste.err"; then
   echo 'FAIL: unknown post-paste frame was submitted' >&2; exit 1
@@ -537,7 +605,7 @@ if FAKE_FAIL_PARSER_AFTER_PASTE=1 run_sender target --submit-delay 0 --max-wait 
   echo 'FAIL: parser failure after paste was treated as success' >&2; exit 1
 else rc=$?; [[ $rc -eq 3 ]]; fi
 pending=$(assert_pending ambiguous "$TEST_DIR/parser-failure.err")
-grep -q 'reason=post-paste-unknown' "$TEST_DIR/parser-failure.err"
+grep -q 'reason=post-paste-render-timeout' "$TEST_DIR/parser-failure.err"
 [[ $(grep -c '^paste-start$' "$FAKE_LOG") -eq 1 ]]
 [[ $(grep -c '^enter$' "$FAKE_LOG" || true) -eq 0 ]]
 rm -rf "$(dirname "$pending")"
