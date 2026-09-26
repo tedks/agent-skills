@@ -49,4 +49,4 @@ for entry in "$TEST_DIR/repo bin/tmux-message" "$TEST_DIR/installed bin/send-mes
     printf '%s\0' %88 --submit-delay 8 "$message" > "$TEST_DIR/expected"
     cmp "$TEST_DIR/expected" "$TEST_DIR/args"
 done
-printf 'tmux-message alias tests passed\n' 
+printf 'tmux-message alias tests passed\n'
