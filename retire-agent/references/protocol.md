@@ -105,7 +105,9 @@ event and path; malformed claimed metadata stops with its bytes preserved.
 Verify the shard blob on fetched private `origin/master`, publish its unique
 ledger receipt, then request bare harness exit through the shared sender.
 Claude `/exit` uses `--literal-exit`; Codex `/exit` uses `--typed-command`.
-Both require an empty composer and type the command with one Enter. An
+Both require an empty composer and type the command using the shared bounded
+Enter recovery; Claude literal exit permits one Enter, Codex typed command
+permits at most two with fresh owned-input evidence. An
 ordinary stale draft defers exit without sending exit keys; preserve it and
 resume only after deliberate composer reconciliation. Pasted Claude `/exit`
 is ordinary text and cannot retire a harness.

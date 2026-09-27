@@ -121,11 +121,12 @@ def main():
               'claude_trust_planned': str(worktree),
               'codex_per_process_trust': trust_override, 'real_codex': str(real_codex),
               'containment_limit': 'worktree HEAD/status/tracked diff checks do not prove absence of writes elsewhere; agents retain normal host access'}
-    server_started = False
+    server_creation_attempted = False
     failed = False
     try:
+        assert run([*tmux, 'list-sessions']).returncode != 0, 'unique owned server label already exists'
+        server_creation_attempted = True  # Cleanup owns this unique creation even if its return is interrupted.
         require(run([*tmux, 'new-session', '-d', '-s', 'retire-native', '-x', '240', '-y', '60'], env=environment))
-        server_started = True
         require(run([*tmux, 'set-option', '-g', 'history-limit', '10000']))
         require(run([*tmux, 'set-option', '-g', 'remain-on-exit', 'on']))
         report['shared_head'] = require(run(['git', '-C', args.shared_skill, 'rev-parse', 'HEAD']))
@@ -271,7 +272,7 @@ def main():
         signal.signal(signal.SIGTERM, signal.SIG_IGN)
         signal.signal(signal.SIGHUP, signal.SIG_IGN)
         # Only this uniquely named server, created above, belongs to this test.
-        if server_started:
+        if server_creation_attempted:
             try:
                 cleanup = run([*tmux, 'kill-server'], timeout=10)
                 report['cleanup_exit'] = cleanup.returncode

@@ -617,6 +617,47 @@ class Tests(unittest.TestCase):
         audit = [json.loads(line) for line in path.with_suffix('.jsonl').read_text().splitlines()]
         self.assertFalse(audit[-1]['exit_confirmed'])
 
+    def test_native_interrupted_server_creation_releases_owned_label(self):
+        spec = importlib.util.spec_from_file_location('retire-native-cleanup-test', HERE / 'test-retire-native.py')
+        native = importlib.util.module_from_spec(spec)
+        # Importing the native module performs no control or model launch.
+        sys.path.insert(0, str(HERE))
+        try:
+            spec.loader.exec_module(native)
+        finally:
+            sys.path.pop(0)
+        cwd = self.directory / 'disposable-cwd'
+        cwd.mkdir()
+        self.command('git', '-C', str(cwd), 'init')
+        self.command('git', '-C', str(cwd), 'config', 'user.name', 'Disposable Test')
+        self.command('git', '-C', str(cwd), 'config', 'user.email', 'test@example.invalid')
+        self.command('git', '-C', str(cwd), 'commit', '--allow-empty', '-m', 'owned seed')
+        evidence = self.directory / 'interrupted-native'
+        original_run = native.run
+        def interrupted_creation(command, **kwargs):
+            result = original_run(command, **kwargs)
+            if 'new-session' in command:
+                self.assertEqual(result.returncode, 0, result.stderr)
+                os.kill(os.getpid(), signal.SIGTERM)  # Signal only this owned test controller.
+                raise AssertionError('installed SIGTERM handler did not interrupt creation return')
+            return result
+        argv = [str(HERE / 'test-retire-native.py'), '--worktree', str(cwd), '--evidence', str(evidence),
+                '--shared-skill', str(SHARED.parent)]
+        handlers = {signum: signal.getsignal(signum) for signum in (signal.SIGTERM, signal.SIGHUP)}
+        try:
+            with patch.object(sys, 'argv', argv), patch.object(native.shutil, 'which', return_value=sys.executable), patch.object(native, 'run', side_effect=interrupted_creation):
+                with self.assertRaises(SystemExit) as stopped:
+                    native.main()
+                self.assertEqual(stopped.exception.code, 143)
+        finally:
+            for signum, handler in handlers.items():
+                signal.signal(signum, handler)
+        report = json.loads((evidence / 'report.json').read_text())
+        self.assertTrue(report['resources_released'])
+        self.assertTrue(report['worktree_unchanged'])
+        self.assertEqual(report['failure'], '143')
+        self.assertNotEqual(subprocess.run(['tmux', '-L', report['label'], 'list-sessions'], capture_output=True).returncode, 0)
+
     def test_changing_draft_preserved_without_paste(self):
         self.actor('draft')
         result = self.invoke()
