@@ -82,7 +82,10 @@ command. This is the explicit exception to ordinary draft preservation.
 Only an exact visible single-line command in a recognized composer is eligible:
 slash command syntax follows the validated `--typed-command` grammar and
 200-byte limit; a supported single-line `!` shortcut follows the same visible
-shape limits. Command names are recognized syntactically, so an existing draft
+shape limits. Real command-clear smokes cover slash drafts; `!` eligibility
+is tested only in synthetic recognized prompt frames. A bash-mode prompt with
+a different glyph remains unknown and defers; real `!` clearing is unverified.
+Command names are recognized syntactically, so an existing draft
 such as `/tmp is full again` is command-shaped. Outgoing slash-looking prose
 still uses ordinary paste unless `--typed-command` is explicit.
 
@@ -148,7 +151,8 @@ Payloads are nonblank UTF-8 with no control characters except newlines. Message
 bytes, including trailing whitespace/newlines, are preserved in the paste.
 
 Exit 0 emits delivered JSON on stdout. Failures emit JSON on stderr. Exit 2
-means deferred before composer mutation. Exit 3 means ambiguous after a clear
+means deferred before a clear or outgoing input attempt. Cursor navigation and
+the suggestion probe may still have occurred. Exit 3 means ambiguous after a clear
 or outgoing input attempt.
 Use `input_attempted` to determine whether outgoing input may have occurred.
 Either `clear_attempted` or `input_attempted` indicates possible composer mutation;
