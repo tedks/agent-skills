@@ -113,8 +113,9 @@ def main():
     args = parser.parse_args()
     worktree = args.worktree.resolve()
     source_root = HERE.parents[3]
-    if worktree == source_root:
-        parser.error('--worktree must be an exclusively owned disposable Git directory, separate from source')
+    top = Path(require(run(['git', '-C', worktree, 'rev-parse', '--show-toplevel']))).resolve()
+    if top == source_root or top != worktree:
+        parser.error('--worktree must be the top of an exclusively owned disposable Git directory, separate from source')
     worktree_before = fingerprint(worktree)
     if worktree_before['status']:
         parser.error('disposable worktree must start clean')
