@@ -97,6 +97,8 @@ case "$cmd" in
     elif [[ "${*: -1}" == '#{cursor_x}:#{cursor_y}' ]]; then
       if [[ "$(<"$FAKE_STATE/mode")" == forkcompact && -s "$FAKE_STATE/pasted" ]]; then cursor='10:50'
       elif [[ "$(<"$FAKE_STATE/mode")" == forkcompact ]]; then cursor='2:50'
+      elif [[ "$(<"$FAKE_STATE/mode")" == busycontext-draft ]]; then cursor='12:2'
+      elif [[ "$(<"$FAKE_STATE/mode")" == busyqueue-draft ]]; then cursor='12:27'
       elif [[ "$(<"$FAKE_STATE/mode")" == busycontext && -s "$FAKE_STATE/pasted" ]]; then cursor='57:2'
       elif [[ "$(<"$FAKE_STATE/mode")" == busycontext ]]; then cursor='2:2'
       elif [[ "$(<"$FAKE_STATE/mode")" == busyqueue && -s "$FAKE_STATE/pasted" ]]; then cursor='37:27'
@@ -145,7 +147,15 @@ PY
       printf ' human began typing' >> "$FAKE_STATE/composer"
       printf 'mutated' > "$FAKE_STATE/mutated"
     fi
-    if [[ "$mode" == forkcompact ]]; then
+    if [[ "$mode" == busyqueue-draft || "$mode" == busycontext-draft ]]; then
+      python3 - "$mode" "$FAKE_STATE/composer" "$FIXTURES" > "$FAKE_STATE/last-screen" <<'PYQUEUE'
+from pathlib import Path
+import sys
+mode, draft, fixtures = sys.argv[1:]
+name, old = ('codex-generating-queue.ansi', 'Reply with exactly P141-QUEUED-TEST') if mode == 'busyqueue-draft' else ('codex-context-queue.ansi', 'S short control: reply S-BUSY-1 after the current task.')
+print(Path(fixtures, name).read_text().replace(old, Path(draft).read_text()), end='')
+PYQUEUE
+    elif [[ "$mode" == forkcompact ]]; then
       if [[ -s "$FAKE_STATE/pasted" ]]; then
         cat "$FIXTURES/codex-fork-compact.ansi" > "$FAKE_STATE/last-screen"
       else
@@ -277,7 +287,7 @@ reset_case() {
   : > "$FAKE_STATE/parser-trace"
   : > "$FAKE_STATE/sender-pid"
   printf '%s\n' "${1:-empty}" > "$FAKE_STATE/mode"
-  if [[ "${1:-}" == home-* || "${1:-}" == stable-* || "${1:-}" == changing-draft || "${1:-}" == second-change ]]; then printf 'stale TICK' > "$FAKE_STATE/composer"; fi
+  if [[ "${1:-}" == busy*-draft || "${1:-}" == home-* || "${1:-}" == stable-* || "${1:-}" == changing-draft || "${1:-}" == second-change ]]; then printf 'stale TICK' > "$FAKE_STATE/composer"; fi
   cp "$FIXTURES/claude-blank.ansi" "$FAKE_STATE/empty"
   cp "$FIXTURES/modal.txt" "$FAKE_STATE/modal"
   cp "$FIXTURES/codex-generating-queue.ansi" "$FAKE_STATE/busyqueue"
@@ -304,6 +314,23 @@ assert_pending() {
 # The live Claude frame has a suggestion in an otherwise empty composer.
 prompt_file="$TEST_DIR/payload"
 printf 'alpha\nbeta' > "$prompt_file"
+
+# Busy queue frames support only single-line exact input: do not append newline to drafts.
+{
+  failures=0
+  for mode in busyqueue-draft busycontext-draft; do
+    reset_case "$mode"
+    if run_sender %7 --submit-delay 0 --max-wait 1 'fresh control' >"$TEST_DIR/queue-draft.out" 2>"$TEST_DIR/queue-draft.err"; then rc=0
+    else rc=$?; fi
+    if [[ $rc -eq 2 && ! -s "$FAKE_LOG" && "$(<"$FAKE_STATE/composer")" == 'stale TICK' ]]; then
+      echo "PASS: $mode unsupported append deferred without changes"
+    else
+      echo "FAIL: $mode unsupported append modified the draft"; failures=$((failures + 1))
+    fi
+  done
+  ((failures == 0))
+  if [[ "${QUEUE_DRAFT_ONLY:-0}" == 1 ]]; then exit; fi
+}
 
 # Stable single-line drafts at Home navigate once, preserving text before append.
 {

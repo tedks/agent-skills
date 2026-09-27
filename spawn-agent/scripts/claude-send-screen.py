@@ -278,6 +278,9 @@ def observe(screen: str, payload: str, cx: int, cy: int, path: pathlib.Path) -> 
         fragment = fragment[1:]
     parts = [fragment.rstrip()] + [row[2:].rstrip() if row.startswith("  ") else row.rstrip() for row in lines[idx + 1:ends[0]]]
     draft = "\n".join(parts).rstrip("\n")
+    # These measured busy queues cannot verify multiline appended input.
+    if glyph == "›" and any(re.fullmatch(r"  tab to queue message(?: {2,}\d+% context left)?", row) for row in lines[idx + 1:]):
+        return result
     home = ("\n" not in draft and (cx, cy) == (2, idx)
             and state(screen, draft, 2 + cell_width(draft), idx) == "own")
     if (draft and not contains_payload(draft, payload)

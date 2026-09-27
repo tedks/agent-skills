@@ -9,7 +9,9 @@ the resolved pane ID; deletion afterward causes failure rather than retargeting.
 
 The public sender uses `tmux-message.py`. It returns success only after observing
 new application receipt evidence. The older `claude-send.sh` remains available
-for compatibility, with transport-only semantics. Both entry points use `--typed-command`
+for compatibility, with transport-only semantics. Its measured busy Codex queue
+layouts verify only single-line input, so nonempty drafts there defer before
+input; empty composers still permit supported short messages. Both entry points use `--typed-command`
 explicitly for single-line slash commands; ordinary messages retain bracketed paste.
 
 ## Flow
