@@ -314,11 +314,16 @@ class Sender:
             if inp.kind != "text":
                 return False
             if inp.text == self.expected:
-                return inp.harness == self.draft_harness and self.at_end(inp)
+                # Strengthen visible-text ownership only for the Claude
+                # co-submit path being repaired here; preserve Codex's
+                # previously accepted exact-text behavior.
+                if self.draft_harness == "claude":
+                    return inp.harness == "claude" and self.at_end(inp)
+                return True
             # Claude 2.1.283 replaces a long bracketed paste with this exact
             # visible shape. The known draft prefix, one current paste marker,
-            # its appended-line count, harness and end cursor bind it to the
-            # one append operation above; hidden bytes remain opaque. The
+            # its appended-line count, harness and end cursor are consistent
+            # with the one append operation above; the hidden bytes stay opaque.
             # marker/hint is transient, so hint text is corroboration only.
             if (inp.harness == self.draft_harness == "claude" and self.at_end(inp)
                     and inp.text.startswith(self.original_draft)):

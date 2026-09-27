@@ -999,6 +999,27 @@ assert screen.observe(frame, 'outgoing', 6, 1, pathlib.Path(sys.argv[2])) == 'dr
         self.assertEqual(t.submitted, draft + '\n' + payload)
         self.assertEqual((t.pastes, t.enters), (1, 1))
 
+    def test_claude_multiline_original_draft_plus_collapsed_append_submits(self):
+        draft = 'First stable row\nSecond stable row 世界'
+        t = Terminal(payload='x' * 1368, draft=draft)
+        t.harness = 'claude'
+        original_frame, original_paste = t.frame, t.paste
+        def paste(path):
+            original_paste(path)
+            t.draft = draft + '[Pasted text #1 +1 lines]'
+        def frame():
+            if t.pastes and t.accepted_at is None:
+                text = draft + '[Pasted text #1 +1 lines]'
+                raw = '──────────────\n❯\u00a0' + text + '\n──────────────\n'
+                return m.Frame(raw, 2 + m.styles.cell_width(text.rsplit('\n', 1)[-1]),
+                               1 + text.count('\n'), raw)
+            return original_frame()
+        t.paste, t.frame = paste, frame
+        result = deliver(t)
+        self.assertEqual(result['status'], 'delivered')
+        self.assertEqual(result['stale_draft_length'], len(draft))
+        self.assertEqual((t.pastes, t.enters), (1, 1))
+
     def test_exact_claude_append_requires_same_harness_and_end_cursor(self):
         for failure in ('harness', 'cursor'):
             with self.subTest(failure=failure):
@@ -1033,6 +1054,8 @@ assert screen.observe(frame, 'outgoing', 6, 1, pathlib.Path(sys.argv[2])) == 'dr
             (draft + '[Pasted text #1 +20 lines]', 'paste again to expand', 'claude', 0),
             (draft + '[Pasted text #1]', 'paste again to expand', 'claude', 0),
             (draft + marker + ' extra composer text', '', 'claude', 0),
+            (draft + marker + marker, '', 'claude', 0),
+            (draft + 'x' + marker, '', 'claude', 0),
             (draft + marker, 'paste again to expand', 'claude', -1),
             (draft + marker, 'paste again to expand', 'codex', 0),
             ('Disposable retirement rehearsal\nreminder.' + marker, 'paste again to expand', 'claude', 0),
@@ -1208,6 +1231,17 @@ assert screen.observe(frame, 'outgoing', 6, 1, pathlib.Path(sys.argv[2])) == 'dr
         with self.assertRaisesRegex(m.DeliveryError, 'input-changed-before-enter'):
             deliver(t)
         self.assertEqual((t.pastes, t.enters), (1, 0))
+
+    def test_main_rejects_bare_carriage_return_before_tmux_io(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            payload = Path(tmp) / 'payload'
+            payload.write_bytes(b'one\rtwo')
+            o = SimpleNamespace(prompt_file=payload, message=None, literal_exit=False)
+            err = io.StringIO()
+            with patch.object(m, 'options', return_value=o), patch.object(m, 'Tmux') as tmux, redirect_stderr(err):
+                self.assertEqual(m.main(), 1)
+            tmux.assert_not_called()
+            self.assertIn('without control characters', err.getvalue())
 
     def test_stale_append_content_unicode_counts_recover_once(self):
         payload = 'emoji 😀 context'

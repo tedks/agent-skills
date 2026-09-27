@@ -83,14 +83,14 @@ the prefix is exact, the marker is the only suffix, K equals one plus the
 outgoing payload's newline count, the current and original harness are Claude,
 and the cursor is at the verified end. The transient `paste again to expand`
 hint may corroborate the shape but is not required. The current paste operation
-itself appends one newline and the outgoing payload, so this marker binds to
-that one fresh paste. After the sender first recognizes this shape, any change
-to the owned input before submission defers. The hidden bytes cannot be
-inspected, and this evidence does not prove their contents. Other Claude
-markers, extra text, changed prefixes, wrapped prefixes, and cursor or harness
-changes defer. The combined Claude path
-sends Enter at most once and requires a new submitted or queued receipt; it
-never retries Enter or re-pastes after ambiguity. Visible full-text
+appends one newline and the outgoing payload, and readiness excludes old paste
+markers, so this marker is consistent with the one fresh paste. Its hidden
+bytes cannot be inspected, so the marker does not prove the pasted contents.
+After the sender first recognizes this shape, any change to the owned input
+before submission defers. Other Claude markers, extra text, changed prefixes,
+wrapped prefixes, and cursor or harness changes defer. All Claude stable-draft
+co-submissions send Enter at most once and require a new submitted or queued
+receipt; they never retry Enter or re-paste after ambiguity. Visible full-text
 co-submission also requires the exact draft + newline + payload, the same
 harness, and an end cursor.
 
