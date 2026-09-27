@@ -86,10 +86,15 @@ def main():
         (directory / 'report.json').write_text(json.dumps(report, indent=2) + '\n')
         for harness, model in [('codex', args.codex_model), ('claude', args.claude_model)]:
             launcher = args.shared_skill / 'scripts' / 'agent-spawn.sh'
-            prompt = ('This is an authorized disposable retirement rehearsal. You own no product work or processes. '
-                      'On the next retirement offer, write only its assigned private shard with truthful test context; '
+            native_context = directory / (harness + '-native-session.json')
+            prompt = (f'This is an authorized disposable retirement rehearsal, launched as {harness} with model {model}. '
+                      'You own no product work or processes. Before READY, establish your actual provider-native session ID: '
+                      'Codex can inspect CODEX_SESSION_ID; Claude can use harness-control self_status/current session metadata. '
+                      f'Write a JSON object with session_id, model, and evidence_source to {native_context}. '
+                      'Never use unknown or invent an ID; if unavailable, reply RETIRE-NATIVE-SETUP-BLOCKED. '
+                      'On the next retirement offer, use that verified context and write only its assigned private shard; '
                       'do not change or commit this working tree. The controller alone commits and pushes the shard '
-                      'to its isolated local bare remote. Your next final reply must be RETIRE-NATIVE-READY.')
+                      'to its isolated local bare remote. After setup your entire final reply must be RETIRE-NATIVE-READY.')
             launched = run([launcher, 'retire-native:' + harness, harness, args.worktree.resolve(),
                             '--model', model, prompt], env=environment)
             (directory / (harness + '-launch.txt')).write_text(launched.stdout + launched.stderr)
@@ -101,11 +106,16 @@ def main():
             deadline = time.monotonic() + 120
             while time.monotonic() < deadline:
                 screen = require(run([*tmux, 'capture-pane', '-p', '-t', pane]))
+                if re.search(r'[●•] RETIRE-NATIVE-SETUP-BLOCKED', screen):
+                    raise AssertionError('native harness cannot establish its real session ID')
                 if re.search(r'[●•] RETIRE-NATIVE-READY', screen):
                     break
                 time.sleep(1)
             else:
                 raise AssertionError('initial real harness task did not finish')
+            context = json.loads(native_context.read_text())
+            assert re.fullmatch(r'[0-9a-fA-F-]{36}', context['session_id']) and context['session_id'] != 'unknown'
+            assert context.get('evidence_source'), 'native session identity has no provenance'
             observer = retire.Retirement(SimpleNamespace(pane=pane))
             observer.tmux = tmux
             identity = observer.identity()
@@ -155,8 +165,11 @@ def main():
             assert foreign.read_bytes() == foreign_bytes
             shard = state['shard']
             assert git('rev-parse', 'origin/master:' + shard) == state['shard_hash']
+            preserved = json.loads(git('show', 'origin/master:' + shard))
+            assert preserved['session_id'] == context['session_id'], 'retirement lost verified native session identity'
             report['results'].append({'harness': harness, 'pane': pane, 'event': state['id'],
-                                      'handoff': 'remote-blob-verified', 'exit_receipt': notice, 'processes_ended': True})
+                                      'handoff': 'remote-blob-verified', 'exit_receipt': notice, 'processes_ended': True,
+                                      'native_session': context['session_id'], 'identity_source': context['evidence_source']})
             print(harness + ': real handoff, exit receipt, and process end verified', flush=True)
     except BaseException as error:
         report['failure'] = str(error)
