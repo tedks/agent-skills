@@ -80,7 +80,8 @@ For ordinary co-submission, the public sender supports measured Codex and
 Claude append shapes: Codex's unchanged draft prefix plus one fresh Content
 marker whose count covers the appended newline and payload; Claude's exact
 draft prefix plus one fresh `[Pasted text #N +K lines]` marker whose K equals
-one plus the payload newline count, and adjacent `paste again to expand` hint.
+one plus the payload newline count. Claude's transient `paste again to expand`
+hint can corroborate the shape, but is not required.
 Both require the same harness and verified end cursor. Claude's combined
 delivery sends Enter once and requires a new receipt. Other unsupported
 combined layouts remain closed.

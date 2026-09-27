@@ -307,7 +307,7 @@ class Sender:
         if self.typed and not styles.slash_command_syntax(payload):
             raise DeliveryError("unsupported-typed-command")
 
-    def input_evidence(self, inp, frame=None):
+    def input_evidence(self, inp):
         if self.typed:
             return inp.kind == "text" and inp.text == self.payload
         if self.stale_draft_length:
@@ -317,18 +317,15 @@ class Sender:
                 return inp.harness == self.draft_harness and self.at_end(inp)
             # Claude 2.1.283 replaces a long bracketed paste with this exact
             # visible shape. The known draft prefix, one current paste marker,
-            # its appended-line count, adjacent expansion hint, harness and end
-            # cursor bind it to the one append operation above; hidden bytes
-            # remain opaque.
-            if (frame is not None and inp.harness == self.draft_harness == "claude"
-                    and self.at_end(inp) and inp.text.startswith(self.original_draft)):
+            # its appended-line count, harness and end cursor bind it to the
+            # one append operation above; hidden bytes remain opaque. The
+            # marker/hint is transient, so hint text is corroboration only.
+            if (inp.harness == self.draft_harness == "claude" and self.at_end(inp)
+                    and inp.text.startswith(self.original_draft)):
                 suffix = inp.text[len(self.original_draft):]
                 marker = re.fullmatch(r"\[Pasted text #[1-9][0-9]* \+([1-9][0-9]*) lines\]", suffix)
-                rows = styles.strip_ansi(frame.raw).splitlines()
-                hint = rows[inp.end + 1] if inp.end + 1 < len(rows) else ""
                 expected_lines = str(self.payload.count("\n") + 1)
-                if (marker and marker.group(1) == expected_lines
-                        and hint.strip() == "paste again to expand"):
+                if marker and marker.group(1) == expected_lines:
                     return True
             # Codex compresses the appended newline+payload inline after the
             # untouched draft. Readiness excluded all old paste markers.
@@ -529,10 +526,11 @@ class Sender:
                 raise DeliveryError("modal-after-paste", 3)
             if owned is not None and current.kind == "empty":
                 input_disappeared = True
-            evidence = self.input_evidence(current, frame)
+            evidence = self.input_evidence(current)
             if evidence:
                 fp = current.fingerprint()
-                if owned is not None and fp != owned and self.enters:
+                claude_co_submit = bool(self.stale_draft_length and self.draft_harness == "claude")
+                if owned is not None and fp != owned and (self.enters or claude_co_submit):
                     raise DeliveryError("input-changed-after-paste", 3)
                 if owned != fp:
                     evidence_since = now
@@ -547,7 +545,7 @@ class Sender:
                     for kind in ("submitted", "queued"):
                         if not literal and self.enters and any(fresh[(kind, form)] > baseline[(kind, form)] for form in accepted_forms):
                             return {"status": "delivered", "receipt": kind, "enters": self.enters}
-                    if live.fingerprint() != owned or not self.input_evidence(live, confirm):
+                    if live.fingerprint() != owned or not self.input_evidence(live):
                         raise DeliveryError("input-changed-before-enter", 3)
                     self.tmux.keys("Enter")
                     self.enters += 1

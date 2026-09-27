@@ -78,16 +78,17 @@ The compatibility sender retains its exact visible-input limits.
 
 Claude Code 2.1.283 can replace a long bracketed paste appended to a stable
 ordinary draft with `[Pasted text #N +K lines]` while leaving the exact original
-draft prefix visible; its composer also shows `paste again to expand` immediately
-below the input. The sender accepts only this measured co-submit shape when the
-prefix is exact, the marker is the only suffix, K equals one plus the outgoing
-payload's newline count, the expansion hint is in that adjacent visible row,
-the current and original harness are Claude, and the cursor is at the verified
-end. The current paste operation itself appends one newline and the outgoing
-payload, so this marker binds to that one fresh paste. The hidden bytes cannot
-be inspected, and this evidence does not prove their
-contents. Other Claude markers, extra text, changed prefixes, wrapped prefixes,
-missing hints, and cursor or harness changes defer. The combined Claude path
+draft prefix visible. The sender accepts only this measured co-submit shape when
+the prefix is exact, the marker is the only suffix, K equals one plus the
+outgoing payload's newline count, the current and original harness are Claude,
+and the cursor is at the verified end. The transient `paste again to expand`
+hint may corroborate the shape but is not required. The current paste operation
+itself appends one newline and the outgoing payload, so this marker binds to
+that one fresh paste. After the sender first recognizes this shape, any change
+to the owned input before submission defers. The hidden bytes cannot be
+inspected, and this evidence does not prove their contents. Other Claude
+markers, extra text, changed prefixes, wrapped prefixes, and cursor or harness
+changes defer. The combined Claude path
 sends Enter at most once and requires a new submitted or queued receipt; it
 never retries Enter or re-pastes after ambiguity. Visible full-text
 co-submission also requires the exact draft + newline + payload, the same

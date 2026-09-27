@@ -955,27 +955,31 @@ assert screen.observe(frame, 'outgoing', 6, 1, pathlib.Path(sys.argv[2])) == 'dr
         self.assertEqual(result['stale_draft_length'], 41)
         self.assertEqual((t.pastes, t.enters), (1, 1))
 
-    def test_measured_claude_stale_append_expansion_marker_submits_once(self):
+    def test_measured_claude_stale_append_marker_submits_once_with_or_without_hint(self):
         draft = 'Disposable retirement rehearsal reminder.'
         t = Terminal(payload='x' * 1368, draft=draft)
         t.harness = 'claude'
         raw = (Path(__file__).parent / 'fixtures/claude-send/claude-stale-append-pasted-text.ansi').read_text()
-        row = next(i for i, line in enumerate(m.styles.strip_ansi(raw).splitlines()) if line.startswith('❯'))
         x, y = map(int, (Path(__file__).parent / 'fixtures/claude-send/claude-stale-append-pasted-text.cursor').read_text().split())
-        original_frame, original_paste = t.frame, t.paste
-        def paste(path):
-            original_paste(path)
-            self.assertEqual(path.read_text(), '\n' + t.payload)
-            t.draft = draft + '[Pasted text #1 +1 lines]'
-        def frame():
-            if t.pastes and t.accepted_at is None:
-                return m.Frame(raw, x, y, raw)
-            return original_frame()
-        t.paste, t.frame = paste, frame
-        result = deliver(t)
-        self.assertEqual(result['status'], 'delivered')
-        self.assertEqual(result['stale_draft_length'], len(draft))
-        self.assertEqual((t.pastes, t.enters), (1, 1))
+        for with_hint in (False, True):
+            with self.subTest(with_hint=with_hint):
+                terminal = Terminal(payload='x' * 1368, draft=draft)
+                terminal.harness = 'claude'
+                original_frame, original_paste = terminal.frame, terminal.paste
+                def paste(path):
+                    original_paste(path)
+                    self.assertEqual(path.read_text(), '\n' + terminal.payload)
+                    terminal.draft = draft + '[Pasted text #1 +1 lines]'
+                def frame():
+                    if terminal.pastes and terminal.accepted_at is None:
+                        measured = (raw + '  paste again to expand\n') if with_hint else raw
+                        return m.Frame(measured, x, y, measured)
+                    return original_frame()
+                terminal.paste, terminal.frame = paste, frame
+                result = deliver(terminal)
+                self.assertEqual(result['status'], 'delivered')
+                self.assertEqual(result['stale_draft_length'], len(draft))
+                self.assertEqual((terminal.pastes, terminal.enters), (1, 1))
 
     def test_measured_claude_multiline_append_preserves_exact_separator(self):
         draft = 'Disposable retirement rehearsal reminder.'
@@ -1028,8 +1032,7 @@ assert screen.observe(frame, 'outgoing', 6, 1, pathlib.Path(sys.argv[2])) == 'dr
             (draft + '[Pasted text #1 +2 lines]', 'paste again to expand', 'claude', 0),
             (draft + '[Pasted text #1 +20 lines]', 'paste again to expand', 'claude', 0),
             (draft + '[Pasted text #1]', 'paste again to expand', 'claude', 0),
-            (draft + marker, '', 'claude', 0),
-            (draft + marker, 'unrelated prompt: paste again to expand', 'claude', 0),
+            (draft + marker + ' extra composer text', '', 'claude', 0),
             (draft + marker, 'paste again to expand', 'claude', -1),
             (draft + marker, 'paste again to expand', 'codex', 0),
             ('Disposable retirement rehearsal\nreminder.' + marker, 'paste again to expand', 'claude', 0),
@@ -1158,6 +1161,51 @@ assert screen.observe(frame, 'outgoing', 6, 1, pathlib.Path(sys.argv[2])) == 'dr
             return original_frame()
         t.paste, t.frame = paste, frame
         with self.assertRaisesRegex(m.DeliveryError, 'mixed-input-after-paste'):
+            deliver(t)
+        self.assertEqual((t.pastes, t.enters), (1, 0))
+
+    def test_claude_collapsed_append_marker_ordinal_change_before_enter_defers(self):
+        draft = 'Disposable retirement rehearsal reminder.'
+        t = Terminal(payload='x' * 1368, draft=draft)
+        t.harness = 'claude'
+        original_frame, original_paste = t.frame, t.paste
+        samples = 0
+        def paste(path):
+            original_paste(path)
+            t.draft = draft + '[Pasted text #1 +1 lines]'
+        def frame():
+            nonlocal samples
+            if t.pastes and t.accepted_at is None:
+                samples += 1
+                text = draft + f'[Pasted text #{1 if samples == 1 else 2} +1 lines]'
+                raw = '──────────────\n❯\u00a0' + text + '\n──────────────\n'
+                return m.Frame(raw, 2 + m.styles.cell_width(text), 1, raw)
+            return original_frame()
+        t.paste, t.frame = paste, frame
+        with self.assertRaisesRegex(m.DeliveryError, 'input-changed-after-paste'):
+            deliver(t)
+        self.assertEqual((t.pastes, t.enters), (1, 0))
+
+    def test_claude_collapsed_append_marker_change_at_enter_revalidation_defers(self):
+        draft = 'Disposable retirement rehearsal reminder.'
+        t = Terminal(payload='x' * 1368, draft=draft)
+        t.harness = 'claude'
+        original_frame, original_paste = t.frame, t.paste
+        samples = 0
+        def paste(path):
+            original_paste(path)
+            t.draft = draft + '[Pasted text #1 +1 lines]'
+        def frame():
+            nonlocal samples
+            if t.pastes and t.accepted_at is None:
+                samples += 1
+                ordinal = 1 if samples <= 5 else 2
+                text = draft + f'[Pasted text #{ordinal} +1 lines]'
+                raw = '──────────────\n❯\u00a0' + text + '\n──────────────\n'
+                return m.Frame(raw, 2 + m.styles.cell_width(text), 1, raw)
+            return original_frame()
+        t.paste, t.frame = paste, frame
+        with self.assertRaisesRegex(m.DeliveryError, 'input-changed-before-enter'):
             deliver(t)
         self.assertEqual((t.pastes, t.enters), (1, 0))
 
