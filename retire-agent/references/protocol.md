@@ -13,7 +13,8 @@ A completion is a fresh assistant response row `RETIRE-DONE-<event>` after
 writing the shard; a decline is `RETIRE-DECLINED-<event>`. The marker must be
 the agent's entire final reply, without prose before or after it. The terminal
 must show that marker as the final assistant block; trailing continuation text
-or a later assistant response keeps completion pending. Blank rows and the
+or a later assistant response keeps completion pending. Trailing UI whitespace
+is ignored. Blank rows and the
 pure horizontal Claude composer separator are permitted suffix rows. A pinned
 Codex target may also render one measured UI footer `  Worked for 1m 21s · 12:23`
 (the duration and 24-hour time vary). Only that anchored minute/second/time
@@ -101,20 +102,38 @@ outside-section hashes allow recovery after a later Git hook failure. A
 HEAD-tracked INDEX deletion stops rather than recreating steward metadata.
 Foreign JSON records are indexed only after a matching receipt claims their
 event and path; malformed claimed metadata stops with its bytes preserved.
-Verify the shard blob on fetched
-private `origin/master`, publish its unique ledger receipt, then send the bare
-harness exit through the shared sender. Claude `/exit` uses the sender's
-`--literal-exit` guard: literal typing and one Enter, confirmed by a fresh
-`Resume this session with:` / `claude --resume UUID` receipt. Pasted Claude
-`/exit` is ordinary text and cannot retire a harness. `/exit` is used for Codex;
-`/quit` for agy. Verify the original PID/start time/boot ID ended, even when its
-pane survives as a shell. Recognized Node entrypoints resolve through symlinks;
-the outer wrapper and its native Codex child are one logical harness, and
-retirement waits for both processes to end. A replacement harness blocks completion. Nothing
-kills a process. Resumes reverify the preserved blob and receipt before exit
-or successor. If the original ended independently after that verified handoff,
-record `exit-not-needed` and continue without sending into its shell. A
-replacement actor still blocks succession. History discovery owns only `<32-lowercase-hex-event>.json` state filenames
+Verify the shard blob on fetched private `origin/master`, publish its unique
+ledger receipt, then request bare harness exit through the shared sender.
+Claude `/exit` uses `--literal-exit`; Codex `/exit` uses `--typed-command`.
+Both require an empty composer and type the command with one Enter. An
+ordinary stale draft defers exit without sending exit keys; preserve it and
+resume only after deliberate composer reconciliation. Pasted Claude `/exit`
+is ordinary text and cannot retire a harness.
+
+Ruling RETIRE-FIX-R1 requires two independent exit receipts: all pinned original
+PID/start-time/boot-ID actors ended, and a fresh harness-native exit notice
+naming the exact UUID in the immutable verified shard. Codex's notice block is
+`Token usage: ...`, `To continue this session, run:`, then `codex resume UUID`.
+Claude's block is `Resume this session with:` then `claude --resume UUID`.
+`Shutting down...` is optional. Before requesting exit, persist only the count
+of matching native notice blocks, never terminal text. A submitted command
+receipt or an ambiguous attempt with actual input and a positive Enter count
+is required; typed characters and proven no-input deferrals cannot retire. Resume rereads the
+pinned pane and requires a greater count; cached confirmation is not authority.
+A failed resume of a locally retired state does not republish or downgrade its
+historical remote receipt. Current failure audits remain unconfirmed until the
+current process/notice pair verifies; loaded or forged retired status is never
+new publication authority. Historical accepted evidence and current pending
+reverification are distinct.
+An old notice, wrong UUID, bare resume command, absent pane or ended process
+alone cannot establish retirement. Unsupported layouts and unknown caller
+session IDs preserve the handoff pending exit verification. If the original
+ended before any exit request, leave pending without sending into its shell.
+
+Recognized Node wrappers and native children are one logical harness; both must
+end. A replacement actor blocks completion. Nothing kills a process. Resumes
+reverify the preserved blob and receipt before exit or successor.
+History discovery owns only `<32-lowercase-hex-event>.json` state filenames
 in the private retirement directory. Other JSON names, including independent
 publication receipts, are left untouched and do not block a new offer.
 Malformed event state records stop with their bytes preserved for operator reconciliation.
@@ -133,8 +152,8 @@ Use `--wait 1200` for a handoff that needs 10–20 minutes. If the observation
 budget ends, continue with the same mode and target using
 `--resume PRIVATE_STATE --wait 1200`; a delivered offer is never resent.
 Process exit has a separate fast poll. The shared sender has its own bounded
-waits. Exit may end the harness before a sender receipt; original process end
-is the exit evidence. Offer acceptance and DONE remain separate. An attempted
+waits. Exit may end the harness before a sender receipt; the original process
+end and fresh same-session native notice remain mandatory. Offer acceptance and DONE remain separate. An attempted
 successor launch is never automatically repeated, including after a crash or
 unconfirmed initial delivery. Inspect the launcher's pane/receipt before any
 deliberate operator recovery. There is no ambiguous-send override or manual
@@ -167,3 +186,12 @@ Each event also has an append-only private `<event>.jsonl` attempt ledger in
 the Git common directory: target/pane, event marker, transport exit and receipt
 type, completion disposition, verified shard path and original process exit.
 It contains no payload or pane text; exact outgoing payloads remain separate.
+
+The native rehearsal defaults to both harnesses; `--harness claude` or `codex`
+allows independent diagnosis without claiming the combined gate. The cwd must
+be a clean exclusively owned Git toplevel, have no remotes, and use a different
+Git common directory from source. Owned cwd checks include ignored files and
+refs. Source/shared hashes and dirty states record source fidelity, not global
+containment. Agents retain normal host access. The published Claude `--trust`
+launcher persists authorization for this exact disposable directory; retain
+and document that grant rather than racing unrelated trust-store entries.

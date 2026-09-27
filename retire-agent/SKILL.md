@@ -42,8 +42,10 @@ Pin the explicit pane and verify its identity before each send. Use the shared
 An ambiguous send never authorizes another paste. The sender observes input
 twice eight seconds apart and co-submits ordinary stable drafts with the offer;
 a stable command-shaped draft follows its published clear-and-verify exception.
-The typed Claude exit requires an empty composer and defers for ordinary drafts. Changing input, a modal,
-missing evidence, or changed process identity defers retirement.
+Claude exit uses the shared `--literal-exit` guard; Codex exit uses
+`--typed-command`. Both require an empty composer and defer for ordinary drafts.
+Changing input, a modal, missing evidence, or changed process identity defers
+retirement.
 
 Shards belong only in a private repository. Preserve one file per session,
 serialize Git transactions, and verify the shard on the private remote before
@@ -52,7 +54,8 @@ from personal thanks. A provider-native resume handle comes last and must not
 be required to reconstruct the work.
 
 Record attempts privately without storing pane contents or unfinished human
-text. Verify the agent process ended; an exit transport result alone is
+text. Verify all pinned original processes ended and a fresh native resume notice
+names the immutable shard’s same session UUID; an exit transport result alone is
 insufficient. Never kill a session. Do not stop unrelated services or delete
 worktrees, branches, transcripts, or another actor's files.
 

@@ -158,6 +158,7 @@ class Retirement:
             self.tmux += ['-S', os.environ['TMUX'].split(',')[0]]
         self.state = None
         self.path = None
+        self.exit_verified = False
 
     def git(self, *args, raw=False):
         return checked(['git', '-C', self.repo, *args], strip=not raw)
@@ -238,7 +239,7 @@ class Retirement:
     def audit(self, action, **fields):
         record = {'event': self.state['id'], 'time': datetime.datetime.now(datetime.timezone.utc).isoformat(),
                   'pane': self.args.pane, 'target': self.args.pane, 'marker': self.state['id'], 'action': action, 'transport_exit': None, 'receipt_type': action,
-                  'shard_path': self.state.get('shard'), 'exit_confirmed': self.state.get('status') == 'retired', **fields}
+                  'shard_path': self.state.get('shard'), 'exit_confirmed': self.exit_verified, **fields}
         path = self.path.with_suffix('.jsonl')
         with path.open('a') as ledger:
             path.chmod(0o600)
@@ -259,7 +260,9 @@ class Retirement:
         self.state[phase] = {'status': 'attempting', 'payload': str(payload_path)}
         self.persist()  # A crash from here is ambiguous, never a resend.
         self.audit('send-attempt', phase=phase)
-        control = ['--literal-exit'] if phase == 'exit' and self.state['identity']['process']['agent'] == 'claude' else []
+        control = []
+        if phase == 'exit':
+            control = ['--literal-exit'] if self.state['identity']['process']['agent'] == 'claude' else ['--typed-command']
         try:
             result = run([self.shared / 'tmux-message.sh', 'send', self.args.pane,
                           *control, '--backoff', '--max-wait', '10', '--prompt-file', payload_path], env=self.transport_env())
@@ -314,7 +317,7 @@ class Retirement:
         # It is not agent prose; permit one exact footer only for pinned Codex.
         codex_footer = (self.state['identity']['process']['agent'] == 'codex'
                         and len(tail) == 1
-                        and re.fullmatch(r'  Worked for [1-9][0-9]*m [0-5]?[0-9]s · (?:[01][0-9]|2[0-3]):[0-5][0-9]', tail[0]))
+                        and re.fullmatch(r'  Worked for [1-9][0-9]*m [0-5]?[0-9]s · (?:[01][0-9]|2[0-3]):[0-5][0-9]', tail[0].rstrip()))
         if tail and not codex_footer:
             return None
         return marker[1]
@@ -508,6 +511,38 @@ class Retirement:
             raise Stop('replacement actor found; successor spawn withheld')
         return True
 
+    def exit_notice_count(self, session_id):
+        # Raw pane bytes stay in memory. Only an exact native resume command
+        # naming the immutable shard's UUID can establish this lifecycle receipt.
+        if not re.fullmatch(r'[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}', session_id):
+            raise Stop('handoff verified; exit pending verifiable native session UUID')
+        agent = self.state['identity']['process']['agent']
+        command = {'codex': 'codex resume ', 'claude': 'claude --resume '}.get(agent)
+        if command is None:
+            raise Stop('handoff verified; native exit notice unsupported')
+        fields = self.pane()
+        if fields[1] != self.state['identity']['pane_pid']:
+            raise Stop('pane root identity changed; exit notice withheld')
+        frame = checked(self.tmux + ['capture-pane', '-p', '-S', '-2000', '-t', self.args.pane], strip=False)
+        prefix = (r'^Token usage: [^\n]+\nTo continue this session, run:\n' if agent == 'codex'
+                  else r'^Resume this session with:\n')
+        return len(re.findall(prefix + r'[ \t]*' + re.escape(command + session_id) + r'[ \t]*$', frame, re.MULTILINE))
+
+    def fresh_exit_notice(self, session_id):
+        attempt = self.state.get('exit', {})
+        requested = ((attempt.get('status') == 'delivered' and attempt.get('receipt') in ('command', 'submitted', 'queued'))
+                     or (attempt.get('status') == 'ambiguous' and attempt.get('input_attempted') is True))
+        if not requested or type(attempt.get('enters')) is not int or attempt['enters'] < 1:
+            return False  # Typed characters or a pre-input deferral are not an exit request.
+        baseline = self.state.get('exit_notice')
+        if (not isinstance(baseline, dict) or baseline.get('session_id') != session_id
+                or type(baseline.get('before')) is not int or baseline['before'] < 0):
+            raise Stop('handoff verified; missing trustworthy pre-request exit notice baseline')
+        try:
+            return self.exit_notice_count(session_id) > baseline['before']
+        except PaneAbsent:
+            return False  # Process end without a retained notice is not retirement.
+
     def load_resume(self):
         state = state_record(self.path.read_text())
         if not re.fullmatch(r'[0-9a-f]{32}', state['id']) or self.path.stem != state['id']:
@@ -651,30 +686,35 @@ class Retirement:
             if evidence.stdout.strip() != self.state['shard_hash']:
                 raise Stop('private receipt commit contains different shard bytes')
             self.evidence_verified = True  # Current execution, never cached state authority.
+        preserved = object_record(self.git('show', self.state['shard_hash'], raw=True), 'preserved shard')
+        session_id = preserved.get('session_id')
+        if not isinstance(session_id, str):
+            raise Stop('handoff verified; missing native session identity')
         if not self.state.get('exit'):
             if self.ended():
-                self.state['exit'] = {'status': 'not-needed', 'reason': 'original-already-ended'}
-                self.persist()
-                self.audit('exit-not-needed', exit_confirmed=True)
-            else:
-                try:
-                    self.send('exit', '/exit' if self.state['identity']['process']['agent'] != 'agy' else '/quit')
-                except Stop:
-                    if not self.state.get('exit'):
-                        raise
-                    if self.state['exit']['status'] == 'deferred' and not self.ended():
-                        raise Stop('exit deferred before submission; --resume STATE --retry-deferred exit')
+                raise Stop('handoff verified; original ended before exit request, fresh notice unavailable')
+            self.state['exit_notice'] = {'session_id': session_id, 'before': self.exit_notice_count(session_id)}
+            self.persist()  # Save only the count before any exit input, for safe resume.
+            try:
+                self.send('exit', '/exit' if self.state['identity']['process']['agent'] != 'agy' else '/quit')
+            except Stop:
+                if not self.state.get('exit'):
+                    raise
+                if self.state['exit']['status'] == 'deferred' and not self.ended():
+                    raise Stop('exit deferred before submission; --resume STATE --retry-deferred exit')
         deadline = time.monotonic() + self.args.wait
-        while not self.ended():
+        while not (self.ended() and self.fresh_exit_notice(session_id)):
             if time.monotonic() >= deadline:
-                raise Stop('handoff verified; retirement pending original process exit')
+                raise Stop('handoff verified; retirement pending original process end and fresh same-session exit notice')
             time.sleep(.25)
+        self.exit_verified = True  # Current process+notice pair, never loaded state authority.
         self.state['status'] = 'retired'
         self.persist()
         receipt = self.repo / self.state['handoff_receipt']
         record = receipt_record(receipt.read_text())
         record['status'] = 'retired'
         record['process_exit'] = 'original-process-and-recorded-native-core-ended'
+        record['exit_notice_session'] = session_id
         record['verified_at'] = datetime.datetime.now(datetime.timezone.utc).isoformat()
         save(receipt, record)
         self.publish([self.state['handoff_receipt']], index=True)
@@ -706,12 +746,14 @@ class Retirement:
     def record_pending(self):
         if not self.state or not getattr(self, 'event_owned', False):
             return
+        if self.state.get('status') == 'retired' and not self.exit_verified:
+            return  # Preserve historical remote evidence; cached/forged state cannot republish it.
         if self.state.get('handoff_receipt') and not getattr(self, 'evidence_verified', False):
             return  # Revalidation failure must not launder cached handoff into a new receipt.
         receipt = self.repo / 'receipts' / (self.state['id'] + '.json')
         if receipt.exists():
             record = receipt_record(receipt.read_text())
-            record['status'] = 'retired' if self.state.get('status') == 'retired' else ('pending-exit' if self.state.get('handoff_receipt') else 'pending-handoff')
+            record['status'] = 'retired' if self.exit_verified else ('pending-exit' if self.state.get('handoff_receipt') else 'pending-handoff')
             record['offer'] = self.state.get('offer', {}).get('status', 'not-attempted')
             record['exit'] = self.state.get('exit', {}).get('status', 'not-attempted')
             save(receipt, record)

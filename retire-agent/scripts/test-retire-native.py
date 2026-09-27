@@ -7,7 +7,6 @@ agents retain normal host access, so containment is an authority boundary, not
 an OS sandbox. Artifacts are retained for inspection.
 """
 import argparse
-from contextlib import contextmanager
 import hashlib
 import json
 import os
@@ -19,7 +18,6 @@ import signal
 import subprocess
 import sys
 import time
-import threading
 import uuid
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -41,11 +39,12 @@ def require(result):
     return result.stdout.strip()
 
 
-def fingerprint(directory):
+def fingerprint(directory, owned=False):
     def git(*args):
         return require(run(['git', '-C', directory, *args]))
     diff = git('diff', '--binary', 'HEAD', '--')
-    return {'head': git('rev-parse', 'HEAD'), 'status': git('status', '--porcelain=v1'),
+    return {'head': git('rev-parse', 'HEAD'), 'status': git('status', '--porcelain=v1', '--untracked-files=all', *(['--ignored'] if owned else [])),
+            'refs': git('for-each-ref', '--format=%(refname) %(objectname)') if owned else None,
             'tracked_diff_sha256': hashlib.sha256(diff.encode()).hexdigest()}
 
 
@@ -53,62 +52,18 @@ def interrupted(signum, _frame):
     raise SystemExit(128 + signum)
 
 
-@contextmanager
-def notice_watch(tmux, pane, pattern, before, records):
-    # Inspect only this owned pane. Retain a boolean receipt, never pane text.
-    stop = threading.Event()
-    found = threading.Event()
-    def sample():
-        armed = False
-        baseline = before
-        while not stop.is_set():
-            frame = run([*tmux, 'capture-pane', '-p', '-S', '-2000', '-t', pane], timeout=3)
-            if frame.returncode == 0:
-                count = len(re.findall(pattern, frame.stdout, re.MULTILINE))
-                exiting = False
-                for path in records.glob('*.json'):
-                    if not re.fullmatch(r'[0-9a-f]{32}', path.stem):
-                        continue
-                    try:
-                        state = json.loads(path.read_text())
-                    except (OSError, ValueError):
-                        continue
-                    if (state.get('pane') == pane and state.get('disposition') == 'DONE'
-                            and state.get('handoff_receipt') and state.get('exit', {}).get('status') in ('attempting', 'delivered', 'ambiguous')):
-                        exiting = True
-                        break
-                if exiting and not armed:
-                    # Rebase on the first verified exit phase: earlier work/progress
-                    # notices cannot become receipts just because history persists.
-                    baseline = count
-                    armed = True
-                elif armed and count > baseline:
-                    found.set()
-                    return
-            stop.wait(.01)
-    worker = threading.Thread(target=sample, daemon=True)
-    worker.start()
-    try:
-        yield found
-    finally:
-        stop.set()
-        worker.join(timeout=4)
-        if worker.is_alive():
-            print('Owned exit receipt watcher did not release.', file=sys.stderr)
-            if sys.exc_info()[0] is None:
-                raise RuntimeError('owned exit receipt watcher did not release')
-
-
 def main():
     if not __debug__:
         raise RuntimeError('native verification requires Python assertions enabled')
     signal.signal(signal.SIGTERM, interrupted)
+    signal.signal(signal.SIGHUP, interrupted)
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--worktree', type=Path, required=True)
     parser.add_argument('--evidence', type=Path, required=True)
     parser.add_argument('--shared-skill', type=Path, required=True)
     parser.add_argument('--baseline-script', type=Path)
     parser.add_argument('--stale-offer-draft', action='store_true', help='exercise shared sender stable draft co-submission')
+    parser.add_argument('--harness', choices=['both', 'codex', 'claude'], default='both', help='independent native diagnosis; acceptance defaults to both')
     parser.add_argument('--codex-model', default='gpt-6-luna')
     parser.add_argument('--claude-model', default='haiku')
     args = parser.parse_args()
@@ -117,7 +72,11 @@ def main():
     top = Path(require(run(['git', '-C', worktree, 'rev-parse', '--show-toplevel']))).resolve()
     if top == source_root or top != worktree:
         parser.error('--worktree must be the top of an exclusively owned disposable Git directory, separate from source')
-    worktree_before = fingerprint(worktree)
+    def common(directory):
+        return Path(require(run(['git', '-C', directory, 'rev-parse', '--path-format=absolute', '--git-common-dir']))).resolve()
+    if common(worktree) == common(source_root) or require(run(['git', '-C', worktree, 'remote'])):
+        parser.error('disposable cwd must have a separate Git common directory and no remotes')
+    worktree_before = fingerprint(worktree, owned=True)
     if worktree_before['status']:
         parser.error('disposable worktree must start clean')
     directory = args.evidence.resolve()
@@ -159,7 +118,7 @@ def main():
               'models': {'codex': args.codex_model, 'claude': args.claude_model},
               'worktree_before': worktree_before, 'source_fidelity': fingerprint(source_root),
               'shared_fidelity': fingerprint(args.shared_skill),
-              'claude_trust_grant': str(worktree),
+              'claude_trust_planned': str(worktree),
               'codex_per_process_trust': trust_override, 'real_codex': str(real_codex),
               'containment_limit': 'worktree HEAD/status/tracked diff checks do not prove absence of writes elsewhere; agents retain normal host access'}
     server_started = False
@@ -173,11 +132,13 @@ def main():
         report['versions'] = {name: require(run([name, '--version'])) for name in ('codex', 'claude')}
         (directory / 'report.json').write_text(json.dumps(report, indent=2) + '\n')
         for harness, model in [('codex', args.codex_model), ('claude', args.claude_model)]:
+            if args.harness not in ('both', harness):
+                continue
             launcher = args.shared_skill / 'scripts' / 'agent-spawn.sh'
             native_context = directory / (harness + '-native-session.json')
             prompt = (f'This is an authorized disposable retirement rehearsal, launched as {harness} with model {model}. '
                       'You own no product work or processes. No live off-duty or ditz publication, other pane control, or writes outside assigned identity/shard files are authorized. Before READY, establish your actual provider-native session ID: '
-                      'Codex can inspect CODEX_SESSION_ID; Claude can use harness-control self_status/current session metadata. '
+                      'Codex can inspect CODEX_SESSION_ID; Claude can use harness-control get_session_info or get_status native session metadata. '
                       f'Write a JSON object with session_id, model, and evidence_source to {native_context}. '
                       'Never use unknown or invent an ID; if unavailable, reply RETIRE-NATIVE-SETUP-BLOCKED. '
                       'On the next retirement offer, use that verified context and write only its assigned private shard; '
@@ -185,6 +146,8 @@ def main():
                       'to its isolated local bare remote. After setup your entire final reply must be RETIRE-NATIVE-READY.')
             launched = run([launcher, 'retire-native:' + harness, harness, args.worktree.resolve(),
                             '--model', model, *(['--trust'] if harness == 'claude' else ['--codex-bin', codex_wrapper]), prompt], env=environment)
+            if harness == 'claude':
+                report['claude_trust_invoked'] = str(worktree)  # Published --trust persists this exact-dir grant.
             (directory / (harness + '-launch.txt')).write_text(launched.stdout + launched.stderr)
             require(launched)
             rows = require(run([*tmux, 'list-panes', '-t', 'retire-native:' + harness, '-F', '#{pane_id}'])).splitlines()
@@ -202,7 +165,7 @@ def main():
             else:
                 raise AssertionError('initial real harness task did not finish')
             context = json.loads(native_context.read_text())
-            assert re.fullmatch(r'[0-9a-fA-F-]{36}', context['session_id']) and context['session_id'] != 'unknown'
+            assert re.fullmatch(r'[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}', context['session_id']) and context['session_id'] != 'unknown'
             assert context.get('evidence_source'), 'native session identity has no provenance'
             # Constructor/import are inert; isolate env and pin before read-only identity IO.
             with patch.dict(os.environ, environment, clear=True):
@@ -210,6 +173,28 @@ def main():
                 observer.tmux = tmux
                 identity = observer.identity()
             assert identity['process']['agent'] == harness, 'native harness identity not established'
+            # Read only this owned session's metadata; never retain conversation text.
+            if harness == 'codex':
+                transcripts = list((Path.home() / '.codex/sessions').glob('*/*/*/rollout-*-' + context['session_id'] + '.jsonl'))
+                assert len(transcripts) == 1, 'owned Codex native transcript missing or nonunique'
+                with transcripts[0].open() as stream:
+                    header = json.loads(stream.readline())
+                assert (header.get('type') == 'session_meta' and header.get('payload', {}).get('id') == context['session_id']
+                        and header['payload'].get('cwd') == str(worktree)), 'owned Codex native transcript ID/cwd differs'
+                context['controller_identity_proof'] = str(transcripts[0])
+            else:
+                project_key = re.sub(r'[^a-zA-Z0-9]', '-', str(worktree))
+                transcript = Path.home() / '.claude/projects' / project_key / (context['session_id'] + '.jsonl')
+                matching = False
+                with transcript.open() as stream:
+                    for line in stream:
+                        record = json.loads(line)
+                        if record.get('sessionId') == context['session_id'] and record.get('cwd') == str(worktree):
+                            matching = True
+                            break
+                assert matching, 'owned Claude transcript session/cwd metadata differs'
+                context['controller_identity_proof'] = str(transcript)
+            native_context.write_text(json.dumps(context, indent=2) + '\n')
             (directory / (harness + '-identity.json')).write_text(json.dumps(identity, indent=2))
             if harness == 'codex' and args.baseline_script:
                 red = run([args.baseline_script.resolve(), pane, '--retire', '--wait', '1', '--poll', '.2'], env=environment)
@@ -222,25 +207,26 @@ def main():
             # sender must preserve and co-submit it with the retirement offer.
             if args.stale_offer_draft:
                 require(run([*tmux, 'send-keys', '-t', pane, '-l', 'Disposable retirement rehearsal reminder.']))
-            notice = 'Resume this session with' if harness == 'claude' else 'Shutting down'
-            pattern = r'^\s*Resume this session with:\s*$' if harness == 'claude' else r'^\s*Shutting down\.\.\.\s*$'
-            before_screen = require(run([*tmux, 'capture-pane', '-p', '-S', '-2000', '-t', pane]))
-            notice_before = len(re.findall(pattern, before_screen, re.MULTILINE))
-            observed_notice = False
+            notice = ('claude --resume ' if harness == 'claude' else 'codex resume ') + context['session_id']
+            prefix = r'^Resume this session with:\n' if harness == 'claude' else r'^Token usage: [^\n]+\nTo continue this session, run:\n'
+            pattern = prefix + r'[ \t]*' + re.escape(notice) + r'[ \t]*$'
             deadline = time.monotonic() + 1200
             command = [HERE / 'retire.sh', pane, '--retire', '--wait', '60', '--poll', '1']
             observations = []
             while True:
-                with notice_watch(tmux, pane, pattern, notice_before, records) as seen:
-                    result = run(command, env=environment, timeout=120)
-                    observed_notice = observed_notice or seen.is_set()
+                result = run(command, env=environment, timeout=240)
                 observations.append({'returncode': result.returncode, 'stdout': result.stdout, 'stderr': result.stderr})
                 (directory / (harness + '-retire.json')).write_text(json.dumps(observations, indent=2))
                 if result.returncode == 0:
                     break
                 # A delivered offer needs observation, never another send. All
                 # other failures remain failures and require deliberate inspection.
-                pending = json.loads(result.stderr)
+                if result.returncode != 2:
+                    require(result)
+                try:
+                    pending = json.loads(result.stderr)
+                except ValueError as error:
+                    raise RuntimeError('retirement failure lacked structured JSON; inspect retained result') from error
                 if (result.returncode != 2 or not pending.get('reason', '').startswith('DONE not observed;')
                         or time.monotonic() >= deadline):
                     require(result)
@@ -256,7 +242,13 @@ def main():
                 assert state['offer'].get('stale_draft_length') == len('Disposable retirement rehearsal reminder.'), 'ordinary stale draft was not co-submitted'
             assert state.get('handoff_receipt') and state.get('shard_hash')
             screen = require(run([*tmux, 'capture-pane', '-p', '-S', '-2000', '-t', pane]))
-            assert observed_notice, f'fresh anchored {harness} exit receipt missing'
+            baseline = state['exit_notice']
+            assert baseline['session_id'] == context['session_id']
+            assert type(state['exit'].get('enters')) is int and state['exit']['enters'] >= 1, 'no actual submitted exit request'
+            assert state['exit']['status'] == 'delivered' or state['exit'].get('input_attempted') is True
+            assert len(re.findall(pattern, screen, re.MULTILINE)) > baseline['before'], f'fresh same-session {harness} native notice missing'
+            pane_dead = require(run([*tmux, 'display-message', '-p', '-t', pane, '#{pane_dead}']))
+            assert pane_dead == '1', 'owned launcher pane has not ended'
             actors = [state['identity']['process'], *state['identity']['process'].get('cores', [])]
             for actor in actors:
                 current = retire.proc(actor['pid'])
@@ -269,21 +261,30 @@ def main():
             assert preserved['session_id'] == context['session_id'], 'retirement lost verified native session identity'
             report['results'].append({'harness': harness, 'pane': pane, 'event': state['id'],
                                       'handoff': 'remote-blob-verified', 'exit_receipt': notice, 'processes_ended': True,
-                                      'native_session': context['session_id'], 'identity_source': context['evidence_source']})
+                                      'pane_dead': True, 'native_session': context['session_id'], 'identity_source': context['evidence_source']})
             print(harness + ': real handoff, exit receipt, and process end verified', flush=True)
     except BaseException as error:
         failed = True
         report['failure'] = str(error)
         raise
     finally:
+        signal.signal(signal.SIGTERM, signal.SIG_IGN)
+        signal.signal(signal.SIGHUP, signal.SIG_IGN)
         # Only this uniquely named server, created above, belongs to this test.
         if server_started:
-            cleanup = run([*tmux, 'kill-server'])
-            report['cleanup_exit'] = cleanup.returncode
-        absent = run([*tmux, 'list-sessions'])
-        report['resources_released'] = absent.returncode != 0
+            try:
+                cleanup = run([*tmux, 'kill-server'], timeout=10)
+                report['cleanup_exit'] = cleanup.returncode
+            except (OSError, subprocess.TimeoutExpired) as error:
+                report['cleanup_error'] = type(error).__name__
         try:
-            report['worktree_after'] = fingerprint(worktree)
+            absent = run([*tmux, 'list-sessions'], timeout=10)
+            report['resources_released'] = absent.returncode != 0
+        except (OSError, subprocess.TimeoutExpired) as error:
+            report['cleanup_probe_error'] = type(error).__name__
+            report['resources_released'] = False
+        try:
+            report['worktree_after'] = fingerprint(worktree, owned=True)
             report['worktree_unchanged'] = report['worktree_after'] == worktree_before
         except (OSError, RuntimeError, subprocess.TimeoutExpired) as error:
             report['containment_check_failure'] = str(error)

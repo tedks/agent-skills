@@ -27,7 +27,7 @@ SHARED = Path(os.environ.get('RETIRE_TEST_SHARED_SCRIPTS', str(HERE.parents[1] /
 
 def shard_data(event, identity):
     return {'event': event, 'identity': identity, 'author': 'agent',
-            'date': '2026-09-26', 'session_id': 'test-session-id', 'harness': identity['process']['agent'],
+            'date': '2026-09-26', 'session_id': 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa', 'harness': identity['process']['agent'],
             'model': 'test-model', 'working_directory': identity['directory'], 'tmux_window': 'private-test:0',
             'role': 'Utility', 'landed_work': 'none', 'lessons': 'Record receipts before exit.', 'provenance': 'fixture-agent',
             'recovery': {'mission': 'Mission authorized', 'authorization': 'fixture caller', 'pauses': 'none',
@@ -64,10 +64,10 @@ def terminal(directory, mode):
             else:
                 children.append(subprocess.Popen(['bash', '-c', 'exec -a ' + shlex.quote(name) + ' sleep 360']))
     def draw():
-        plain_draft = mode == 'draft' or (mode in ('stable-draft', 'claude-exit-draft') and not pasted_payload)
+        plain_draft = not pasted_payload
         collapsed = f'[Pasted Content {len(draft.decode(errors="replace"))} chars]' if draft and not plain_draft else draft.decode(errors='replace')
         if mode == 'stable-draft' and pasted_payload and paste_prefix:
-            collapsed = paste_prefix.decode() + f'[Pasted Content {len(draft[len(paste_prefix):].decode())} chars]'
+            collapsed = paste_prefix.decode(errors='replace') + f"[Pasted Content {len(draft[len(paste_prefix):].decode(errors='replace'))} chars]"
         body = history + '\r\n› ' + collapsed + '\r\n\r\n  Test model · branch\r\n'
         if mode.startswith('claude'):
             if mode == 'claude-ghost' and event and not draft:
@@ -75,9 +75,9 @@ def terminal(directory, mode):
             body = history + '\r\n' + '─' * 80 + '\r\n❯ ' + collapsed + '\r\n' + '─' * 80 + '\r\n'
         visible_marker = mode in ('composer', 'claude-composer') and draft.startswith('● RETIRE-DONE-'.encode())
         if visible_marker:
-            body = history + '\r\n› \r\n' + draft.decode() + '\r\n\r\n  Test model · branch\r\n'
+            body = history + '\r\n› \r\n' + draft.decode(errors='replace') + '\r\n\r\n  Test model · branch\r\n'
             if mode == 'claude-composer':
-                body = history + '\r\n' + '─' * 80 + '\r\n❯ \r\n' + draft.decode() + '\r\n' + '─' * 80 + '\r\n'
+                body = history + '\r\n' + '─' * 80 + '\r\n❯ \r\n' + draft.decode(errors='replace') + '\r\n' + '─' * 80 + '\r\n'
         if mode == 'modal':
             body = 'Do you trust the contents of this directory?\r\n  1. Yes\r\n  2. No\r\n'
         sys.stdout.write('\x1b[?2004h\x1b[2J\x1b[H' + body)
@@ -111,6 +111,9 @@ def terminal(directory, mode):
                 new_draft.unlink()
                 draw()
             if (directory / 'human-independent-exit').exists():
+                if exit_enters:
+                    sys.stdout.write('\r\n\x1b[JToken usage: total=42\r\nTo continue this session, run:\r\n  codex resume aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa\r\n')
+                    sys.stdout.flush()
                 return
             if mode == 'draft' and (directory / 'human-cleared-draft').exists():
                 draft = b''
@@ -135,7 +138,7 @@ def terminal(directory, mode):
                     char, pending = pending[:1], pending[1:]
                     if not pasting and char == b'\r':
                         enters += 1
-                        payload = draft.decode()
+                        payload = draft.decode(errors='replace')
                         if payload == '/exit':
                             exit_enters += 1
                             # Independently prove order from the remote, before exit.
@@ -166,10 +169,16 @@ def terminal(directory, mode):
                                 pasted_payload = False
                                 draw()
                                 continue
-                            if mode != 'hold':
+                            if mode == 'hold-notice':
+                                history = 'Token usage: total=42\r\nTo continue this session, run:\r\n  codex resume aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa\r\n'
+                                draft = b''
+                                draw()
+                            if mode not in ('hold', 'hold-notice'):
                                 (directory / 'terminal.json').write_text(json.dumps({'pastes': pastes, 'enters': enters, 'event': event, 'exit_pasted': pasted_payload, 'exit_enters': exit_enters}))
-                                if mode.startswith('claude'):
-                                    sys.stdout.write('\x1b[2J\x1b[HResume this session with:\r\nclaude --resume aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa\r\n')
+                                if mode != 'no-exit-notice':
+                                    session = 'bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb' if mode.endswith('wrong-exit-notice') else 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa'
+                                    notice = ('Resume this session with:\r\nclaude --resume ' if mode.startswith('claude') else 'Token usage: total=42\r\nTo continue this session, run:\r\n  codex resume ') + session + '\r\n'
+                                    sys.stdout.write('\r\n\x1b[J' + notice)
                                     sys.stdout.flush()
                                 return
                         else:
@@ -201,7 +210,7 @@ def terminal(directory, mode):
                                 hook.chmod(0o700)
                         history = ('❯' if mode.startswith('claude') else '›') + ' [Pasted Content ' + str(len(payload)) + ' chars]\r\n'
                         if mode == 'stable-draft' and paste_prefix:
-                            history = '› ' + paste_prefix.decode() + ' [Pasted Content ' + str(len(payload) - len(paste_prefix.decode())) + ' chars]\r\n'
+                            history = '› ' + paste_prefix.decode(errors='replace') + ' [Pasted Content ' + str(len(payload) - len(paste_prefix.decode(errors='replace'))) + ' chars]\r\n'
                         if mode.startswith('claude'):
                             history = '• Messages to be submitted after next tool call\r\n  ↳ [Pasted Content ' + str(len(payload)) + ' chars]\r\n'
                         if mode == 'ambiguous':
@@ -224,13 +233,17 @@ def terminal(directory, mode):
                                         history = history[:-2] + '   \t\r\n'
                                     if 'codex-footer' in mode:
                                         history += '  Worked for 1m 21s · 12:23\r\n'
+                                        if mode.endswith('padded-footer'):
+                                            history = history[:-2] + '   \t\r\n'
                                         if mode.endswith('extra-prose'):
                                             history += '  Recovery still needs correction.\r\n'
+                                        elif mode.endswith('same-row-prose'):
+                                            history = history[:-2] + ' Recovery still needs correction.\r\n'
                                     if mode.endswith('suffix'):
                                         history += '  Do not retire yet; recovery still needs correction.\r\n'
                                     elif mode.endswith('later-assistant'):
                                         history += '● Recovery still needs correction.\r\n'
-                        draft = ('● RETIRE-DONE-' + event).encode() if mode in ('composer', 'claude-composer') else (b'ordinary human draft' if mode == 'claude-exit-draft' else b'')
+                        draft = ('● RETIRE-DONE-' + event).encode() if mode in ('composer', 'claude-composer') else (b'ordinary human draft' if mode in ('claude-exit-draft', 'codex-exit-draft') else b'')
                         pasted_payload = False
                     else:
                         draft += char
@@ -418,13 +431,13 @@ class Tests(unittest.TestCase):
         self.assertFalse(any('payload' in record for record in ledger))
         index = (self.repo / 'waiting' / 'INDEX.md').read_text()
         self.assertIn('Session | Provider | Role | State | Last verified', index)
-        self.assertIn('test-session-id | OpenAI | Utility | retired', index)
+        self.assertIn('aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa | OpenAI | Utility | retired', index)
 
     def test_stable_ordinary_offer_draft_is_co_submitted(self):
         self.actor('stable-draft')
         result = self.invoke()
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(self.observed()['pastes'], 2)  # combined offer plus Codex exit
+        self.assertEqual(self.observed()['pastes'], 1)  # combined offer; typed Codex exit
         self.assertEqual(self.state()[1]['offer']['stale_draft_length'], len('human unfinished draft'))
         self.assertEqual(self.observed()['exit_enters'], 1)
 
@@ -443,6 +456,166 @@ class Tests(unittest.TestCase):
         self.assertIn('ordinary human draft', self.command(*self.tmux, 'capture-pane', '-p', '-t', self.pane))
         self.assertTrue(state.get('handoff_receipt'))
         self.assertEqual(self.git('rev-parse', 'origin/master:' + state['shard']), state['shard_hash'])
+
+    def test_codex_stable_ordinary_draft_defers_typed_exit(self):
+        self.actor('codex-exit-draft')
+        result = self.invoke()
+        self.assertEqual(result.returncode, 2, result.stderr)
+        state = self.state()[1]
+        self.assertEqual(state['exit']['status'], 'deferred')
+        self.assertFalse(state['exit']['input_attempted'])
+        self.assertEqual(state['exit']['input_method'], 'typed')
+        self.assertEqual(state['exit']['enters'], 0)
+        self.assertEqual(self.observed()['pastes'], 1)
+        self.assertIn('ordinary human draft', self.command(*self.tmux, 'capture-pane', '-p', '-t', self.pane))
+        self.assertFalse((self.directory / 'exit-order.json').exists())
+        self.assertEqual(self.git('rev-parse', 'origin/master:' + state['shard']), state['shard_hash'])
+
+    def test_wrong_session_exit_notice_is_pending(self):
+        self.actor('wrong-exit-notice')
+        result = self.invoke()
+        self.assertEqual(result.returncode, 2, result.stderr)
+        self.assertIn('fresh same-session exit notice', result.stderr)
+        self.assertNotEqual(self.state()[1]['status'], 'retired')
+        self.assertTrue(self.state()[1].get('handoff_receipt'))
+
+    def test_claude_wrong_session_exit_notice_is_pending(self):
+        self.actor('claude-wrong-exit-notice')
+        result = self.invoke()
+        self.assertEqual(result.returncode, 2, result.stderr)
+        self.assertIn('fresh same-session exit notice', result.stderr)
+        self.assertNotEqual(self.state()[1]['status'], 'retired')
+
+    def test_missing_exit_notice_is_pending(self):
+        self.actor('no-exit-notice')
+        result = self.invoke()
+        self.assertEqual(result.returncode, 2, result.stderr)
+        self.assertIn('fresh same-session exit notice', result.stderr)
+        self.assertNotEqual(self.state()[1]['status'], 'retired')
+
+    def test_exit_notice_requires_native_banner_and_fresh_requested_input(self):
+        spec = importlib.util.spec_from_file_location('retire-notice-test', Path(os.environ.get('RETIRE_TEST_SCRIPT', str(HERE / 'retire.sh'))).with_name('retire.py'))
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        observer = module.Retirement(SimpleNamespace(pane='%1'))
+        session = 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa'
+        observer.state = {'identity': {'pane_pid': '123', 'process': {'agent': 'codex'}},
+                          'exit': {'status': 'ambiguous', 'input_attempted': True, 'enters': 1},
+                          'exit_notice': {'session_id': session, 'before': 0}}
+        observer.pane = lambda: ['%1', '123', 'owned', '/owned']
+        banner = 'Token usage: total=42\nTo continue this session, run:\n  codex resume ' + session + '\n'
+        with patch.object(module, 'checked', return_value='  codex resume ' + session + '\n'):
+            self.assertFalse(observer.fresh_exit_notice(session))
+        with patch.object(module, 'checked', return_value=banner):
+            self.assertTrue(observer.fresh_exit_notice(session))
+            observer.state['exit'] = {'status': 'delivered', 'receipt': 'command', 'enters': 1}
+            self.assertTrue(observer.fresh_exit_notice(session))
+            observer.state['exit'] = {'status': 'ambiguous', 'input_attempted': True, 'enters': 0}
+            self.assertFalse(observer.fresh_exit_notice(session))
+            observer.state['exit'] = {'status': 'ambiguous', 'input_attempted': True, 'enters': 1}
+            observer.state['exit_notice']['before'] = 1
+            self.assertFalse(observer.fresh_exit_notice(session))  # Old full banner.
+            observer.state['exit_notice']['before'] = 0
+            observer.state['exit'] = {'status': 'deferred', 'input_attempted': False}
+            self.assertFalse(observer.fresh_exit_notice(session))
+        # A resumed missing or mismatched baseline cannot gain cached authority.
+        observer.state['exit'] = {'status': 'ambiguous', 'input_attempted': True, 'enters': 1}
+        observer.state['exit_notice']['session_id'] = 'bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb'
+        with self.assertRaises(module.Stop):
+            observer.fresh_exit_notice(session)
+
+    def test_unknown_caller_identity_preserves_handoff_without_exit(self):
+        self.actor('decline')
+        self.invoke()
+        path, state = self.state()
+        data = shard_data(state['id'], state['identity'])
+        data.update(author='caller', session_id='unknown', declined=True, provenance='caller cannot establish native identity')
+        path.with_suffix('.shard').write_text(json.dumps(data))
+        result = self.invoke('--resume', str(path), '--caller-shard')
+        self.assertEqual(result.returncode, 2, result.stderr)
+        self.assertIn('verifiable native session UUID', result.stderr)
+        self.assertTrue(self.state()[1].get('handoff_receipt'))
+        self.assertFalse((self.directory / 'exit-order.json').exists())
+
+    def test_native_preflight_rejects_source_common_dir_and_remotes(self):
+        source = HERE.parents[3]
+        candidates = [source / '.claude', self.repo]
+        master = source.parent / 'master'
+        if master.exists():
+            candidates.append(master)
+        for index, directory in enumerate(candidates):
+            evidence = self.directory / ('rejected-native-' + str(index))
+            result = subprocess.run([sys.executable, str(HERE / 'test-retire-native.py'),
+                                     '--worktree', str(directory), '--evidence', str(evidence),
+                                     '--shared-skill', str(SHARED.parent)], text=True, capture_output=True, timeout=5)
+            self.assertEqual(result.returncode, 2, result.stderr)
+            self.assertIn('disposable', result.stderr)
+            self.assertFalse(evidence.exists(), 'unsafe cwd rejection produced native side effects')
+
+    def test_same_session_notice_cannot_retire_live_actor(self):
+        self.actor('hold-notice')
+        result = self.invoke('--handoff', 'codex', 'model', '--roles', str(self.roles))
+        self.assertEqual(result.returncode, 2, result.stderr)
+        state = self.state()[1]
+        self.assertNotEqual(state['status'], 'retired')
+        self.assertTrue(Path('/proc/' + str(state['identity']['process']['pid'])).exists())
+        self.assertFalse((self.directory / 'spawn.json').exists())
+        self.assertNotEqual(json.loads(self.git('show', 'origin/master:' + state['handoff_receipt']))['status'], 'retired')
+
+    def test_pending_exit_resume_preserves_baseline_and_never_resends(self):
+        self.actor('hold-notice')
+        self.assertEqual(self.invoke().returncode, 2)
+        path, state = self.state()
+        baseline = state['exit_notice'].copy()
+        (self.directory / 'human-independent-exit').touch()
+        self.wait_for(lambda: not Path('/proc/' + str(state['identity']['process']['pid'])).exists())
+        result = self.invoke('--resume', str(path))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.state()[1]['exit_notice'], baseline)
+        attempts = [json.loads(line) for line in path.with_suffix('.jsonl').read_text().splitlines()]
+        self.assertEqual(sum(row['action'] == 'send-attempt' and row.get('phase') == 'exit' for row in attempts), 1)
+        self.assertEqual(self.observed()['pastes'], 1)
+
+    def test_exit_resume_malformed_baseline_is_preserved(self):
+        self.actor('hold-notice')
+        self.invoke()
+        path, state = self.state()
+        (self.directory / 'human-independent-exit').touch()
+        self.wait_for(lambda: not Path('/proc/' + str(state['identity']['process']['pid'])).exists())
+        for baseline in (None, {'session_id': 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa', 'before': '0'},
+                         {'session_id': 'bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb', 'before': 0}):
+            state['exit_notice'] = baseline
+            path.write_text(json.dumps(state))
+            result = self.invoke('--resume', str(path))
+            self.assertEqual(result.returncode, 2, result.stderr)
+            self.assertIn('pre-request exit notice baseline', result.stderr)
+            self.assertEqual(json.loads(path.read_text())['exit_notice'], baseline)
+
+    def test_forged_retired_status_cannot_upgrade_pending_receipt(self):
+        self.actor('hold')
+        self.invoke()
+        path, state = self.state()
+        receipt_before = self.git('show', 'origin/master:' + state['handoff_receipt'])
+        state['status'] = 'retired'
+        path.write_text(json.dumps(state))
+        result = self.invoke('--resume', str(path))
+        self.assertEqual(result.returncode, 2, result.stderr)
+        self.assertEqual(self.git('show', 'origin/master:' + state['handoff_receipt']), receipt_before)
+        audit = [json.loads(line) for line in path.with_suffix('.jsonl').read_text().splitlines()]
+        self.assertFalse(audit[-1]['exit_confirmed'])
+
+    def test_retired_resume_lost_pane_preserves_historical_receipt(self):
+        self.actor()
+        result = self.invoke()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        path, state = self.state()
+        receipt_before = self.git('show', 'origin/master:' + state['handoff_receipt'])
+        self.command(*self.tmux, 'kill-pane', '-t', self.pane)
+        result = self.invoke('--resume', str(path))
+        self.assertEqual(result.returncode, 2, result.stderr)
+        self.assertEqual(self.git('show', 'origin/master:' + state['handoff_receipt']), receipt_before)
+        audit = [json.loads(line) for line in path.with_suffix('.jsonl').read_text().splitlines()]
+        self.assertFalse(audit[-1]['exit_confirmed'])
 
     def test_changing_draft_preserved_without_paste(self):
         self.actor('draft')
@@ -494,7 +667,7 @@ class Tests(unittest.TestCase):
         shard.write_text(json.dumps(data))
         result = self.invoke('--resume', str(path), '--caller-shard')
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(self.observed()['pastes'], 2)  # one offer and one bare exit
+        self.assertEqual(self.observed()['pastes'], 1)  # one offer; typed exit
         self.assertEqual(json.loads(shard.read_text())['author'], 'caller')
 
     def test_waiting_requires_decision_owner(self):
@@ -659,7 +832,7 @@ class Tests(unittest.TestCase):
         self.wait_for(lambda: 'human unfinished draft' not in self.command(*self.tmux, 'capture-pane', '-p', '-t', self.pane))
         result = self.invoke('--resume', str(path), '--retry-deferred', 'offer')
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(self.observed()['pastes'], 2)
+        self.assertEqual(self.observed()['pastes'], 1)
 
     def test_legacy_index_metadata_preserved(self):
         waiting = self.repo / 'waiting'
@@ -678,7 +851,7 @@ class Tests(unittest.TestCase):
     def test_legacy_session_prefix_blocks_duplicate(self):
         waiting = self.repo / 'waiting'
         waiting.mkdir()
-        (waiting / '2026-09-25-test-ses-lead.md').write_text('Existing recovery for this session.\n')
+        (waiting / '2026-09-25-aaaaaaaa-lead.md').write_text('Existing recovery for this session.\n')
         self.actor()
         result = self.invoke()
         self.assertEqual(result.returncode, 2)
@@ -753,10 +926,10 @@ class Tests(unittest.TestCase):
         self.assertTrue(any('session already has' in result[2] for result in results), results)
         shards = [path for path in (self.repo / 'waiting').glob('*.md') if path.name != 'INDEX.md']
         self.assertEqual(len(shards), 1)
-        self.assertEqual(json.loads(shards[0].read_text())['session_id'], 'test-session-id')
+        self.assertEqual(json.loads(shards[0].read_text())['session_id'], 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa')
         self.git('cat-file', '-e', 'origin/master:waiting/' + shards[0].name)
 
-    def test_independent_exit_after_handoff_allows_successor(self):
+    def test_independent_exit_after_handoff_remains_pending(self):
         self.actor()
         before = "        if not self.state.get('exit'):\n"
         after = ('        (self.repo.parent / "human-independent-exit").touch()\n'
@@ -766,13 +939,12 @@ class Tests(unittest.TestCase):
         entry = self.instrument(before, after)
         with patch.dict(os.environ, {'RETIRE_TEST_SCRIPT': str(entry)}):
             result = self.invoke('--handoff', 'codex', 'test-model', '--roles', str(self.roles))
-        self.assertEqual(result.returncode, 0, result.stderr)
-        path, state = self.state()
-        self.assertEqual(state['exit']['status'], 'not-needed')
+        self.assertEqual(result.returncode, 2, result.stderr)
+        self.assertIn('ended before exit request', result.stderr)
         self.assertEqual(self.observed()['pastes'], 1)
         self.assertFalse((self.directory / 'exit-order.json').exists())
-        self.assertTrue((self.directory / 'spawn.json').exists())
-        self.assertTrue(any(json.loads(line)['action'] == 'exit-not-needed' for line in path.with_suffix('.jsonl').read_text().splitlines()))
+        self.assertFalse((self.directory / 'spawn.json').exists())
+        self.assertTrue(self.state()[1].get('handoff_receipt'))
 
     def test_independent_exit_with_replacement_refuses_successor(self):
         self.actor()
@@ -922,7 +1094,7 @@ class Tests(unittest.TestCase):
         self.actor('linger-core', node=True)
         result = self.invoke('--handoff', 'codex', 'test-model', '--roles', str(self.roles))
         self.assertEqual(result.returncode, 2, result.stderr)
-        self.assertIn('pending original process exit', result.stderr)
+        self.assertIn('pending original process end', result.stderr)
         path, state = self.state()
         self.assertFalse(Path('/proc/' + str(state['identity']['process']['pid'])).exists())
         core = state['identity']['process']['cores'][0]
@@ -948,7 +1120,7 @@ class Tests(unittest.TestCase):
         self.env.pop('TMUX', None)
         result = self.invoke('--waiting', '--resume', str(path))
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(self.observed()['pastes'], 2)
+        self.assertEqual(self.observed()['pastes'], 1)
 
     def test_socket_failure_is_not_pane_disappearance(self):
         self.actor('hold')
@@ -963,6 +1135,17 @@ class Tests(unittest.TestCase):
         self.assertIn('command failed: tmux', result.stderr)
         self.assertFalse((self.directory / 'spawn.json').exists())
         self.assertNotEqual(json.loads(self.git('show', 'origin/master:' + state['handoff_receipt']))['status'], 'retired')
+
+        # Socket failure cannot itself establish the process-side lifecycle
+        # result, even when the separate notice guard would also reject it.
+        spec = importlib.util.spec_from_file_location('retire-socket-test', Path(os.environ.get('RETIRE_TEST_SCRIPT', str(HERE / 'retire.sh'))).with_name('retire.py'))
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        observer = module.Retirement(SimpleNamespace(pane=self.pane))
+        observer.state = state
+        observer.tmux = ['tmux', '-S', state['socket']]
+        with self.assertRaises(module.Stop):
+            observer.ended()
 
     def test_steward_dirty_index_is_not_published(self):
         waiting = self.repo / 'waiting'
@@ -1029,7 +1212,7 @@ class Tests(unittest.TestCase):
         self.wait_for(lambda: 'RETIRE-DONE' not in self.command(*self.tmux, 'capture-pane', '-p', '-t', self.pane))
         result = self.invoke('--waiting', '--resume', str(path))
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(self.observed()['pastes'], 2)
+        self.assertEqual(self.observed()['pastes'], 1)
 
     def test_last_poll_interval_is_observed(self):
         self.actor('late-done')
@@ -1234,8 +1417,16 @@ class Tests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(self.observed()['exit_enters'], 1)
 
+    def test_codex_ui_footer_trailing_padding_is_allowed(self):
+        self.actor('done-codex-footer-padded-footer')
+        result = self.invoke()
+        self.assertEqual(result.returncode, 0, result.stderr)
+
     def test_codex_ui_footer_never_hides_additional_prose(self):
         self.assert_completion_block_pending('done-codex-footer-extra-prose')
+
+    def test_codex_ui_footer_same_row_prose_is_pending(self):
+        self.assert_completion_block_pending('done-codex-footer-same-row-prose')
 
     def test_claude_cannot_use_codex_ui_footer(self):
         self.assert_completion_block_pending('claude-codex-footer')
