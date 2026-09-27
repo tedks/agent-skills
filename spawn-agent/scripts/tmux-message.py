@@ -176,6 +176,10 @@ def claude_combined_receipts(frame, inp, draft, payload):
     rule = lambda row: bool(row.strip()) and set(row.strip()) == {"─"}
 
     for index, line in enumerate(lines):
+        # The measured submitted Claude prompt is flush-left. An indented glyph
+        # can occur inside assistant/tool prose and is not a native user row.
+        if not line.startswith("❯"):
+            continue
         prompt = PROMPT.match(line)
         if not prompt or prompt.group(1) != "❯":
             continue
@@ -194,7 +198,7 @@ def claude_combined_receipts(frame, inp, draft, payload):
             continue
         # Exactly one measured blank row separates the visible stale draft
         # from the appended payload. Other blank/cropped layouts stay unknown.
-        if end >= len(lines) or lines[end] != "":
+        if end >= len(lines) or lines[end].strip():
             continue
         end += 1
         payload_rows = []
@@ -373,25 +377,18 @@ class Sender:
         if self.stale_draft_length:
             if inp.kind != "text":
                 return False
-            if inp.text == self.expected:
-                # Strengthen visible-text ownership only for the Claude
-                # co-submit path being repaired here; preserve Codex's
-                # previously accepted exact-text behavior.
-                if self.draft_harness == "claude":
-                    return inp.harness == "claude" and self.at_end(inp)
-                return True
             # Claude 2.1.283 replaces a long bracketed paste with this exact
             # visible shape. The known draft prefix, one current paste marker,
             # its appended-line count, harness and end cursor are consistent
             # with the one append operation above; the hidden bytes stay opaque.
             # The optional expansion hint is transient and ignored.
-            if (inp.harness == self.draft_harness == "claude" and self.at_end(inp)
-                    and inp.text.startswith(self.original_draft)):
-                suffix = inp.text[len(self.original_draft):]
-                marker = re.fullmatch(r"\[Pasted text #[1-9][0-9]* \+([1-9][0-9]*) lines\]", suffix)
-                expected_lines = str(self.payload.count("\n") + 1)
-                if marker and marker.group(1) == expected_lines:
-                    return True
+            if self.draft_harness == "claude":
+                return styles.claude_combined_input_evidence(
+                    inp.kind, inp.text, inp.harness, self.original_draft,
+                    self.payload, self.at_end(inp))
+            if inp.text == self.expected:
+                # Preserve Codex's previously accepted exact-text behavior.
+                return True
             # Codex compresses the appended newline+payload inline after the
             # untouched draft. Readiness excluded all old paste markers.
             if (inp.harness == self.draft_harness == "codex" and self.at_end(inp)

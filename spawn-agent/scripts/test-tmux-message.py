@@ -41,7 +41,7 @@ def claude_co_submit_frame(text='', receipt=True):
                    if row == '● ACK-QUEUE-3155db7fcc5e')
         del rows[start:end + 1]
     prompt = next(i for i, row in enumerate(rows) if row == '❯\u00a0')
-    rows[prompt] = '❯ ' + text
+    rows[prompt] = '❯\u00a0' + text
     raw = '\n'.join(rows) + '\n'
     return m.Frame(raw, 2 + m.styles.cell_width(text.rsplit('\n', 1)[-1]),
                    prompt + text.count('\n'), raw)
@@ -1071,6 +1071,12 @@ assert screen.observe(frame, 'outgoing', 6, 1, pathlib.Path(sys.argv[2])) == 'dr
         self.assertEqual((inp.kind, inp.harness), ('empty', 'claude'))
         self.assertEqual(m.records(frame, inp)[('submitted', m.normalized(draft))], 1)
         self.assertEqual(m.claude_combined_receipts(frame, inp, draft, payload), 1)
+        padded = frame.raw.replace(
+            f'❯ {draft}\n\n  After the current task completes,',
+            f'❯ {draft}\n   \n  After the current task completes,', 1)
+        padded_frame = m.Frame(padded, frame.x, frame.y, padded)
+        self.assertEqual(m.claude_combined_receipts(
+            padded_frame, m.composer(padded_frame), draft, payload), 1)
 
     def test_claude_combined_receipt_requires_one_complete_owned_block(self):
         draft = 'Disposable retirement rehearsal reminder.'
@@ -1082,6 +1088,9 @@ assert screen.observe(frame, 'outgoing', 6, 1, pathlib.Path(sys.argv[2])) == 'dr
             ('wrong payload', fixture.replace('ACK-QUEUE-3155db7fcc5e', 'ACK-QUEUE-wrong')),
             ('assistant prose', fixture.replace('❯ Disposable retirement rehearsal reminder.',
                                                 '● Disposable retirement rehearsal reminder.', 1)),
+            ('indented assistant prompt glyph', fixture.replace(
+                '❯ Disposable retirement rehearsal reminder.',
+                '  ❯ Disposable retirement rehearsal reminder.', 1)),
             ('cropped header', fixture.replace('❯ Disposable retirement rehearsal reminder.',
                                                '  Disposable retirement rehearsal reminder.', 1)),
             ('archived composer', fixture.replace('❯ Disposable retirement rehearsal reminder.',
@@ -1122,11 +1131,30 @@ assert screen.observe(frame, 'outgoing', 6, 1, pathlib.Path(sys.argv[2])) == 'dr
                    if row == '● ACK-QUEUE-3155db7fcc5e')
         rows[end + 1:end + 1] = [''] + rows[start:end + 1]
         raw = '\n'.join(rows) + '\n'
-        prompt = next(i for i, row in enumerate(rows) if row == '❯ ')
+        prompt = next(i for i, row in enumerate(rows) if row == '❯\u00a0')
         frame = m.Frame(raw, 2, prompt, raw)
         current = m.claude_combined_receipts(frame, m.composer(frame), draft, payload)
         self.assertEqual(current, 2)
         self.assertGreater(current, baseline)
+
+    def test_new_combined_block_before_first_enter_does_not_authorize_an_enter(self):
+        draft = 'Disposable retirement rehearsal reminder.'
+        payload = (CO_SUBMIT_FIXTURES / 'claude-co-submit-payload.txt').read_text()
+
+        class AlreadySubmitted(Terminal):
+            def frame(self):
+                if self.pastes:
+                    return claude_co_submit_frame()
+                return super().frame()
+
+        t = AlreadySubmitted(payload=payload, draft=draft)
+        t.harness = 'claude'
+        frame = claude_co_submit_frame()
+        self.assertEqual(m.claude_combined_receipts(
+            frame, m.composer(frame), draft, payload), 1)
+        with self.assertRaisesRegex(m.DeliveryError, 'paste-not-observed'):
+            deliver(t)
+        self.assertEqual((t.pastes, t.enters), (1, 0))
 
     def test_claude_co_submit_accepts_new_measured_full_user_receipt(self):
         draft = 'Disposable retirement rehearsal reminder.'

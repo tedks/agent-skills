@@ -74,8 +74,8 @@ code-point or UTF-16-unit count. Readiness rejects pre-existing paste markers
 case-insensitively, so this evidence belongs to the current paste. Changed
 prefixes, extra text, wrong counts and unsupported markers cannot authorize
 Enter. A new matching submitted or queued receipt is still required; no replay
-is introduced. Other wrapped/collapsed co-submission shapes remain unsupported.
-The compatibility sender retains its exact visible-input limits.
+is introduced. Other Codex wrapped/collapsed co-submission shapes remain
+unsupported.
 
 Claude Code 2.1.283 can replace a long bracketed paste appended to a stable
 ordinary draft with `[Pasted text #N +K lines]` while leaving the exact original
@@ -95,12 +95,19 @@ receipt; they never retry Enter or re-paste after ambiguity. Visible full-text
 co-submission also requires the exact draft + newline + payload, the same
 harness, and an end cursor.
 
+The compatibility `claude-send.sh` uses the same exact Claude co-submit input
+predicate and freezes its first recognized text/cursor fingerprint through its
+single Enter. It keeps its legacy `status=sent receipt=unverified` result and
+does not claim application delivery. Extra blank paragraphs, cropped composer
+views, and unsupported wrapped-prefix layouts remain ambiguous in both paths.
+
 For Claude 2.1.283's measured submitted-row layout, the native receipt may show
 the draft after `❯`, one blank separator row, then the payload on continuation
 rows with the measured two-space indent. The sender checks that complete block
 against the same expected co-submit body and the pre-paste count, using the
 existing receipt normalization for terminal wrapping. It only counts an
-explicit new user row before a recognized current composer; assistant prose,
+explicit new column-zero `❯` user row before a recognized current composer;
+assistant prose,
 an archived composer, an incomplete or cropped block, and an unchanged old
 body do not confirm delivery. Other blank-row or queued layouts remain subject to the
 ordinary receipt parser and may stay ambiguous.
