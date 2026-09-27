@@ -26,7 +26,25 @@ def screen(text='', history='', harness='codex', footer='  Any model · branch',
     else:
         raw = prefix + '› ' + text + '\n\n' + footer + '\n'
         y = len(prefix.splitlines()) + text.count('\n')
-    return m.Frame(raw, 2 + len(text.rsplit('\n', 1)[-1]), y, history + raw)
+    return m.Frame(raw, 2 + m.styles.cell_width(text.rsplit('\n', 1)[-1]), y, history + raw)
+
+
+CO_SUBMIT_FIXTURES = Path(__file__).with_name('fixtures') / 'claude-send'
+
+
+def claude_co_submit_frame(text='', receipt=True):
+    rows = (CO_SUBMIT_FIXTURES / 'claude-co-submit-receipt.ansi').read_text().splitlines()
+    if not receipt:
+        start = next(i for i, row in enumerate(rows)
+                     if row == '❯ Disposable retirement rehearsal reminder.')
+        end = next(i for i, row in enumerate(rows[start:], start)
+                   if row == '● ACK-QUEUE-3155db7fcc5e')
+        del rows[start:end + 1]
+    prompt = next(i for i, row in enumerate(rows) if row == '❯\u00a0')
+    rows[prompt] = '❯\u00a0' + text
+    raw = '\n'.join(rows) + '\n'
+    return m.Frame(raw, 2 + m.styles.cell_width(text.rsplit('\n', 1)[-1]),
+                   prompt + text.count('\n'), raw)
 
 
 class Terminal:
@@ -68,7 +86,8 @@ class Terminal:
         self.frames += 1
         history = self.history
         if self.accepted_at is not None and self.now >= self.accepted_at + self.delayed:
-            history += ('• Messages to be submitted after next tool call\n  ↳ ' if self.queued else '› ') + (self.submitted or self.payload).replace('\n', '\n  ') + '\n\n'
+            glyph = '❯ ' if self.harness == 'claude' else '› '
+            history += ('• Messages to be submitted after next tool call\n  ↳ ' if self.queued else glyph) + (self.submitted or self.payload).replace('\n', '\n  ') + '\n\n'
         text = self.draft
         if self.mutate and self.pastes:
             text += ' human'
@@ -954,6 +973,535 @@ assert screen.observe(frame, 'outgoing', 6, 1, pathlib.Path(sys.argv[2])) == 'dr
         self.assertEqual(result['status'], 'delivered')
         self.assertEqual(result['stale_draft_length'], 41)
         self.assertEqual((t.pastes, t.enters), (1, 1))
+
+    def test_measured_claude_stale_append_marker_submits_once_with_or_without_hint(self):
+        draft = 'Disposable retirement rehearsal reminder.'
+        t = Terminal(payload='x' * 1368, draft=draft)
+        t.harness = 'claude'
+        raw = (Path(__file__).parent / 'fixtures/claude-send/claude-stale-append-pasted-text.ansi').read_text()
+        x, y = map(int, (Path(__file__).parent / 'fixtures/claude-send/claude-stale-append-pasted-text.cursor').read_text().split())
+        for with_hint in (False, True):
+            with self.subTest(with_hint=with_hint):
+                terminal = Terminal(payload='x' * 1368, draft=draft)
+                terminal.harness = 'claude'
+                original_frame, original_paste = terminal.frame, terminal.paste
+                def paste(path):
+                    original_paste(path)
+                    self.assertEqual(path.read_text(), '\n' + terminal.payload)
+                    terminal.draft = draft + '[Pasted text #1 +1 lines]'
+                def frame():
+                    if terminal.pastes and terminal.accepted_at is None:
+                        measured = (raw + '  paste again to expand\n') if with_hint else raw
+                        return m.Frame(measured, x, y, measured)
+                    return original_frame()
+                terminal.paste, terminal.frame = paste, frame
+                result = deliver(terminal)
+                self.assertEqual(result['status'], 'delivered')
+                self.assertEqual(result['stale_draft_length'], len(draft))
+                self.assertEqual((terminal.pastes, terminal.enters), (1, 1))
+
+    def test_measured_claude_multiline_append_preserves_exact_separator(self):
+        draft = 'Disposable retirement rehearsal reminder.'
+        payload = 'First logical row.\nSecond row 世界 😀'
+        t = Terminal(payload=payload, draft=draft)
+        t.harness = 'claude'
+        raw = (Path(__file__).parent / 'fixtures/claude-send/claude-stale-append-multiline.ansi').read_text()
+        x, y = map(int, (Path(__file__).parent / 'fixtures/claude-send/claude-stale-append-multiline.cursor').read_text().split())
+        original_frame = t.frame
+        def frame():
+            if t.pastes and t.accepted_at is None:
+                return m.Frame(raw, x, y, raw)
+            return original_frame()
+        t.frame = frame
+        result = deliver(t)
+        self.assertEqual(result['receipt'], 'submitted')
+        self.assertEqual(t.submitted, draft + '\n' + payload)
+        self.assertEqual((t.pastes, t.enters), (1, 1))
+
+    def test_claude_multiline_original_draft_plus_collapsed_append_submits(self):
+        draft = 'First stable row\nSecond stable row 世界'
+        t = Terminal(payload='x' * 1368, draft=draft)
+        t.harness = 'claude'
+        original_frame, original_paste = t.frame, t.paste
+        def paste(path):
+            original_paste(path)
+            t.draft = draft + '[Pasted text #1 +1 lines]'
+        def frame():
+            if t.pastes and t.accepted_at is None:
+                first, second = draft.split('\n')
+                suffix = '[Pasted text #1 +1 lines]'
+                raw = '──────────────\n❯\u00a0' + first + '\n  ' + second + suffix + '\n──────────────\n'
+                return m.Frame(raw, 2 + m.styles.cell_width(second + suffix), 2, raw)
+            return original_frame()
+        t.paste, t.frame = paste, frame
+        result = deliver(t)
+        self.assertEqual(result['status'], 'delivered')
+        self.assertEqual(result['stale_draft_length'], len(draft))
+        self.assertEqual((t.pastes, t.enters), (1, 1))
+
+    def test_exact_claude_append_requires_same_harness_and_end_cursor(self):
+        for failure in ('harness', 'cursor'):
+            with self.subTest(failure=failure):
+                t = Terminal(payload='a short payload', draft='stable draft')
+                t.harness = 'claude'
+                original_frame = t.frame
+                def frame():
+                    if t.pastes and t.accepted_at is None:
+                        f = screen(t.draft, t.history, harness='codex' if failure == 'harness' else 'claude')
+                        if failure == 'cursor':
+                            f.x -= 1
+                        return f
+                    return original_frame()
+                t.frame = frame
+                with self.assertRaisesRegex(m.DeliveryError, 'mixed-input-after-paste'):
+                    deliver(t)
+                self.assertEqual((t.pastes, t.enters), (1, 0))
+
+    def test_exact_claude_append_is_single_enter(self):
+        t = Terminal(payload='a short payload', draft='stable draft')
+        t.harness = 'claude'
+        result = deliver(t)
+        self.assertEqual(result['receipt'], 'submitted')
+        self.assertEqual((t.pastes, t.enters), (1, 1))
+
+    def test_claude_combined_receipt_matches_captured_blank_separator_block(self):
+        draft = 'Disposable retirement rehearsal reminder.'
+        payload = (CO_SUBMIT_FIXTURES / 'claude-co-submit-payload.txt').read_text()
+        frame = claude_co_submit_frame()
+        inp = m.composer(frame)
+        self.assertEqual((inp.kind, inp.harness), ('empty', 'claude'))
+        self.assertEqual(m.records(frame, inp)[('submitted', m.normalized(draft))], 1)
+        self.assertEqual(m.claude_combined_receipts(frame, inp, draft, payload), 1)
+        padded = frame.raw.replace(
+            f'❯ {draft}\n\n  After the current task completes,',
+            f'❯ {draft}\n   \n  After the current task completes,', 1)
+        padded_frame = m.Frame(padded, frame.x, frame.y, padded)
+        self.assertEqual(m.claude_combined_receipts(
+            padded_frame, m.composer(padded_frame), draft, payload), 1)
+
+    def test_claude_combined_receipt_requires_one_complete_owned_block(self):
+        draft = 'Disposable retirement rehearsal reminder.'
+        payload = (CO_SUBMIT_FIXTURES / 'claude-co-submit-payload.txt').read_text()
+        fixture = (CO_SUBMIT_FIXTURES / 'claude-co-submit-receipt.ansi').read_text()
+        cases = (
+            ('wrong draft prefix', fixture.replace('❯ Disposable retirement rehearsal reminder.',
+                                                    '❯ Different ordinary draft.', 1)),
+            ('wrong payload', fixture.replace('ACK-QUEUE-3155db7fcc5e', 'ACK-QUEUE-wrong')),
+            ('assistant prose', fixture.replace('❯ Disposable retirement rehearsal reminder.',
+                                                '● Disposable retirement rehearsal reminder.', 1)),
+            ('indented assistant prompt glyph', fixture.replace(
+                '❯ Disposable retirement rehearsal reminder.',
+                '  ❯ Disposable retirement rehearsal reminder.', 1)),
+            ('cropped header', fixture.replace('❯ Disposable retirement rehearsal reminder.',
+                                               '  Disposable retirement rehearsal reminder.', 1)),
+            ('archived composer', fixture.replace('❯ Disposable retirement rehearsal reminder.',
+                                                  '──────────────\n❯ Disposable retirement rehearsal reminder.', 1)),
+            ('archived composer with cropped opening rule', fixture.replace(
+                '\n\n● ACK-QUEUE-', '\n\n────────────────────────────────────────────────────────────────────────────────\n● ACK-QUEUE-', 1)),
+            ('mixed continuation', fixture.replace('preserve this line as message bod\n\n● ACK-',
+                                                   'preserve this line as message bod\n  unrelated row\n\n● ACK-', 1)),
+            ('extra blank paragraph', fixture.replace(
+                '❯ Disposable retirement rehearsal reminder.\n\n  After the current task',
+                '❯ Disposable retirement rehearsal reminder.\n\n\n  After the current task', 1)),
+        )
+        for reason, raw in cases:
+            with self.subTest(reason=reason):
+                lines = raw.splitlines()
+                prompt = next(i for i, row in enumerate(lines) if row == '❯\u00a0')
+                frame = m.Frame(raw, 2, prompt, raw)
+                inp = m.composer(frame)
+                self.assertEqual(m.claude_combined_receipts(frame, inp, draft, payload), 0)
+        blank_terminal = claude_co_submit_frame(receipt=False)
+        self.assertEqual(m.claude_combined_receipts(
+            blank_terminal, m.composer(blank_terminal), draft, payload), 0)
+        frame = claude_co_submit_frame()
+        inp = m.composer(frame)
+        for unsupported in (m.Input('unknown', harness='claude'),
+                            m.Input('modal', harness='claude'),
+                            m.Input(inp.kind, inp.text, inp.start, inp.end, inp.cursor, 'codex')):
+            with self.subTest(kind=unsupported.kind, harness=unsupported.harness):
+                self.assertEqual(m.claude_combined_receipts(frame, unsupported, draft, payload), 0)
+
+    def test_claude_combined_receipt_is_new_relative_to_same_parser_baseline(self):
+        draft = 'Disposable retirement rehearsal reminder.'
+        payload = (CO_SUBMIT_FIXTURES / 'claude-co-submit-payload.txt').read_text()
+        old = claude_co_submit_frame()
+        old_history = ('Tool output before\n  ❯ ' + draft +
+                       '\nTool output after\n' + old.history)
+        old_with_quote = m.Frame(old.raw, old.x, old.y, old_history)
+        old_input = m.composer(old_with_quote)
+        expected_form = ('submitted', m.normalized(draft))
+        self.assertEqual(m.records(old_with_quote, old_input)[expected_form], 2)
+        self.assertEqual(m.records(old_with_quote, old_input,
+                                   strict_claude_submitted=True)[expected_form], 1)
+        baseline = m.claude_combined_receipts(old_with_quote, old_input, draft, payload)
+        self.assertEqual(baseline, 1)
+        rows = old.raw.splitlines()
+        start = next(i for i, row in enumerate(rows)
+                     if row == '❯ Disposable retirement rehearsal reminder.')
+        end = next(i for i, row in enumerate(rows[start:], start)
+                   if row == '● ACK-QUEUE-3155db7fcc5e')
+        rows[end + 1:end + 1] = [''] + rows[start:end + 1]
+        raw = '\n'.join(rows) + '\n'
+        prompt = next(i for i, row in enumerate(rows) if row == '❯\u00a0')
+        frame = m.Frame(raw, 2, prompt, raw)
+        current = m.claude_combined_receipts(frame, m.composer(frame), draft, payload)
+        self.assertEqual(current, 2)
+        self.assertGreater(current, baseline)
+
+    def test_new_combined_block_before_first_enter_does_not_authorize_an_enter(self):
+        draft = 'Disposable retirement rehearsal reminder.'
+        payload = (CO_SUBMIT_FIXTURES / 'claude-co-submit-payload.txt').read_text()
+
+        class AlreadySubmitted(Terminal):
+            def frame(self):
+                if self.pastes:
+                    return claude_co_submit_frame()
+                return super().frame()
+
+        t = AlreadySubmitted(payload=payload, draft=draft)
+        t.harness = 'claude'
+        frame = claude_co_submit_frame()
+        self.assertEqual(m.claude_combined_receipts(
+            frame, m.composer(frame), draft, payload), 1)
+        with self.assertRaisesRegex(m.DeliveryError, 'paste-not-observed'):
+            deliver(t)
+        self.assertEqual((t.pastes, t.enters), (1, 0))
+
+    def test_claude_co_submit_accepts_new_measured_full_user_receipt(self):
+        draft = 'Disposable retirement rehearsal reminder.'
+        payload = (CO_SUBMIT_FIXTURES / 'claude-co-submit-payload.txt').read_text()
+        t = Terminal(payload=payload, draft=draft)
+        t.harness = 'claude'
+        original_paste = t.paste
+        def paste(path):
+            original_paste(path)
+            t.draft = draft + '[Pasted text #3 +2 lines]'
+        def frame():
+            if t.accepted_at is not None:
+                return claude_co_submit_frame()
+            return screen(t.draft, harness='claude')
+        t.paste, t.frame = paste, frame
+        result = deliver(t)
+        self.assertEqual((result['status'], result['receipt'], result['enters']),
+                         ('delivered', 'submitted', 1))
+        self.assertEqual((t.pastes, t.enters), (1, 1))
+
+    def test_claude_co_submit_does_not_reuse_old_identical_receipt(self):
+        draft = 'Disposable retirement rehearsal reminder.'
+        payload = (CO_SUBMIT_FIXTURES / 'claude-co-submit-payload.txt').read_text()
+        t = Terminal(payload=payload, draft=draft, dropped=1)
+        t.harness = 'claude'
+        original_paste = t.paste
+        def paste(path):
+            original_paste(path)
+            t.draft = draft + '[Pasted text #3 +2 lines]'
+        def frame():
+            return claude_co_submit_frame(t.draft)
+        t.paste, t.frame = paste, frame
+        with self.assertRaisesRegex(m.DeliveryError, 'receipt-timeout'):
+            deliver(t)
+        self.assertEqual((t.pastes, t.enters), (1, 1))
+
+    def test_claude_cosubmit_ignores_indented_quote_receipts_after_dropped_enter(self):
+        draft, payload = 'Stable ordinary draft.', 'hello'
+        for suffix in ('[Pasted text #3 +1 lines]', '\n' + payload):
+            with self.subTest(suffix=suffix):
+                t = Terminal(payload=payload, draft=draft, dropped=1)
+                t.harness = 'claude'
+                original_paste = t.paste
+
+                def paste(path):
+                    original_paste(path)
+                    t.draft = draft + suffix
+
+                original_frame = t.frame
+
+                def frame():
+                    if t.pastes and t.enters:
+                        if suffix.startswith('\n'):
+                            quote_body = '  ❯ ' + draft + '\n  ' + payload
+                            expected_form = m.normalized(draft + suffix)
+                        else:
+                            quote_body = '  ❯ ' + draft + suffix
+                            expected_form = m.normalized(draft + suffix)
+                        quote = 'Tool output before\n' + quote_body + '\nTool output after\n'
+                        receipt_frame = screen(t.draft, history=quote, harness='claude')
+                        receipt_input = m.composer(receipt_frame)
+                        # The unfiltered generic parser sees these deliberate
+                        # quote-shaped rows; only the scoped co-submit filter
+                        # rejects the indented non-user prompt.
+                        self.assertEqual(m.records(receipt_frame, receipt_input)
+                                         [('submitted', expected_form)], 1)
+                        self.assertEqual(m.records(receipt_frame, receipt_input,
+                                                   strict_claude_submitted=True)
+                                         [('submitted', expected_form)], 0)
+                        return screen(t.draft, history=quote, harness='claude')
+                    return original_frame()
+
+                t.paste, t.frame = paste, frame
+                with self.assertRaisesRegex(m.DeliveryError, 'receipt-timeout'):
+                    deliver(t)
+                self.assertEqual((t.pastes, t.enters), (1, 1))
+
+    def test_claude_cosubmit_ignores_old_indented_full_body_in_sender_baseline(self):
+        draft, payload = 'Stable ordinary draft.', 'hello'
+        old_quote = ('Tool output before\n  ❯ ' + draft + '\n  ' + payload +
+                     '\nTool output after\n')
+        t = Terminal(payload=payload, draft=draft)
+        t.harness = 'claude'
+        t.history = old_quote
+        result = deliver(t)
+        self.assertEqual((result['status'], result['receipt']), ('delivered', 'submitted'))
+        self.assertEqual((t.pastes, t.enters), (1, 1))
+
+    def test_measured_claude_marker_rejects_unowned_shapes(self):
+        draft = 'Disposable retirement rehearsal reminder.'
+        marker = '[Pasted text #1 +1 lines]'
+        cases = (
+            ('Other stable draft.' + marker, 'paste again to expand', 'claude', 0),
+            (draft + '[Pasted text #1 +2 lines]', 'paste again to expand', 'claude', 0),
+            (draft + '[Pasted text #1 +20 lines]', 'paste again to expand', 'claude', 0),
+            (draft + '[Pasted text #1]', 'paste again to expand', 'claude', 0),
+            (draft + marker + ' extra composer text', '', 'claude', 0),
+            (draft + marker + marker, '', 'claude', 0),
+            (draft + 'x' + marker, '', 'claude', 0),
+            (draft + marker, 'paste again to expand', 'claude', -1),
+            (draft + marker, 'paste again to expand', 'codex', 0),
+            ('Disposable retirement rehearsal\nreminder.' + marker, 'paste again to expand', 'claude', 0),
+        )
+        for text, hint, harness, cursor_delta in cases:
+            with self.subTest(text=text, hint=hint, harness=harness, cursor_delta=cursor_delta):
+                t = Terminal(payload='x' * 1368, draft=draft)
+                t.harness = 'claude'
+                original_frame, original_paste = t.frame, t.paste
+                def paste(path):
+                    original_paste(path)
+                    t.draft, t.harness = text, harness
+                def frame():
+                    if t.pastes and t.accepted_at is None:
+                        if harness == 'claude':
+                            prompt = '❯\u00a0' + text
+                            raw = '──────────────\n' + prompt + '\n──────────────\n'
+                            if hint:
+                                raw += '  ' + hint + '\n'
+                            cursor = 2 + m.styles.cell_width(text) + cursor_delta
+                            row = 1
+                        else:
+                            raw = '› ' + text + '\n\n  Any model · branch\n'
+                            cursor = 2 + m.styles.cell_width(text) + cursor_delta
+                            row = 0
+                        return m.Frame(raw, cursor, row, raw)
+                    return original_frame()
+                t.paste, t.frame = paste, frame
+                with self.assertRaisesRegex(m.DeliveryError, 'mixed-input-after-paste'):
+                    deliver(t)
+                self.assertEqual((t.pastes, t.enters), (1, 0))
+
+    def test_claude_collapsed_append_draft_with_unicode_cursor_width(self):
+        draft = 'Cue 世界 cafe\u0301 😀'
+        t = Terminal(payload='x' * 1368, draft=draft)
+        t.harness = 'claude'
+        original_frame, original_paste = t.frame, t.paste
+        def paste(path):
+            original_paste(path)
+            t.draft = draft + '[Pasted text #2 +1 lines]'
+        def frame():
+            if t.pastes and t.accepted_at is None:
+                text = draft + '[Pasted text #2 +1 lines]'
+                raw = '──────────────\n❯\u00a0' + text + '\n──────────────\n  paste again to expand\n'
+                return m.Frame(raw, 2 + m.styles.cell_width(text), 1, raw)
+            return original_frame()
+        t.paste, t.frame = paste, frame
+        self.assertEqual(deliver(t)['receipt'], 'submitted')
+        self.assertEqual((t.pastes, t.enters), (1, 1))
+
+    def test_claude_collapsed_append_line_count_includes_separator(self):
+        draft = 'stale 世界'
+        payload = 'x' * 683 + '\n' + 'y' * 684
+        t = Terminal(payload=payload, draft=draft)
+        t.harness = 'claude'
+        original_frame, original_paste = t.frame, t.paste
+        def paste(path):
+            original_paste(path)
+            t.draft = draft + '[Pasted text #2 +2 lines]'
+        def frame():
+            if t.pastes and t.accepted_at is None:
+                text = draft + '[Pasted text #2 +2 lines]'
+                raw = '──────────────\n❯\u00a0' + text + '\n──────────────\n  paste again to expand\n'
+                return m.Frame(raw, 2 + m.styles.cell_width(text), 1, raw)
+            return original_frame()
+        t.paste, t.frame = paste, frame
+        self.assertEqual(deliver(t)['receipt'], 'submitted')
+        self.assertEqual((t.pastes, t.enters), (1, 1))
+
+    def test_claude_collapsed_append_lost_enter_is_not_retried(self):
+        draft = 'Disposable retirement rehearsal reminder.'
+        t = Terminal(payload='x' * 1368, draft=draft, dropped=1)
+        t.harness = 'claude'
+        original_frame, original_paste = t.frame, t.paste
+        def paste(path):
+            original_paste(path)
+            t.draft = draft + '[Pasted text #3 +1 lines]'
+        def frame():
+            if t.pastes and t.accepted_at is None:
+                text = draft + '[Pasted text #3 +1 lines]'
+                raw = '──────────────\n❯\u00a0' + text + '\n──────────────\n  paste again to expand\n'
+                return m.Frame(raw, 2 + m.styles.cell_width(text), 1, raw)
+            return original_frame()
+        t.paste, t.frame = paste, frame
+        with self.assertRaisesRegex(m.DeliveryError, 'receipt-timeout'):
+            deliver(t)
+        self.assertEqual((t.pastes, t.enters), (1, 1))
+
+    def test_claude_collapsed_append_modal_and_unknown_never_enter(self):
+        draft = 'Disposable retirement rehearsal reminder.'
+        for kind in ('modal', 'unknown'):
+            with self.subTest(kind=kind):
+                t = Terminal(payload='x' * 1368, draft=draft)
+                t.harness = 'claude'
+                original_frame, original_paste = t.frame, t.paste
+                def paste(path):
+                    original_paste(path)
+                    t.draft = draft + '[Pasted text #4 +1 lines]'
+                def frame():
+                    if t.pastes and t.accepted_at is None:
+                        if kind == 'modal':
+                            return m.Frame('Would you like to proceed?\n❯ yes\n', 2, 1)
+                        return m.Frame('', -1, -1)
+                    return original_frame()
+                t.paste, t.frame = paste, frame
+                with self.assertRaises(m.DeliveryError):
+                    deliver(t)
+                self.assertEqual((t.pastes, t.enters), (1, 0))
+
+    def test_claude_collapsed_append_change_after_evidence_defers(self):
+        draft = 'Disposable retirement rehearsal reminder.'
+        t = Terminal(payload='x' * 1368, draft=draft)
+        t.harness = 'claude'
+        original_frame, original_paste = t.frame, t.paste
+        samples = 0
+        def paste(path):
+            original_paste(path)
+            t.draft = draft + '[Pasted text #5 +1 lines]'
+        def frame():
+            nonlocal samples
+            if t.pastes and t.accepted_at is None:
+                samples += 1
+                text = draft + ('[Pasted text #5 +1 lines]' if samples <= 1 else '[Pasted text #5 +1 lines] changed')
+                raw = '──────────────\n❯\u00a0' + text + '\n──────────────\n  paste again to expand\n'
+                return m.Frame(raw, 2 + m.styles.cell_width(text), 1, raw)
+            return original_frame()
+        t.paste, t.frame = paste, frame
+        with self.assertRaisesRegex(m.DeliveryError, 'mixed-input-after-paste'):
+            deliver(t)
+        self.assertEqual((t.pastes, t.enters), (1, 0))
+
+    def test_claude_collapsed_append_marker_ordinal_change_before_enter_defers(self):
+        draft = 'Disposable retirement rehearsal reminder.'
+        t = Terminal(payload='x' * 1368, draft=draft)
+        t.harness = 'claude'
+        original_frame, original_paste = t.frame, t.paste
+        samples = 0
+        def paste(path):
+            original_paste(path)
+            t.draft = draft + '[Pasted text #1 +1 lines]'
+        def frame():
+            nonlocal samples
+            if t.pastes and t.accepted_at is None:
+                samples += 1
+                text = draft + f'[Pasted text #{1 if samples == 1 else 2} +1 lines]'
+                raw = '──────────────\n❯\u00a0' + text + '\n──────────────\n'
+                return m.Frame(raw, 2 + m.styles.cell_width(text), 1, raw)
+            return original_frame()
+        t.paste, t.frame = paste, frame
+        with self.assertRaisesRegex(m.DeliveryError, 'input-changed-after-paste'):
+            deliver(t)
+        self.assertEqual((t.pastes, t.enters), (1, 0))
+
+    def test_claude_collapsed_append_marker_change_at_enter_revalidation_defers(self):
+        draft = 'Disposable retirement rehearsal reminder.'
+        t = Terminal(payload='x' * 1368, draft=draft)
+        t.harness = 'claude'
+        original_frame, original_paste = t.frame, t.paste
+        samples = 0
+        def paste(path):
+            original_paste(path)
+            t.draft = draft + '[Pasted text #1 +1 lines]'
+        def frame():
+            nonlocal samples
+            if t.pastes and t.accepted_at is None:
+                samples += 1
+                ordinal = 1 if samples <= 5 else 2
+                text = draft + f'[Pasted text #{ordinal} +1 lines]'
+                raw = '──────────────\n❯\u00a0' + text + '\n──────────────\n'
+                return m.Frame(raw, 2 + m.styles.cell_width(text), 1, raw)
+            return original_frame()
+        t.paste, t.frame = paste, frame
+        with self.assertRaisesRegex(m.DeliveryError, 'input-changed-before-enter'):
+            deliver(t)
+        self.assertEqual((t.pastes, t.enters), (1, 0))
+
+    def test_claude_collapsed_append_unknown_then_new_marker_defers(self):
+        draft = 'Disposable retirement rehearsal reminder.'
+        t = Terminal(payload='x' * 1368, draft=draft)
+        t.harness = 'claude'
+        original_frame, original_paste = t.frame, t.paste
+        samples = 0
+        def paste(path):
+            original_paste(path)
+            t.draft = draft + '[Pasted text #1 +1 lines]'
+        def frame():
+            nonlocal samples
+            if t.pastes and t.accepted_at is None:
+                samples += 1
+                if samples == 2:
+                    return m.Frame('', -1, -1)
+                ordinal = 1 if samples == 1 else 2
+                text = draft + f'[Pasted text #{ordinal} +1 lines]'
+                raw = '──────────────\n❯\u00a0' + text + '\n──────────────\n'
+                return m.Frame(raw, 2 + m.styles.cell_width(text), 1, raw)
+            return original_frame()
+        t.paste, t.frame = paste, frame
+        with self.assertRaisesRegex(m.DeliveryError, 'input-changed-after-paste'):
+            deliver(t)
+        self.assertEqual((t.pastes, t.enters), (1, 0))
+
+    def test_claude_collapsed_append_bare_draft_change_defers(self):
+        draft = 'Disposable retirement rehearsal reminder.'
+        t = Terminal(payload='x' * 1368, draft=draft)
+        t.harness = 'claude'
+        original_frame, original_paste = t.frame, t.paste
+        samples = 0
+        def paste(path):
+            original_paste(path)
+            t.draft = draft + '[Pasted text #1 +1 lines]'
+        def frame():
+            nonlocal samples
+            if t.pastes and t.accepted_at is None:
+                samples += 1
+                if samples == 2:
+                    return screen(draft, harness='claude')
+                ordinal = 1 if samples == 1 else 2
+                text = draft + f'[Pasted text #{ordinal} +1 lines]'
+                raw = '──────────────\n❯\u00a0' + text + '\n──────────────\n'
+                return m.Frame(raw, 2 + m.styles.cell_width(text), 1, raw)
+            return original_frame()
+        t.paste, t.frame = paste, frame
+        with self.assertRaisesRegex(m.DeliveryError, 'mixed-input-after-paste'):
+            deliver(t)
+        self.assertEqual((t.pastes, t.enters), (1, 0))
+
+    def test_main_rejects_bare_carriage_return_before_tmux_io(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            payload = Path(tmp) / 'payload'
+            payload.write_bytes(b'one\rtwo')
+            o = SimpleNamespace(prompt_file=payload, message=None, literal_exit=False)
+            err = io.StringIO()
+            with patch.object(m, 'options', return_value=o), patch.object(m, 'Tmux') as tmux, redirect_stderr(err):
+                self.assertEqual(m.main(), 1)
+            tmux.assert_not_called()
+            self.assertIn('without control characters', err.getvalue())
 
     def test_stale_append_content_unicode_counts_recover_once(self):
         payload = 'emoji 😀 context'

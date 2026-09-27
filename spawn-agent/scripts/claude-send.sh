@@ -72,6 +72,9 @@ harness_file=
 stable_file=
 expected_file=
 append_file=
+co_submit_fingerprint_file=
+draft_harness=
+co_submit_claude=0
 stale_draft_length=0
 clear_attempted=0
 cleared_command_draft_length=0
@@ -86,7 +89,7 @@ cleanup() {
     if ((buffer_loaded)); then
         "${TMUX_CMD[@]}" delete-buffer -b "$buf_name" 2>/dev/null || true
     fi
-    for scratch in "$harness_file" "$observe_file" "$stable_file" "$expected_file" "$append_file"; do
+    for scratch in "$harness_file" "$observe_file" "$stable_file" "$expected_file" "$append_file" "$co_submit_fingerprint_file"; do
         [[ -z "$scratch" ]] || rm -f -- "$scratch"
     done
     ((cleanup_prompt)) && rm -f -- "$prompt_file"
@@ -184,6 +187,7 @@ harness_file=$(mktemp /tmp/claude-send-harness.XXXXXX)
 stable_file=$(mktemp /tmp/claude-send-stable.XXXXXX)
 expected_file=$(mktemp /tmp/claude-send-expected.XXXXXX)
 append_file=$(mktemp /tmp/claude-send-append.XXXXXX)
+co_submit_fingerprint_file=$(mktemp /tmp/claude-send-co-submit.XXXXXX)
 cp -- "$prompt_file" "$expected_file"
 identity=$("$SCRIPT_DIR/tmux-resolve.sh" "$window") || { echo 'Error: failed to resolve tmux target' >&2; exit 1; }
 [[ "$identity" =~ ^[0-9]+:%[0-9]+$ ]] || { echo 'Error: tmux returned an invalid target identity' >&2; exit 1; }
@@ -224,7 +228,11 @@ screen_state() {
     if claude_trust_modal_active "$screen"; then printf modal; return; fi
     claude_composer_ready "$screen" || { printf unknown; return; }
     printf claude > "$harness_file"
-    printf '%s' "$screen_raw" | python3 "$SCRIPT_DIR/claude-send-screen.py" --observe-file "$observe_file" "$expected_file" "$cursor_x" "$cursor_y"
+    if ((co_submit_claude)); then
+        printf '%s' "$screen_raw" | python3 "$SCRIPT_DIR/claude-send-screen.py" --observe-file "$observe_file" --co-submit-draft-file "$stable_file" "$expected_file" "$cursor_x" "$cursor_y"
+    else
+        printf '%s' "$screen_raw" | python3 "$SCRIPT_DIR/claude-send-screen.py" --observe-file "$observe_file" "$expected_file" "$cursor_x" "$cursor_y"
+    fi
 }
 
 # A bounded deadline avoids granting extra time after slow capture calls.
@@ -324,10 +332,15 @@ if [[ "$state" == command ]]; then
 fi
 if [[ "$state" == draft ]]; then
     stale_draft_length=$(python3 -c 'import pathlib,sys; print(len(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8")))' "$stable_file")
+    draft_harness=$(<"$harness_file")
     { printf '\n'; cat "$prompt_file"; } > "$append_file"
     { cat "$stable_file"; cat "$append_file"; } > "$expected_file"
 else
+    draft_harness=$(<"$harness_file")
     cp -- "$prompt_file" "$append_file"
+fi
+if ((stale_draft_length)) && [[ "$draft_harness" == claude ]]; then
+    co_submit_claude=1
 fi
 
 if ((typed_command)); then
@@ -357,6 +370,10 @@ own_seen=0
 while ((own_seen == 0)); do
     state=$(screen_state 2>/dev/null || printf unknown)
     if [[ "$state" == own ]]; then
+        if ((co_submit_claude)); then
+            [[ -s "$observe_file" ]] || { preserve_pending ambiguous combined-fingerprint-missing; exit 3; }
+            cp -- "$observe_file" "$co_submit_fingerprint_file"
+        fi
         elapsed_ns=$(python3 -c 'import time,sys; print(time.monotonic_ns()-int(sys.argv[1]))' "$start_ns")
         ((elapsed_ns < render_grace_ns)) || { preserve_pending ambiguous post-paste-render-timeout; exit 3; }
         own_seen=1
@@ -375,6 +392,10 @@ done
 while :; do
     state=$(screen_state 2>/dev/null || printf unknown)
     [[ "$state" == own ]] || { preserve_pending ambiguous "post-paste-$state"; exit 3; }
+    if ((co_submit_claude)) && ! cmp -s "$observe_file" "$co_submit_fingerprint_file"; then
+        preserve_pending ambiguous input-changed-after-paste
+        exit 3
+    fi
     elapsed=$(python3 -c 'import time,sys; print((time.monotonic_ns()-int(sys.argv[1]))/1e9)' "$start_ns")
     remaining=$(awk -v d="$submit_delay" -v e="$elapsed" 'BEGIN { printf "%.3f",d-e }')
     awk -v r="$remaining" 'BEGIN { exit !(r > 0) }' || break
@@ -383,6 +404,10 @@ while :; do
 done
 state=$(screen_state 2>/dev/null || printf unknown)
 [[ "$state" == own ]] || { preserve_pending ambiguous "pre-submit-$state"; exit 3; }
+if ((co_submit_claude)) && ! cmp -s "$observe_file" "$co_submit_fingerprint_file"; then
+    preserve_pending ambiguous input-changed-before-submit
+    exit 3
+fi
 "${TMUX_CMD[@]}" send-keys -t "$pane_id" Enter
 # A paste attempt remains irreversible even if reporting fails after Enter.
 # Only a normal exit suppresses retention; never classify this phase deferred.

@@ -42,10 +42,13 @@ explicitly for single-line slash commands; ordinary messages retain bracketed pa
    tmux bracketed paste. For new input, compare the result with the expected
    text, tolerating wrapping/whitespace layout, or recognize a newly introduced
    collapsed paste marker. For co-submission, require the exact combined input
-   or the measured Codex append marker described below.
-4. Send Enter after paste evidence and the settling delay. Wait for a new
-   submitted user row or pending queue entry. If the same input remains after
-   the retry interval, recheck and send Enter once more. Never paste again.
+   or a measured harness-specific append marker described below.
+4. Send Enter after paste evidence and the settling delay. A Claude
+   stable-draft co-submission gets one Enter maximum. Other ordinary deliveries
+   retain one bounded Enter retry if the same input remains after the retry
+   interval. Wait for a new submitted user row or pending queue entry. An
+   unclear result is ambiguous and may leave a combined draft and hidden paste
+   unsent; never paste again or send another Enter after ambiguity.
 5. Once the input empties, only wait for confirmation. Disappearance alone is
    not confirmation, and cannot authorize Enter into the next empty input.
 
@@ -71,8 +74,47 @@ code-point or UTF-16-unit count. Readiness rejects pre-existing paste markers
 case-insensitively, so this evidence belongs to the current paste. Changed
 prefixes, extra text, wrong counts and unsupported markers cannot authorize
 Enter. A new matching submitted or queued receipt is still required; no replay
-is introduced. Other wrapped/collapsed co-submission shapes remain unsupported.
-The compatibility sender retains its exact visible-input limits.
+is introduced. Other Codex wrapped/collapsed co-submission shapes remain
+unsupported.
+
+Claude Code 2.1.283 can replace a long bracketed paste appended to a stable
+ordinary draft with `[Pasted text #N +K lines]` while leaving the exact original
+draft prefix visible. The sender accepts only this measured co-submit shape when
+the prefix is exact, the marker is the only suffix, K equals one plus the
+outgoing payload's newline count, the current and original harness are Claude,
+and the cursor is at the verified end. The transient `paste again to expand`
+hint is transient and is ignored. The current paste operation
+appends one newline and the outgoing payload, and readiness excludes old paste
+markers, so this marker is consistent with the one fresh paste. Its hidden
+bytes cannot be inspected, so the marker does not prove the pasted contents.
+After the sender first recognizes this shape, any change to the owned input
+before submission defers. Other Claude markers, extra text, changed prefixes,
+wrapped prefixes, and cursor or harness changes defer. All Claude stable-draft
+co-submissions send Enter at most once and require a new submitted or queued
+receipt; they never retry Enter or re-paste after ambiguity. Visible full-text
+co-submission also requires the exact draft + newline + payload, the same
+harness, and an end cursor.
+
+The compatibility `claude-send.sh` uses the same exact Claude co-submit input
+predicate and freezes its first recognized text/cursor fingerprint through its
+single Enter. It keeps its legacy `status=sent receipt=unverified` result and
+does not claim application delivery. It preserves exact visible hard-newline
+rows, including matching trailing blank rows through the cursor; cropped views,
+unsupported wrapped-prefix layouts, changed rows, and misplaced cursors remain
+ambiguous. Its legacy Codex collapsed-append recognition retains its existing
+visible-input limits.
+
+For Claude 2.1.283's measured submitted-row layout, the native receipt may show
+the draft after `❯`, one blank separator row, then the payload on continuation
+rows with the measured two-space indent. The sender checks that complete block
+against the same expected co-submit body and the pre-paste count, using the
+existing receipt normalization for terminal wrapping. This public receipt
+check supports only the measured single blank separator; extra blank paragraphs
+and cropped views remain ambiguous. It only counts an explicit new column-zero
+`❯` user row before a recognized current composer;
+assistant prose, an archived composer, an incomplete or cropped block, and an
+unchanged old body do not confirm delivery. Other blank-row or queued layouts
+remain subject to the ordinary receipt parser and may stay ambiguous.
 
 ## Stable command drafts
 

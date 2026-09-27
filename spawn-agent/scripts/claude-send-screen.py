@@ -6,6 +6,9 @@ detector; Codex uses the known prompt and footer. Raw visible rows preserve
 cursor coordinates. Wrapped layouts the parser cannot compare exactly become
 unknown. The helper never prints composer content.
 """
+from __future__ import annotations
+
+import hashlib
 import pathlib
 import re
 import sys
@@ -81,13 +84,35 @@ def cell_width(text: str) -> int:
     return width
 
 
+def claude_combined_input_evidence(kind: str, text: str, harness: str,
+                                   draft: str, payload: str, at_end: bool) -> bool:
+    """Recognize only the exact Claude draft append or its measured marker form."""
+    if kind != "text" or harness != "claude" or not at_end:
+        return False
+    if not draft:
+        return False
+    if text == draft + "\n" + payload:
+        return True
+    suffix = text[len(draft):] if text.startswith(draft) else ""
+    marker = re.fullmatch(r"\[Pasted text #[1-9][0-9]* \+([1-9][0-9]*) lines\]", suffix)
+    return bool(marker and marker.group(1) == str(payload.count("\n") + 1))
+
+
+def claude_combined_fingerprint(text: str, cursor_x: int, cursor_y: int) -> str:
+    """Hash a recognized Claude combined input and its prompt-relative cursor."""
+    material = f"claude\0{text}\0{cursor_x}\0{cursor_y}".encode("utf-8")
+    return hashlib.sha256(material).hexdigest()
+
+
 def codex_surface(screen: str) -> bool:
     clean = strip_ansi(screen)
     return "›" in clean and ("Context " in clean or "tab to queue message" in clean
                              or re.search(r"^  GPT-6-Sol · [^›❯\n]+$", clean, re.MULTILINE) is not None)
 
 
-def state(screen: str, payload: str, cx: int, cy: int) -> str:
+def state(screen: str, payload: str, cx: int, cy: int,
+          co_submit_draft: str | None = None,
+          fingerprint_path: pathlib.Path | None = None) -> str:
     if any(ord(ch) < 32 and ch not in "\n\t" for ch in payload):
         return "unknown"
     clean_screen = strip_ansi(screen)
@@ -125,9 +150,31 @@ def state(screen: str, payload: str, cx: int, cy: int) -> str:
     # remain exact. A wrapped visual row without the known hard-newline indent
     # will not compare as the payload and therefore fails closed.
     wanted = payload.rstrip("\n")
-    observed = observed.rstrip("\n")
-    if observed == "":
+    generic_observed = observed.rstrip("\n")
+    if generic_observed == "":
         return "empty" if cy == idx and cx == 2 else "busy"
+    if co_submit_draft is not None:
+        prefix = co_submit_draft + "\n"
+        if not payload.startswith(prefix):
+            return "unknown"
+        outgoing = payload[len(prefix):]
+        relative_row = cy - idx
+        if relative_row < 0 or relative_row >= len(parts) or cy >= bottom:
+            return "busy"
+        if any(part.rstrip() for part in parts[relative_row + 1:]):
+            return "busy"
+        candidate = "\n".join(part.rstrip() for part in parts[:relative_row + 1])
+        at_end = (relative_row == candidate.count("\n")
+                  and cx == 2 + cell_width(parts[relative_row].rstrip()))
+        if claude_combined_input_evidence("text", candidate, "claude",
+                                          co_submit_draft, outgoing, at_end):
+            if fingerprint_path is not None:
+                fingerprint_path.write_text(
+                    claude_combined_fingerprint(candidate, cx, relative_row),
+                    encoding="ascii")
+            return "own"
+        return "busy"
+    observed = generic_observed
     expected_y = idx + payload.count("\n")
     expected_x = 2 + cell_width(payload.rsplit("\n", 1)[-1])
     if observed == wanted and (cy, cx) == (expected_y, expected_x):
@@ -279,10 +326,16 @@ def contains_payload(text: str, payload: str) -> bool:
     return bool(wanted) and wanted in "".join(text.split())
 
 
-def observe(screen: str, payload: str, cx: int, cy: int, path: pathlib.Path) -> str:
+def observe(screen: str, payload: str, cx: int, cy: int, path: pathlib.Path,
+            co_submit_draft: str | None = None) -> str:
     """Write only a validated exact draft to a caller-owned private scratch file."""
     path.write_text("", encoding="utf-8")
-    result = state(screen, payload, cx, cy)
+    result = state(screen, payload, cx, cy, co_submit_draft,
+                   path if co_submit_draft is not None else None)
+    if co_submit_draft is not None:
+        # Combined delivery owns only the validated hash fingerprint; never
+        # turn a changed or unsupported post-paste composer into a saved draft.
+        return result
     if result != "busy":
         return result
     lines = strip_ansi(screen).splitlines()
@@ -324,24 +377,37 @@ def main() -> int:
     if len(sys.argv) == 2 and sys.argv[1] == "--strip-ansi":
         sys.stdout.write(strip_ansi(sys.stdin.read()))
         return 0
+    args = sys.argv[1:]
     observe_path = None
-    if len(sys.argv) == 6 and sys.argv[1] == "--observe-file":
-        observe_path = pathlib.Path(sys.argv[2])
-        sys.argv[1:3] = []
-    if len(sys.argv) != 4:
+    co_submit_draft = None
+    while args and args[0].startswith("--"):
+        if len(args) >= 2 and args[0] == "--observe-file" and observe_path is None:
+            observe_path = pathlib.Path(args[1])
+            del args[:2]
+        elif len(args) >= 2 and args[0] == "--co-submit-draft-file" and co_submit_draft is None:
+            try:
+                co_submit_draft = pathlib.Path(args[1]).read_bytes().decode("utf-8")
+            except (OSError, UnicodeError):
+                print("unknown")
+                return 0
+            del args[:2]
+        else:
+            return 64
+    if len(args) != 3 or (co_submit_draft is not None and observe_path is None):
         return 64
     try:
-        payload = pathlib.Path(sys.argv[1]).read_bytes().decode("utf-8")
+        payload = pathlib.Path(args[0]).read_bytes().decode("utf-8")
         screen = sys.stdin.read()
     except (OSError, UnicodeError):
         print("unknown")
         return 0
     try:
-        cx, cy = int(sys.argv[2]), int(sys.argv[3])
+        cx, cy = int(args[1]), int(args[2])
     except (IndexError, ValueError):
         print("unknown")
         return 0
-    print(observe(screen, payload, cx, cy, observe_path) if observe_path else state(screen, payload, cx, cy))
+    print(observe(screen, payload, cx, cy, observe_path, co_submit_draft)
+          if observe_path else state(screen, payload, cx, cy))
     return 0
 
 

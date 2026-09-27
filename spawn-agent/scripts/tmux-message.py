@@ -110,7 +110,7 @@ def composer(frame):
     return Input("unknown")
 
 
-def records(frame, inp):
+def records(frame, inp, strict_claude_submitted=False):
     """Candidate receipts outside the live composer, with semantic row markers.
 
     A new occurrence is required relative to the pre-paste history. Assistant
@@ -136,6 +136,10 @@ def records(frame, inp):
                 queued = False
             continue
         kind = "queued" if queue_match else "submitted"
+        # Co-submit receipts use the measured flush-left Claude prompt. Do not
+        # let an indented quote or tool transcript masquerade as a user turn.
+        if strict_claude_submitted and kind == "submitted" and not line.startswith("❯"):
+            continue
         text = queue_match.group(1) if queue_match else match.group(2)
         end = index + 1
         while end < len(lines) and lines[end].startswith("  ") and lines[end].strip():
@@ -152,6 +156,70 @@ def records(frame, inp):
             continue
         result[(kind, normalized(text))] += 1
     return result
+
+
+def claude_combined_receipts(frame, inp, draft, payload):
+    """Count measured Claude user blocks with the co-submit blank separator.
+
+    Claude 2.1.283 can render an appended stable draft as a prompt row, one
+    blank separator, then two-space-indented payload rows. Keep this parser
+    specific to the known co-submit body; ordinary receipt parsing remains
+    unchanged. The existing receipt normalization is intentionally reused for
+    terminal wrapping and indentation.
+    """
+    if inp.harness != "claude" or inp.kind in {"unknown", "modal"}:
+        return 0
+    visible = frame.raw.splitlines()
+    history = frame.history.splitlines() if frame.history else visible
+    prefix_len = max(0, len(history) - len(visible))
+    rows = history[:prefix_len + inp.start]
+    lines = [styles.strip_ansi(row) for row in rows]
+    expected_form = normalized(draft + "\n" + payload)
+    draft_form = normalized(draft)
+    count = 0
+    rule = lambda row: bool(row.strip()) and set(row.strip()) == {"─"}
+
+    for index, line in enumerate(lines):
+        # The measured submitted Claude prompt is flush-left. An indented glyph
+        # can occur inside assistant/tool prose and is not a native user row.
+        if not line.startswith("❯"):
+            continue
+        prompt = PROMPT.match(line)
+        if not prompt or prompt.group(1) != "❯":
+            continue
+        previous = next((row for row in reversed(lines[:index]) if row.strip()), "")
+        if rule(previous):
+            continue
+
+        draft_rows = [prompt.group(2)]
+        end = index + 1
+        while normalized("\n".join(draft_rows)) != draft_form:
+            if end >= len(lines) or not lines[end].startswith("  ") or not lines[end].strip():
+                break
+            draft_rows.append(lines[end][2:])
+            end += 1
+        if normalized("\n".join(draft_rows)) != draft_form:
+            continue
+        # Exactly one measured blank row separates the visible stale draft
+        # from the appended payload. Other blank/cropped layouts stay unknown.
+        if end >= len(lines) or lines[end].strip():
+            continue
+        end += 1
+        payload_rows = []
+        while end < len(lines) and lines[end].startswith("  ") and lines[end].strip():
+            payload_rows.append(lines[end][2:])
+            end += 1
+        if not payload_rows:
+            continue
+        body = "\n".join(draft_rows + payload_rows)
+        following = next((row for row in lines[end:] if row.strip()), "")
+        # Match records()' guards against a composer archived by a full-screen
+        # redraw; that box is not a submitted user row.
+        if FOOTER.match(following) or rule(following):
+            continue
+        if normalized(body) == expected_form:
+            count += 1
+    return count
 
 
 def paste_evidence(inp, payload):
@@ -313,7 +381,17 @@ class Sender:
         if self.stale_draft_length:
             if inp.kind != "text":
                 return False
+            # Claude 2.1.283 replaces a long bracketed paste with this exact
+            # visible shape. The known draft prefix, one current paste marker,
+            # its appended-line count, harness and end cursor are consistent
+            # with the one append operation above; the hidden bytes stay opaque.
+            # The optional expansion hint is transient and ignored.
+            if self.draft_harness == "claude":
+                return styles.claude_combined_input_evidence(
+                    inp.kind, inp.text, inp.harness, self.original_draft,
+                    self.payload, self.at_end(inp))
             if inp.text == self.expected:
+                # Preserve Codex's previously accepted exact-text behavior.
                 return True
             # Codex compresses the appended newline+payload inline after the
             # untouched draft. Readiness excluded all old paste markers.
@@ -454,7 +532,6 @@ class Sender:
             if (self.clock() >= self.readiness_deadline or check.kind != "empty"
                     or check.harness != command.harness or not self.at_end(check)):
                 raise DeliveryError("input-changed-after-clear", 3)
-        baseline = records(before, check)
         literal = getattr(self.o, "literal_exit", False)
         if literal and (self.payload != "/exit" or check.harness != "claude"):
             raise DeliveryError("literal-exit-requires-claude-exit")
@@ -465,6 +542,10 @@ class Sender:
             self.original_draft = check.text
             self.draft_harness = check.harness
             self.expected = check.text + "\n" + self.payload
+        claude_co_submit = bool(self.stale_draft_length and self.draft_harness == "claude")
+        baseline = records(before, check, strict_claude_submitted=claude_co_submit)
+        claude_receipt_baseline = (claude_combined_receipts(
+            before, check, self.original_draft, self.payload) if claude_co_submit else 0)
         if literal:
             self.pasted = True  # A failed input command can still change the composer.
             self.tmux.keys("-l", self.payload)
@@ -488,13 +569,14 @@ class Sender:
         evidence_since = None
         last_enter = None
         input_disappeared = False
+        max_enters = 1 if literal or claude_co_submit else 2
         accepted_forms = {normalized(self.expected)}
         while self.clock() < deadline:
             frame, current = self.sample()
             now = self.clock()
             if now >= deadline:
                 break
-            receipt = records(frame, current)
+            receipt = records(frame, current, strict_claude_submitted=claude_co_submit)
             if literal and self.enters == 1 and current.kind == "unknown":
                 resumed = resume_records(frame)
                 fresh = [session for session, count in resumed.items() if count > resume_before[session]]
@@ -509,6 +591,10 @@ class Sender:
             for kind in ("submitted", "queued"):
                 if not literal and self.enters and any(receipt[(kind, form)] > baseline[(kind, form)] for form in accepted_forms):
                     return {"status": "delivered", "receipt": kind, "enters": self.enters}
+            if (claude_co_submit and self.enters
+                    and claude_combined_receipts(frame, current, self.original_draft, self.payload)
+                    > claude_receipt_baseline):
+                return {"status": "delivered", "receipt": "submitted", "enters": self.enters}
             if current.kind == "modal":
                 raise DeliveryError("modal-after-paste", 3)
             if owned is not None and current.kind == "empty":
@@ -516,7 +602,7 @@ class Sender:
             evidence = self.input_evidence(current)
             if evidence:
                 fp = current.fingerprint()
-                if owned is not None and fp != owned and self.enters:
+                if owned is not None and fp != owned and (self.enters or claude_co_submit):
                     raise DeliveryError("input-changed-after-paste", 3)
                 if owned != fp:
                     evidence_since = now
@@ -524,10 +610,10 @@ class Sender:
                 accepted_forms.add(normalized(current.text))
                 due = start + self.o.submit_delay if last_enter is None else last_enter + self.o.retry_wait
                 if (now >= due and now - evidence_since >= self.o.poll_interval
-                        and self.enters < (1 if literal else 2) and not input_disappeared):
+                        and self.enters < max_enters and not input_disappeared):
                     # Refresh receipt AND input immediately before each Enter.
                     confirm, live = self.sample()
-                    fresh = records(confirm, live)
+                    fresh = records(confirm, live, strict_claude_submitted=claude_co_submit)
                     for kind in ("submitted", "queued"):
                         if not literal and self.enters and any(fresh[(kind, form)] > baseline[(kind, form)] for form in accepted_forms):
                             return {"status": "delivered", "receipt": kind, "enters": self.enters}
