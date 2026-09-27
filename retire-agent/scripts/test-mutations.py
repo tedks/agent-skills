@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Demonstrate that safety tests detect removed guards, without editing source."""
 import os
+import shutil
 from pathlib import Path
 import subprocess
 import sys
@@ -32,6 +33,8 @@ mutations = [
     ('Codex footer UI padding', 'tail[0].rstrip()', 'tail[0]', 'test_codex_ui_footer_trailing_padding_is_allowed'),
     ('cached retired publication', "if self.state.get('status') == 'retired' and not self.exit_verified:", 'if False:', 'test_retired_resume_lost_pane_preserves_historical_receipt'),
     ('cached retired audit', "'exit_confirmed': self.exit_verified", "'exit_confirmed': self.state.get('status') == 'retired'", 'test_forged_retired_status_cannot_upgrade_pending_receipt'),
+    ('native binding before exit baseline', "            self.verify_native_session(session_id)\n            self.state['exit_notice']", "            pass\n            self.state['exit_notice']", 'test_wrong_native_session_shard_never_requests_exit'),
+    ('native binding before sender input', "            self.verify_native_session(preserved.get('session_id', 'unknown'))", '            pass', 'test_send_rechecks_binding_after_notice_baseline'),
     ('preexit Codex native UUID binding', "proof.get('session_id') != session_id", 'False', 'test_wrong_native_session_shard_never_requests_exit'),
     ('preexit Claude native UUID binding', 'any(value != session_id for value, _ in bindings)', 'False', 'test_claude_wrong_native_session_shard_never_requests_exit'),
     ('Claude process pointer lifetime', "fields[1:] != [actor['start'], actor['boot']]", 'False', 'test_claude_stale_process_pointer_never_requests_exit'),
@@ -84,6 +87,11 @@ for label, before, after, test in mutations:
         mutated = mutated.replace(before, after, 2 if label == 'commit ownership' else 1)
     with tempfile.TemporaryDirectory(prefix='retire-mutation-') as directory:
         directory = Path(directory)
+        helper = directory / 'mcp/claude-introspect/codex_status.py'
+        helper.parent.mkdir(parents=True)
+        shutil.copyfile(HERE.parents[3] / 'mcp/claude-introspect/codex_status.py', helper)
+        directory = directory / '.claude/skills/retire-agent/scripts'
+        directory.mkdir(parents=True)
         (directory / 'retire.py').write_text(mutated)
         entry = directory / 'retire.sh'
         entry.write_bytes((HERE / 'retire.sh').read_bytes())

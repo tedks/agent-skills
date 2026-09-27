@@ -72,7 +72,7 @@ def main():
     worktree = args.worktree.resolve()
     source_root = HERE.parents[3]
     top = Path(require(run(['git', '-C', worktree, 'rev-parse', '--show-toplevel']))).resolve()
-    if top == source_root or source_root in top.parents or top != worktree:
+    if top == source_root or source_root in top.parents or top in source_root.parents or top != worktree:
         parser.error('--worktree must be the top of an exclusively owned disposable Git directory, separate from source')
     def common(directory):
         return Path(require(run(['git', '-C', directory, 'rev-parse', '--path-format=absolute', '--git-common-dir']))).resolve()
@@ -123,6 +123,7 @@ def main():
     tmux = ['tmux', '-L', label]
     environment = dict(os.environ, SPAWN_TMUX_LABEL=label, RETIRE_REPO=str(repo),
                        RETIRE_PRIVATE_CHECK=str(checker), RETIRE_SPAWN_SKILL=str(args.shared_skill.resolve()))
+    environment.pop('CODEX_SESSION_ID', None)
     environment.pop('TMUX', None)
     environment.pop('SPAWN_TMUX_SOCKET', None)
     report = {'selected_harness': args.harness, 'combined_acceptance': args.harness == 'both',
@@ -215,11 +216,11 @@ def main():
             if harness == 'codex' and args.baseline_script:
                 red = run([args.baseline_script.resolve(), pane, '--retire', '--wait', '1', '--poll', '.2'], env=environment)
                 (directory / 'baseline-red.json').write_text(json.dumps({'returncode': red.returncode, 'stdout': red.stdout, 'stderr': red.stderr}, indent=2))
-                report['baseline'] = 'verified-original-history-failure'
                 assert red.returncode == 2 and 'malformed retirement state field: id' in red.stderr, red.stderr
                 assert foreign.read_bytes() == foreign_bytes
                 assert not list(records.glob('*-offer.txt')), 'baseline sent an offer before failing'
                 assert not [path for path in records.glob('*.json') if re.fullmatch(r'[0-9a-f]{32}', path.stem)], 'baseline created event state before failing'
+                report['baseline'] = 'verified-original-history-failure'
             # Deliberately leave this owned ordinary draft unsent. The published
             # sender must preserve and co-submit it with the retirement offer.
             if args.stale_offer_draft:

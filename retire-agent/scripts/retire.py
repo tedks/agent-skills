@@ -242,16 +242,8 @@ class Retirement:
         if not re.fullmatch(r'[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}', session_id):
             raise Stop('handoff verified; exit pending verifiable native session UUID')
         if original['agent'] == 'codex':
-            source = Path(__file__).resolve()
-            roots = [source.parents[4]] if len(source.parents) > 4 else []
-            installed = Path.home() / '.codex/skills/retire-agent/scripts/retire.py'
-            if installed.is_file() and len(installed.resolve().parents) > 4:
-                roots.append(installed.resolve().parents[4])
-            helper = next((root / 'mcp/claude-introspect/codex_status.py' for root in roots
-                           if (root / 'mcp/claude-introspect/codex_status.py').is_file()), None)
-            if helper is None:
-                raise Stop('native Codex session reader unavailable')
             try:
+                helper = Path(__file__).resolve().parents[4] / 'mcp/claude-introspect/codex_status.py'
                 spec = importlib.util.spec_from_file_location('retire_codex_status', helper)
                 if spec is None or spec.loader is None:
                     raise Stop('native Codex session reader unavailable')

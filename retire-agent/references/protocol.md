@@ -151,8 +151,13 @@ present pointer must contain the same UUID, process start ticks and boot ID;
 missing, stale, malformed or conflicting bindings leave handoff pending before
 exit input. No inherited environment UUID, newest-file search, cwd or timestamp
 inference establishes attribution. The actor is rechecked around lookup and
-again immediately before the sender call. These checks cannot atomically prevent
-a native session switch during the shared sender's readiness interval.
+again immediately before the sender call. Claude's pointer is asynchronous:
+it reflects the last PreToolUse hook update. A `/clear` or `/resume` after DONE
+without a later tool call can leave the old pointer, even before the sender's
+readiness interval. Neither that window nor a switch during readiness can be
+atomically excluded; an old pointer may leave a preserved handoff pending after
+exit because the new native notice names a different session. The installed
+capture hook and canonical Codex reader are prerequisites, not inferred IDs.
 Exit notice capture joins wrapped rows and reads retained full scrollback;
 history eviction or unsupported native layouts still leave completion pending.
 
@@ -162,7 +167,8 @@ reverify the preserved blob and receipt before exit or successor.
 History discovery owns only `<32-lowercase-hex-event>.json` state filenames
 in the private retirement directory. Other JSON names, including independent
 publication receipts, are left untouched and do not block a new offer.
-Malformed event state records stop with their bytes preserved for operator reconciliation.
+Malformed event state records stop with their bytes preserved for operator
+reconciliation.
 After a failed immutable-shard or receipt revalidation, failure handling only
 records the private attempt audit; it does not publish a handoff-authorizing
 receipt from cached state. Repeated resumes preserve the rejected evidence
@@ -180,7 +186,8 @@ budget ends, continue with the same mode and target using
 Process exit has a separate fast poll. The shared sender has its own bounded
 waits. Exit may end the harness before a sender receipt; the original process
 end and fresh same-session native notice remain mandatory. Offer acceptance
-and DONE remain separate. An attempted successor launch is never automatically repeated, including after a crash or
+and DONE remain separate. An attempted successor launch is never automatically
+repeated, including after a crash or
 unconfirmed initial delivery. Inspect the launcher's pane/receipt before any
 deliberate operator recovery. There is no ambiguous-send override or manual
 relay in this script.
@@ -188,7 +195,8 @@ relay in this script.
 Screen markers are heuristics, not atomic human exclusion or cryptographic
 actor attribution. An assistant/user deliberately spoofing another actor's
 terminal framing can be ambiguous. Schema validation checks fields and resource
-receipts, not the truth of claims, PR hashes, model identification or operational prose; the caller must audit those before requesting retirement.
+receipts, not the truth of claims, PR hashes, model identification or operational
+prose; the caller must audit those before requesting retirement.
 Observation consumes only spawn-agent's published `read_response_rows(pane,
 socket)` and `DeliveryError` Python contract. It excludes archived redraws and
 the live composer. Keep the final marker visible until the controller records

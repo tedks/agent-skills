@@ -8,6 +8,7 @@ import re
 import signal
 import select
 import shlex
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -53,7 +54,7 @@ def terminal(directory, mode):
     if mode == 'missing-native-fd':
         native_fd.close()
     if mode.startswith('claude'):
-        state_dir = Path(os.environ['CLAUDE_CONFIG_DIR']) / 'session-state'
+        state_dir = Path(os.environ['HOME']) / '.claude/session-state'
         state_dir.mkdir(parents=True, exist_ok=True)
         start = Path('/proc/self/stat').read_text().rsplit(')', 1)[1].split()[19]
         boot = Path('/proc/sys/kernel/random/boot_id').read_text().strip()
@@ -372,7 +373,7 @@ class Tests(unittest.TestCase):
         command = shlex.join([sys.executable, str(fixture), '--terminal', str(self.directory), mode])
         # argv[0] is the harness identity; outer shell survives process exit.
         inner = 'exec -a ' + ('node' if node else ('claude' if mode.startswith('claude') else 'codex')) + ' ' + command
-        outer = shlex.join(['env', 'RETIRE_TEST_PYTHON=' + sys.executable, 'CODEX_HOME=' + str(self.directory / 'codex-config'), 'CLAUDE_CONFIG_DIR=' + str(self.directory / 'claude-config'), 'bash', '-c', inner]) + '; exec bash --norc'
+        outer = shlex.join(['env', 'RETIRE_TEST_PYTHON=' + sys.executable, 'HOME=' + str(self.directory / 'actor-home'), 'CODEX_HOME=' + str(self.directory / 'codex-config'), 'CLAUDE_CONFIG_DIR=' + str(self.directory / 'claude-config'), 'bash', '-c', inner]) + '; exec bash --norc'
         options = ['-c', str(self.directory)] if relative else []
         pane = self.command(*self.tmux, 'new-session', '-d', '-P', '-F', '#{pane_id}', '-x', '240', '-y', '40', *options, outer)
         self.pane = pane
@@ -403,6 +404,11 @@ class Tests(unittest.TestCase):
     def instrument(self, before, after):
         stage = self.directory / ('instrumented-' + uuid.uuid4().hex)
         stage.mkdir()
+        helper = stage / 'mcp/claude-introspect/codex_status.py'
+        helper.parent.mkdir(parents=True)
+        shutil.copyfile(HERE.parents[3] / 'mcp/claude-introspect/codex_status.py', helper)
+        stage = stage / '.claude/skills/retire-agent/scripts'
+        stage.mkdir(parents=True)
         source = self.source()
         if before not in source:
             self.fail('INVALID-INSTRUMENTATION: missing stable anchor')
@@ -531,6 +537,7 @@ class Tests(unittest.TestCase):
         state = self.state()[1]
         self.assertTrue(state.get('handoff_receipt'))
         self.assertNotIn('exit', state)
+        self.assertNotIn('exit_notice', state)
         self.assertFalse((self.directory / 'exit-order.json').exists())
 
     def assert_native_fd_pending(self, mode):
@@ -548,15 +555,62 @@ class Tests(unittest.TestCase):
 
     def test_claude_missing_pointer_never_requests_exit(self):
         self.actor('claude')
-        next((self.directory / 'claude-config/session-state').glob('current.*')).unlink()
+        next((self.directory / 'actor-home/.claude/session-state').glob('current.*')).unlink()
         result = self.invoke()
         self.assertEqual(result.returncode, 2, result.stderr)
         self.assertIn('native session binding differs or unavailable', result.stderr)
         self.assertNotIn('exit', self.state()[1])
 
+    def test_claude_conflicting_present_pointers_never_request_exit(self):
+        self.actor('claude')
+        pointer = next((self.directory / 'actor-home/.claude/session-state').glob('current.*'))
+        configured = self.directory / 'claude-config/session-state' / pointer.name
+        configured.parent.mkdir(parents=True)
+        fields = pointer.read_text().split()
+        configured.write_text('bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb ' + ' '.join(fields[1:]) + '\n')
+        result = self.invoke()
+        self.assertEqual(result.returncode, 2, result.stderr)
+        self.assertIn('native session binding differs', result.stderr)
+        self.assertNotIn('exit', self.state()[1])
+        self.assertFalse((self.directory / 'exit-order.json').exists())
+
+    def test_send_rechecks_binding_after_notice_baseline(self):
+        self.actor('claude')
+        before = "        if phase == 'exit':\n            preserved = object_record"
+        after = ('        if phase == "exit":\n'
+                 '            pointer = self.repo.parent / "actor-home/.claude/session-state" / ("current." + str(self.state["identity"]["process"]["pid"]))\n'
+                 '            fields = pointer.read_text().split()\n'
+                 '            pointer.write_text("bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb " + " ".join(fields[1:]) + "\\n")\n' + before)
+        entry = self.instrument(before, after)
+        with patch.dict(os.environ, {'RETIRE_TEST_SCRIPT': str(entry)}):
+            result = self.invoke()
+        self.assertEqual(result.returncode, 2, result.stderr)
+        self.assertIn('native session binding differs', result.stderr)
+        state = self.state()[1]
+        self.assertIn('exit_notice', state)
+        self.assertNotIn('exit', state)
+        self.assertEqual(self.observed()['enters'], 1)  # offer only
+        self.assertFalse((self.directory / 'exit-order.json').exists())
+
+    def test_changed_binding_retry_never_requests_exit(self):
+        self.actor('claude-exit-draft')
+        self.assertEqual(self.invoke().returncode, 2)
+        path, state = self.state()
+        self.assertEqual(state['exit']['status'], 'deferred')
+        pointer = next((self.directory / 'actor-home/.claude/session-state').glob('current.*'))
+        fields = pointer.read_text().split()
+        pointer.write_text('bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb ' + ' '.join(fields[1:]) + '\n')
+        self.command(*self.tmux, 'send-keys', '-t', self.pane, 'C-u')
+        result = self.invoke('--resume', str(path), '--retry-deferred', 'exit')
+        self.assertEqual(result.returncode, 2, result.stderr)
+        self.assertIn('native session binding differs', result.stderr)
+        self.assertEqual(self.observed()['enters'], 1)
+        self.assertFalse((self.directory / 'exit-order.json').exists())
+        self.assertNotEqual(self.state()[1]['status'], 'retired')
+
     def test_claude_stale_process_pointer_never_requests_exit(self):
         self.actor('claude')
-        pointer = next((self.directory / 'claude-config/session-state').glob('current.*'))
+        pointer = next((self.directory / 'actor-home/.claude/session-state').glob('current.*'))
         fields = pointer.read_text().split()
         pointer.write_text(fields[0] + ' 0 ' + fields[2] + '\n')
         result = self.invoke()
@@ -705,13 +759,28 @@ class Tests(unittest.TestCase):
                                      '--shared-skill', str(SHARED.parent)], text=True, capture_output=True, timeout=5)
             self.assertEqual(result.returncode, code, result.stderr)
             self.assertFalse(evidence.exists())
-        with tempfile.TemporaryDirectory(prefix='retire-owned-nested-', dir=HERE.parents[3]) as nested:
-            self.command('git', 'init', '-b', 'master', nested)
-            result = subprocess.run([sys.executable, str(script), '--preflight-only',
-                                     '--worktree', nested, '--evidence', str(self.directory / 'nested-evidence'),
-                                     '--shared-skill', str(SHARED.parent)], text=True, capture_output=True, timeout=5)
-            self.assertEqual(result.returncode, 2, result.stderr)
-            self.assertFalse((self.directory / 'nested-evidence').exists())
+        fake = self.directory / 'fake-source'
+        fake_scripts = fake / '.claude/skills/retire-agent/scripts'
+        fake_scripts.mkdir(parents=True)
+        for name in ('test-retire-native.py', 'retire.py'):
+            shutil.copyfile(HERE / name, fake_scripts / name)
+        nested = fake / 'owned-nested'
+        self.command('git', 'init', '-b', 'master', str(nested))
+        result = subprocess.run([sys.executable, str(fake_scripts / 'test-retire-native.py'), '--preflight-only',
+                                 '--worktree', str(nested), '--evidence', str(self.directory / 'nested-evidence'),
+                                 '--shared-skill', str(SHARED.parent)], text=True, capture_output=True, timeout=5)
+        self.assertEqual(result.returncode, 2, result.stderr)
+        self.assertFalse((self.directory / 'nested-evidence').exists())
+        descendant_scripts = cwd / 'fake-source/.claude/skills/retire-agent/scripts'
+        descendant_scripts.mkdir(parents=True)
+        for name in ('test-retire-native.py', 'retire.py'):
+            shutil.copyfile(HERE / name, descendant_scripts / name)
+        result = subprocess.run([sys.executable, str(descendant_scripts / 'test-retire-native.py'), '--preflight-only',
+                                 '--worktree', str(cwd), '--evidence', str(self.directory / 'ancestor-evidence'),
+                                 '--shared-skill', str(SHARED.parent)], text=True, capture_output=True, timeout=5)
+        self.assertEqual(result.returncode, 2, result.stderr)
+        self.assertIn('exclusively owned disposable', result.stderr)
+        self.assertFalse((self.directory / 'ancestor-evidence').exists())
 
     def test_same_session_notice_cannot_retire_live_actor(self):
         self.actor('hold-notice')
@@ -1151,7 +1220,7 @@ class Tests(unittest.TestCase):
     def test_independent_exit_with_replacement_refuses_successor(self):
         self.actor()
         inner = 'exec -a codex ' + shlex.join([sys.executable, str(Path(__file__).resolve()), '--terminal', str(self.directory), 'done'])
-        outer = shlex.join(['env', 'RETIRE_TEST_PYTHON=' + sys.executable, 'CODEX_HOME=' + str(self.directory / 'codex-config'), 'CLAUDE_CONFIG_DIR=' + str(self.directory / 'claude-config'), 'bash', '-c', inner]) + '; exec bash --norc'
+        outer = shlex.join(['env', 'RETIRE_TEST_PYTHON=' + sys.executable, 'HOME=' + str(self.directory / 'actor-home'), 'CODEX_HOME=' + str(self.directory / 'codex-config'), 'CLAUDE_CONFIG_DIR=' + str(self.directory / 'claude-config'), 'bash', '-c', inner]) + '; exec bash --norc'
         before = "        if not self.state.get('exit'):\n"
         after = ('        signal = self.repo.parent / "human-independent-exit"\n'
                  '        signal.touch()\n'

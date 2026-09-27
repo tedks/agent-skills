@@ -10,9 +10,12 @@ A saved handoff and an ended agent process are separate receipts. Preserve
 human input and leave a session open when either receipt cannot be established.
 Read [the shard and recovery contract](references/protocol.md) before invoking
 the script. Linux `/proc`, tmux, Git, Python 3.11+ and the installed spawn-agent
-skill are required. The sender must provide the stable ordinary draft
-co-submission contract from dotfiles PR #156, plus guarded typed Claude exit. Defaults: `~/Projects/off-duty` on `master`, origin private
-on GitHub, and `~/Projects/orgs/master/doctrine/ROLES.md`.
+skill are required. Keep the canonical dotfiles repository layout: Codex exit
+verification loads `mcp/claude-introspect/codex_status.py`. Claude requires the
+installed `capture-session-state.sh` PreToolUse hook and its per-process pointer.
+The sender must provide stable ordinary draft co-submission and guarded typed
+Codex / literal Claude exits. Defaults: `~/Projects/off-duty` on `master`,
+origin private on GitHub, and `~/Projects/orgs/master/doctrine/ROLES.md`.
 
 ## Modes
 
@@ -57,7 +60,8 @@ Record attempts privately without storing pane contents or unfinished human
 text. Before exit, match the immutable shard UUID to the pinned native process:
 Codex uses its unique writable CLI rollout descriptor; Claude uses its
 per-process session pointer with start/boot identity. Missing or conflicting
-bindings leave the handoff pending without exit input. Verify all pinned original processes ended and a fresh native resume notice
+bindings leave the handoff pending without exit input. Verify all pinned
+original processes ended and a fresh native resume notice
 names the immutable shard's same session UUID; an exit transport result alone is
 insufficient. Never kill a session. Do not stop unrelated services or delete
 worktrees, branches, transcripts, or another actor's files.
