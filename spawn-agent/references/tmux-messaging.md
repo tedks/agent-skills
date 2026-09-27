@@ -10,8 +10,9 @@ the resolved pane ID; deletion afterward causes failure rather than retargeting.
 The public sender uses `tmux-message.py`. It returns success only after observing
 new application receipt evidence. The older `claude-send.sh` remains available
 for compatibility, with transport-only semantics. Its measured busy Codex queue
-layouts verify only single-line input, so nonempty drafts there defer before
-input; empty composers still permit supported short messages. Both entry points use `--typed-command`
+layouts verify only single-line input, so ordinary drafts there defer before
+input. Eligible command drafts can be cleared first; empty composers permit
+supported short messages. Both entry points use `--typed-command`
 explicitly for single-line slash commands; ordinary messages retain bracketed paste.
 
 ## Flow
@@ -59,6 +60,32 @@ length. Visible text outside this whole-paste marker is mixed input and stops
 submission. Existing `[Pasted text …]` markers retain their surrounding-text
 checks. A retained file alone never establishes which paste is on screen.
 
+## Stable command drafts
+
+A stable command-shaped draft is cleared without executing it before the
+outgoing message is sent. The message supplies context that may pre-empt the
+command. This is the explicit exception to ordinary draft preservation.
+Only an exact visible single-line command in a recognized composer is eligible:
+slash command syntax follows the validated `--typed-command` grammar and
+200-byte limit; a supported single-line `!` shortcut follows the same visible
+shape limits. Command names are recognized syntactically, so an existing draft
+such as `/tmp is full again` is command-shaped. Outgoing slash-looking prose
+still uses ordinary paste unless `--typed-command` is explicit.
+
+Recheck the stable draft, verify its end cursor, send Ctrl-U once, and wait
+within the original readiness budget for an empty composer of the same
+harness. Incomplete repaint and unchanged command frames receive no further
+keys. Known new text, modal, harness or cursor changes stop the attempt. Recheck
+empty input before dispatching the outgoing payload. Never execute the discarded
+command or retry clearing blindly. Long, malformed, multiline or unsupported
+command-like drafts defer; replay residue and collapsed markers take precedence
+and cannot authorize clearing.
+
+Results include `cleared_command_draft_length` and `clear_attempted`, never the
+command's contents. A failure after a clear attempt is ambiguous even if
+`input_attempted` and `paste_attempted` are false: those fields describe outgoing
+input only. The retained pending file still contains only the outgoing payload.
+
 ## Options
 
 Options precede actual message text or `--prompt-file FILE`:
@@ -95,7 +122,8 @@ leading whitespace, trailing Unicode whitespace or semicolons, commands over 200
 and ordinary prose are rejected. These limits avoid tmux argument loss and
 ambiguous wrapped or trimmed composer evidence. Ordinary messages retain
 bracketed paste. Typed commands require an empty composer: joining a draft
-would change command semantics, so stable drafts defer in this mode. Typed
+would change command semantics, so ordinary stable drafts defer in this mode.
+Eligible command drafts are cleared and verified empty first. Typed
 input requires exact visible command text; a collapsed paste marker cannot
 authorize its Enter. Failure JSON distinguishes `input_attempted` from
 `paste_attempted` and labels `input_method`; an ambiguous typed attempt must
@@ -105,7 +133,8 @@ Payloads are nonblank UTF-8 with no control characters except newlines. Message
 bytes, including trailing whitespace/newlines, are preserved in the paste.
 
 Exit 0 emits delivered JSON on stdout. Failures emit JSON on stderr. Exit 2
-means deferred before input. Exit 3 means ambiguous after an input attempt.
+means deferred before composer mutation. Exit 3 means ambiguous after a clear
+or outgoing input attempt.
 Use `input_attempted` to determine whether any input may have occurred;
 `paste_attempted` applies to bracketed paste, except that the legacy
 `--literal-exit` mode retains its compatibility meaning of any input attempt.

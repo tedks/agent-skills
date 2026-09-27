@@ -70,7 +70,11 @@ Observe the composer twice, one `--stable-window` apart (default: the
 `human-typing`; use `--backoff --max-wait 60` for bounded waiting. An unchanged
 draft is preserved: append a newline and the outgoing message, verify the
 combined input, then submit both. Results record only the co-submitted draft
-length, never its contents. Modals and unsupported layouts still defer.
+length, never its contents. Exception: a verified stable command-shaped draft
+is cleared without execution, then the outgoing message is sent only after
+empty input is verified. Its context may pre-empt the command. Results include
+`cleared_command_draft_length` and `clear_attempted`, never draft contents.
+Changing input, replay residue, modals and unsupported layouts still defer.
 Claude prompt suggestions are disabled fleet-wide; an ambiguous suggestion
 frame retains the conservative probe. One pane lock serializes cooperating
 senders; it cannot lock out human typing.
@@ -81,8 +85,8 @@ with the same draft preservation and receipt checks. Claude may treat a pasted
 slash command as ordinary text. This option accepts one single-line slash command and optional arguments; it
 rejects control characters, newlines, leading whitespace, and ordinary prose.
 Typed commands require an empty composer: appending them to a draft would
-turn the command into ordinary message text. Stable drafts therefore defer
-for command delivery.
+turn the command into ordinary message text. Ordinary stable drafts therefore defer
+for command delivery; eligible command drafts are cleared first.
 
 Results are JSON: exit 0 is `status=delivered` with a `submitted`, `queued`, or
 `command` receipt. Exit 2 is deferred before paste; exit 3 is ambiguous after
