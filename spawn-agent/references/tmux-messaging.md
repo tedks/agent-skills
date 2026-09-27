@@ -39,9 +39,10 @@ explicitly for single-line slash commands; ordinary messages retain bracketed pa
    suggestion retains the conservative Space/Backspace probe; suggestions are
    disabled fleet-wide, so normal idle Claude input is empty.
 3. Snapshot receipt history, recheck input, and paste actual text once through
-   tmux bracketed paste. Compare the resulting input with the expected text,
-   tolerating wrapping/whitespace layout, or recognize a newly introduced
-   collapsed paste marker with surrounding text consistent with the payload.
+   tmux bracketed paste. For new input, compare the result with the expected
+   text, tolerating wrapping/whitespace layout, or recognize a newly introduced
+   collapsed paste marker. For co-submission, require the exact combined input
+   or the measured Codex append marker described below.
 4. Send Enter after paste evidence and the settling delay. Wait for a new
    submitted user row or pending queue entry. If the same input remains after
    the retry interval, recheck and send Enter once more. Never paste again.
@@ -59,6 +60,19 @@ whole input and N matches the payload's Unicode code-point or UTF-16-unit
 length. Visible text outside this whole-paste marker is mixed input and stops
 submission. Existing `[Pasted text …]` markers retain their surrounding-text
 checks. A retained file alone never establishes which paste is on screen.
+
+For ordinary co-submission, Codex 0.157.1 can display the unchanged draft
+immediately followed by `[Pasted Content N chars]`, with the appended newline
+inside that collapsed block. The public sender accepts this measured shape
+only when the original draft prefix is exact, the marker is the entire remaining
+input, the original and current harness are Codex, and the cursor is at the
+verified end. N must equal the newline plus outgoing payload's Unicode
+code-point or UTF-16-unit count. Readiness rejects pre-existing paste markers
+case-insensitively, so this evidence belongs to the current paste. Changed
+prefixes, extra text, wrong counts and unsupported markers cannot authorize
+Enter. A new matching submitted or queued receipt is still required; no replay
+is introduced. Other wrapped/collapsed co-submission shapes remain unsupported.
+The compatibility sender retains its exact visible-input limits.
 
 ## Stable command drafts
 

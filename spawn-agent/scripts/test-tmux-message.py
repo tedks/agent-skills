@@ -917,6 +917,105 @@ assert screen.observe(frame, 'outgoing', 6, 1, pathlib.Path(sys.argv[2])) == 'dr
         self.assertEqual(deliver(t)['receipt'], 'queued')
         self.assertEqual(t.enters, 1)
 
+    def test_measured_codex_stale_append_content_marker_submits(self):
+        draft = 'MSG-STABLE-OFFER: no tools for this smoke'
+        t = Terminal(payload='x' * 1515, draft=draft)
+        raw = (Path(__file__).parent / 'fixtures/claude-send/codex-stale-append-content.ansi').read_text()
+        row = next(i for i, line in enumerate(m.styles.strip_ansi(raw).splitlines()) if line.startswith('› '))
+        original_frame, original_paste = t.frame, t.paste
+        def paste(path):
+            original_paste(path)
+            self.assertEqual(path.read_text(), '\n' + t.payload)
+            t.draft = draft + '[Pasted Content 1516 chars]'
+        def frame():
+            if t.pastes and t.accepted_at is None: return m.Frame(raw, 70, row, raw)
+            return original_frame()
+        t.paste, t.frame = paste, frame
+        result = deliver(t)
+        self.assertEqual(result['status'], 'delivered')
+        self.assertEqual(result['stale_draft_length'], 41)
+        self.assertEqual((t.pastes, t.enters), (1, 1))
+
+    def test_stale_append_content_unicode_counts_recover_once(self):
+        payload = 'emoji 😀 context'
+        for count in {len('\n' + payload), len(('\n' + payload).encode('utf-16-le')) // 2}:
+            t = Terminal(payload=payload, draft='stale TICK', dropped=1)
+            original = t.paste
+            def paste(path):
+                original(path)
+                t.draft = 'stale TICK' + f'[Pasted Content {count} chars]'
+            t.paste = paste
+            self.assertEqual(deliver(t)['status'], 'delivered')
+            self.assertEqual((t.pastes, t.enters), (1, 2))
+
+    def test_stale_append_content_rejects_every_mixed_shape(self):
+        marker = '[Pasted Content 6 chars]'
+        for text, harness in (
+                ('stale TICK[Pasted Content 5 chars]', 'codex'),
+                ('stale TICK' + marker + ' human', 'codex'),
+                ('human stale TICK' + marker, 'codex'),
+                ('stale TIC' + marker, 'codex'), (marker, 'codex'),
+                ('stale TICK\n' + marker, 'codex'),
+                ('stale TICK[Pasted text #1 +20 lines]', 'codex'),
+                ('stale TICK' + marker + marker, 'codex'),
+                ('stale TICK' + marker, 'claude')):
+            with self.subTest(text=text, harness=harness):
+                t = Terminal(draft='stale TICK')
+                original = t.paste
+                def paste(path):
+                    original(path)
+                    t.draft, t.harness = text, harness
+                t.paste = paste
+                with self.assertRaisesRegex(m.DeliveryError, 'mixed-input-after-paste'): deliver(t)
+                self.assertEqual((t.pastes, t.enters), (1, 0))
+
+    def test_stale_append_content_old_marker_or_replay_never_repastes(self):
+        for draft in ('stale TICK[Pasted Content 6 chars]', 'stale TICK[pasted content 6 chars]',
+                      'stale TICK[PASTED CONTENT 6 CHARS]', 'stale TICK[pasted text #1 +2 lines]', 'stale TICK hello'):
+            t = Terminal(draft=draft)
+            with self.assertRaises(m.DeliveryError): deliver(t)
+            self.assertEqual(t.actions, [])
+
+    def test_stale_append_content_cannot_change_harness_or_cursor(self):
+        for initial_harness, wrong_cursor in (('claude', False), ('codex', True)):
+            t = Terminal(draft='stale TICK')
+            t.harness = initial_harness
+            original_paste, original_frame = t.paste, t.frame
+            def paste(path):
+                original_paste(path)
+                t.draft, t.harness = 'stale TICK[Pasted Content 6 chars]', 'codex'
+            def frame():
+                f = original_frame()
+                if t.pastes and wrong_cursor: f.x -= 1
+                return f
+            t.paste, t.frame = paste, frame
+            with self.assertRaisesRegex(m.DeliveryError, 'mixed-input-after-paste'): deliver(t)
+            self.assertEqual((t.pastes, t.enters), (1, 0))
+
+    def test_stale_append_content_two_attempts_never_repastes(self):
+        t = Terminal(draft='stale TICK', dropped=99)
+        original = t.paste
+        def paste(path):
+            original(path)
+            t.draft = 'stale TICK[Pasted Content 6 chars]'
+        t.paste = paste
+        with self.assertRaises(m.DeliveryError): deliver(t)
+        actions = list(t.actions)
+        with self.assertRaises(m.DeliveryError): deliver(t)
+        self.assertEqual(t.actions, actions)
+        self.assertEqual((t.pastes, t.enters), (1, 2))
+
+    def test_stale_append_content_cannot_use_old_receipt(self):
+        t = Terminal(draft='stale TICK', dropped=99)
+        t.history = '› stale TICK[Pasted Content 6 chars]\n\n'
+        original = t.paste
+        def paste(path):
+            original(path)
+            t.draft = 'stale TICK[Pasted Content 6 chars]'
+        t.paste = paste
+        with self.assertRaises(m.DeliveryError): deliver(t)
+        self.assertEqual((t.pastes, t.enters), (1, 2))
+
     def test_content_character_count_marker(self):
         for payload in ['x' * 1034, 'hello\nworld', 'emoji 😀']:
             for count in {len(payload), len(payload.encode('utf-16-le')) // 2}:

@@ -76,6 +76,10 @@ empty input is verified. Its context may pre-empt the command. Results include
 `cleared_command_draft_length` after empty input is verified, and
 `clear_attempted` whenever clearing was attempted, never draft contents.
 Changing input, replay residue, modals and unsupported layouts still defer.
+For ordinary co-submission, the public sender also supports the measured Codex
+inline append marker: unchanged draft prefix plus one fresh Content marker
+whose count covers the appended newline and payload, with a verified end
+cursor. Other unsupported combined layouts remain closed.
 Claude prompt suggestions are disabled fleet-wide; an ambiguous suggestion
 frame retains the conservative probe. One pane lock serializes cooperating
 senders; it cannot lock out human typing.

@@ -296,6 +296,8 @@ class Sender:
         self.typed = getattr(options, "typed_command", False)
         self.expected = payload
         self.stale_draft_length = 0
+        self.original_draft = ""
+        self.draft_harness = ""
         self.clear_attempted = False
         self.cleared_command_draft_length = 0
         if self.typed and getattr(options, "literal_exit", False):
@@ -309,7 +311,19 @@ class Sender:
         if self.typed:
             return inp.kind == "text" and inp.text == self.payload
         if self.stale_draft_length:
-            return inp.kind == "text" and inp.text == self.expected
+            if inp.kind != "text":
+                return False
+            if inp.text == self.expected:
+                return True
+            # Codex compresses the appended newline+payload inline after the
+            # untouched draft. Readiness excluded all old paste markers.
+            if (inp.harness == self.draft_harness == "codex" and self.at_end(inp)
+                    and inp.text.startswith(self.original_draft)):
+                marker = re.fullmatch(r"\[Pasted Content ([0-9]+) chars\]", inp.text[len(self.original_draft):])
+                appended = "\n" + self.payload
+                counts = {str(len(appended)), str(len(appended.encode("utf-16-le")) // 2)}
+                return bool(marker and marker.group(1) in counts)
+            return False
         return paste_evidence(inp, self.payload)
 
     def sample(self):
@@ -354,8 +368,7 @@ class Sender:
                     return frame, inp
                 if (inp.kind == "text" and (not self.typed or styles.command_draft(inp.text))
                         and not getattr(self.o, "literal_exit", False)
-                        and not PASTE.search(inp.text)
-                        and "[Pasted Content " not in inp.text
+                        and not re.search(r"\[Pasted (?:text|Content)", inp.text, re.I)
                         and not styles.contains_payload(inp.text, self.payload)
                         and (not styles.command_like(inp.text)
                              or (styles.command_draft(inp.text) and self.command_shape(frame, inp)))
@@ -448,6 +461,8 @@ class Sender:
         compact_before = styles.strip_ansi(before.history or before.raw).count("• Context compacted")
         if check.kind == "text":
             self.stale_draft_length = len(check.text)
+            self.original_draft = check.text
+            self.draft_harness = check.harness
             self.expected = check.text + "\n" + self.payload
         if literal:
             self.pasted = True  # A failed input command can still change the composer.
