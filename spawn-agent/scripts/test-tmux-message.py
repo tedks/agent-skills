@@ -439,6 +439,7 @@ class DeliveryTests(unittest.TestCase):
             path = Path(tmp) / 'draft'
             child = r"""
 import importlib.util, locale, pathlib, sys
+sys.dont_write_bytecode = True
 assert sys.flags.utf8_mode == 0
 assert locale.getpreferredencoding(False).lower() in {'ascii', 'ansi_x3.4-1968'}
 spec = importlib.util.spec_from_file_location('screen', sys.argv[1])
