@@ -29,6 +29,24 @@ def screen(text='', history='', harness='codex', footer='  Any model · branch',
     return m.Frame(raw, 2 + m.styles.cell_width(text.rsplit('\n', 1)[-1]), y, history + raw)
 
 
+CO_SUBMIT_FIXTURES = Path(__file__).with_name('fixtures') / 'claude-send'
+
+
+def claude_co_submit_frame(text='', receipt=True):
+    rows = (CO_SUBMIT_FIXTURES / 'claude-co-submit-receipt.ansi').read_text().splitlines()
+    if not receipt:
+        start = next(i for i, row in enumerate(rows)
+                     if row == '❯ Disposable retirement rehearsal reminder.')
+        end = next(i for i, row in enumerate(rows[start:], start)
+                   if row == '● ACK-QUEUE-3155db7fcc5e')
+        del rows[start:end + 1]
+    prompt = next(i for i, row in enumerate(rows) if row == '❯\u00a0')
+    rows[prompt] = '❯ ' + text
+    raw = '\n'.join(rows) + '\n'
+    return m.Frame(raw, 2 + m.styles.cell_width(text.rsplit('\n', 1)[-1]),
+                   prompt + text.count('\n'), raw)
+
+
 class Terminal:
     def __init__(self, payload='hello', dropped=0, collapsed=False, queued=False, delayed=0, draft='', mutate=False):
         self.payload, self.dropped, self.collapsed, self.queued = payload, dropped, collapsed, queued
@@ -1043,6 +1061,106 @@ assert screen.observe(frame, 'outgoing', 6, 1, pathlib.Path(sys.argv[2])) == 'dr
         t.harness = 'claude'
         result = deliver(t)
         self.assertEqual(result['receipt'], 'submitted')
+        self.assertEqual((t.pastes, t.enters), (1, 1))
+
+    def test_claude_combined_receipt_matches_captured_blank_separator_block(self):
+        draft = 'Disposable retirement rehearsal reminder.'
+        payload = (CO_SUBMIT_FIXTURES / 'claude-co-submit-payload.txt').read_text()
+        frame = claude_co_submit_frame()
+        inp = m.composer(frame)
+        self.assertEqual((inp.kind, inp.harness), ('empty', 'claude'))
+        self.assertEqual(m.records(frame, inp)[('submitted', m.normalized(draft))], 1)
+        self.assertEqual(m.claude_combined_receipts(frame, inp, draft, payload), 1)
+
+    def test_claude_combined_receipt_requires_one_complete_owned_block(self):
+        draft = 'Disposable retirement rehearsal reminder.'
+        payload = (CO_SUBMIT_FIXTURES / 'claude-co-submit-payload.txt').read_text()
+        fixture = (CO_SUBMIT_FIXTURES / 'claude-co-submit-receipt.ansi').read_text()
+        cases = (
+            ('wrong draft prefix', fixture.replace('❯ Disposable retirement rehearsal reminder.',
+                                                    '❯ Different ordinary draft.', 1)),
+            ('wrong payload', fixture.replace('ACK-QUEUE-3155db7fcc5e', 'ACK-QUEUE-wrong')),
+            ('assistant prose', fixture.replace('❯ Disposable retirement rehearsal reminder.',
+                                                '● Disposable retirement rehearsal reminder.', 1)),
+            ('cropped header', fixture.replace('❯ Disposable retirement rehearsal reminder.',
+                                               '  Disposable retirement rehearsal reminder.', 1)),
+            ('archived composer', fixture.replace('❯ Disposable retirement rehearsal reminder.',
+                                                  '──────────────\n❯ Disposable retirement rehearsal reminder.', 1)),
+            ('archived composer with cropped opening rule', fixture.replace(
+                '\n\n● ACK-QUEUE-', '\n\n────────────────────────────────────────────────────────────────────────────────\n● ACK-QUEUE-', 1)),
+            ('mixed continuation', fixture.replace('preserve this line as message bod\n\n● ACK-',
+                                                   'preserve this line as message bod\n  unrelated row\n\n● ACK-', 1)),
+        )
+        for reason, raw in cases:
+            with self.subTest(reason=reason):
+                lines = raw.splitlines()
+                prompt = next(i for i, row in enumerate(lines) if row == '❯\u00a0')
+                frame = m.Frame(raw, 2, prompt, raw)
+                inp = m.composer(frame)
+                self.assertEqual(m.claude_combined_receipts(frame, inp, draft, payload), 0)
+        blank_terminal = claude_co_submit_frame(receipt=False)
+        self.assertEqual(m.claude_combined_receipts(
+            blank_terminal, m.composer(blank_terminal), draft, payload), 0)
+        frame = claude_co_submit_frame()
+        inp = m.composer(frame)
+        for unsupported in (m.Input('unknown', harness='claude'),
+                            m.Input('modal', harness='claude'),
+                            m.Input(inp.kind, inp.text, inp.start, inp.end, inp.cursor, 'codex')):
+            with self.subTest(kind=unsupported.kind, harness=unsupported.harness):
+                self.assertEqual(m.claude_combined_receipts(frame, unsupported, draft, payload), 0)
+
+    def test_claude_combined_receipt_is_new_relative_to_same_parser_baseline(self):
+        draft = 'Disposable retirement rehearsal reminder.'
+        payload = (CO_SUBMIT_FIXTURES / 'claude-co-submit-payload.txt').read_text()
+        old = claude_co_submit_frame()
+        baseline = m.claude_combined_receipts(old, m.composer(old), draft, payload)
+        self.assertEqual(baseline, 1)
+        rows = old.raw.splitlines()
+        start = next(i for i, row in enumerate(rows)
+                     if row == '❯ Disposable retirement rehearsal reminder.')
+        end = next(i for i, row in enumerate(rows[start:], start)
+                   if row == '● ACK-QUEUE-3155db7fcc5e')
+        rows[end + 1:end + 1] = [''] + rows[start:end + 1]
+        raw = '\n'.join(rows) + '\n'
+        prompt = next(i for i, row in enumerate(rows) if row == '❯ ')
+        frame = m.Frame(raw, 2, prompt, raw)
+        current = m.claude_combined_receipts(frame, m.composer(frame), draft, payload)
+        self.assertEqual(current, 2)
+        self.assertGreater(current, baseline)
+
+    def test_claude_co_submit_accepts_new_measured_full_user_receipt(self):
+        draft = 'Disposable retirement rehearsal reminder.'
+        payload = (CO_SUBMIT_FIXTURES / 'claude-co-submit-payload.txt').read_text()
+        t = Terminal(payload=payload, draft=draft)
+        t.harness = 'claude'
+        original_paste = t.paste
+        def paste(path):
+            original_paste(path)
+            t.draft = draft + '[Pasted text #3 +2 lines]'
+        def frame():
+            if t.accepted_at is not None:
+                return claude_co_submit_frame()
+            return screen(t.draft, harness='claude')
+        t.paste, t.frame = paste, frame
+        result = deliver(t)
+        self.assertEqual((result['status'], result['receipt'], result['enters']),
+                         ('delivered', 'submitted', 1))
+        self.assertEqual((t.pastes, t.enters), (1, 1))
+
+    def test_claude_co_submit_does_not_reuse_old_identical_receipt(self):
+        draft = 'Disposable retirement rehearsal reminder.'
+        payload = (CO_SUBMIT_FIXTURES / 'claude-co-submit-payload.txt').read_text()
+        t = Terminal(payload=payload, draft=draft, dropped=1)
+        t.harness = 'claude'
+        original_paste = t.paste
+        def paste(path):
+            original_paste(path)
+            t.draft = draft + '[Pasted text #3 +2 lines]'
+        def frame():
+            return claude_co_submit_frame(t.draft)
+        t.paste, t.frame = paste, frame
+        with self.assertRaisesRegex(m.DeliveryError, 'receipt-timeout'):
+            deliver(t)
         self.assertEqual((t.pastes, t.enters), (1, 1))
 
     def test_measured_claude_marker_rejects_unowned_shapes(self):

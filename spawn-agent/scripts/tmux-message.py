@@ -154,6 +154,66 @@ def records(frame, inp):
     return result
 
 
+def claude_combined_receipts(frame, inp, draft, payload):
+    """Count measured Claude user blocks with the co-submit blank separator.
+
+    Claude 2.1.283 can render an appended stable draft as a prompt row, one
+    blank separator, then two-space-indented payload rows. Keep this parser
+    specific to the known co-submit body; ordinary receipt parsing remains
+    unchanged. The existing receipt normalization is intentionally reused for
+    terminal wrapping and indentation.
+    """
+    if inp.harness != "claude" or inp.kind in {"unknown", "modal"}:
+        return 0
+    visible = frame.raw.splitlines()
+    history = frame.history.splitlines() if frame.history else visible
+    prefix_len = max(0, len(history) - len(visible))
+    rows = history[:prefix_len + inp.start]
+    lines = [styles.strip_ansi(row) for row in rows]
+    expected_form = normalized(draft + "\n" + payload)
+    draft_form = normalized(draft)
+    count = 0
+    rule = lambda row: bool(row.strip()) and set(row.strip()) == {"─"}
+
+    for index, line in enumerate(lines):
+        prompt = PROMPT.match(line)
+        if not prompt or prompt.group(1) != "❯":
+            continue
+        previous = next((row for row in reversed(lines[:index]) if row.strip()), "")
+        if rule(previous):
+            continue
+
+        draft_rows = [prompt.group(2)]
+        end = index + 1
+        while normalized("\n".join(draft_rows)) != draft_form:
+            if end >= len(lines) or not lines[end].startswith("  ") or not lines[end].strip():
+                break
+            draft_rows.append(lines[end][2:])
+            end += 1
+        if normalized("\n".join(draft_rows)) != draft_form:
+            continue
+        # Exactly one measured blank row separates the visible stale draft
+        # from the appended payload. Other blank/cropped layouts stay unknown.
+        if end >= len(lines) or lines[end] != "":
+            continue
+        end += 1
+        payload_rows = []
+        while end < len(lines) and lines[end].startswith("  ") and lines[end].strip():
+            payload_rows.append(lines[end][2:])
+            end += 1
+        if not payload_rows:
+            continue
+        body = "\n".join(draft_rows + payload_rows)
+        following = next((row for row in lines[end:] if row.strip()), "")
+        # Match records()' guards against a composer archived by a full-screen
+        # redraw; that box is not a submitted user row.
+        if FOOTER.match(following) or rule(following):
+            continue
+        if normalized(body) == expected_form:
+            count += 1
+    return count
+
+
 def paste_evidence(inp, payload):
     if inp.kind != "text":
         return False
@@ -482,6 +542,9 @@ class Sender:
             self.original_draft = check.text
             self.draft_harness = check.harness
             self.expected = check.text + "\n" + self.payload
+        claude_co_submit = bool(self.stale_draft_length and self.draft_harness == "claude")
+        claude_receipt_baseline = (claude_combined_receipts(
+            before, check, self.original_draft, self.payload) if claude_co_submit else 0)
         if literal:
             self.pasted = True  # A failed input command can still change the composer.
             self.tmux.keys("-l", self.payload)
@@ -505,7 +568,6 @@ class Sender:
         evidence_since = None
         last_enter = None
         input_disappeared = False
-        claude_co_submit = bool(self.stale_draft_length and self.draft_harness == "claude")
         max_enters = 1 if literal or claude_co_submit else 2
         accepted_forms = {normalized(self.expected)}
         while self.clock() < deadline:
@@ -528,6 +590,10 @@ class Sender:
             for kind in ("submitted", "queued"):
                 if not literal and self.enters and any(receipt[(kind, form)] > baseline[(kind, form)] for form in accepted_forms):
                     return {"status": "delivered", "receipt": kind, "enters": self.enters}
+            if (claude_co_submit and self.enters
+                    and claude_combined_receipts(frame, current, self.original_draft, self.payload)
+                    > claude_receipt_baseline):
+                return {"status": "delivered", "receipt": "submitted", "enters": self.enters}
             if current.kind == "modal":
                 raise DeliveryError("modal-after-paste", 3)
             if owned is not None and current.kind == "empty":

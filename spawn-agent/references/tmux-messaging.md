@@ -95,6 +95,16 @@ receipt; they never retry Enter or re-paste after ambiguity. Visible full-text
 co-submission also requires the exact draft + newline + payload, the same
 harness, and an end cursor.
 
+For Claude 2.1.283's measured submitted-row layout, the native receipt may show
+the draft after `❯`, one blank separator row, then the payload on continuation
+rows with the measured two-space indent. The sender checks that complete block
+against the same expected co-submit body and the pre-paste count, using the
+existing receipt normalization for terminal wrapping. It only counts an
+explicit new user row before a recognized current composer; assistant prose,
+an archived composer, an incomplete or cropped block, and an unchanged old
+body do not confirm delivery. Other blank-row or queued layouts remain subject to the
+ordinary receipt parser and may stay ambiguous.
+
 ## Stable command drafts
 
 A stable command-shaped draft is cleared without executing it before the
