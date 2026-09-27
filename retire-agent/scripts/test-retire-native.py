@@ -53,16 +53,37 @@ def interrupted(signum, _frame):
 
 
 @contextmanager
-def notice_watch(tmux, pane, pattern, before):
+def notice_watch(tmux, pane, pattern, before, records):
     # Inspect only this owned pane. Retain a boolean receipt, never pane text.
     stop = threading.Event()
     found = threading.Event()
     def sample():
+        armed = False
+        baseline = before
         while not stop.is_set():
             frame = run([*tmux, 'capture-pane', '-p', '-S', '-2000', '-t', pane], timeout=3)
-            if frame.returncode == 0 and len(re.findall(pattern, frame.stdout, re.MULTILINE)) > before:
-                found.set()
-                return
+            if frame.returncode == 0:
+                count = len(re.findall(pattern, frame.stdout, re.MULTILINE))
+                exiting = False
+                for path in records.glob('*.json'):
+                    if not re.fullmatch(r'[0-9a-f]{32}', path.stem):
+                        continue
+                    try:
+                        state = json.loads(path.read_text())
+                    except (OSError, ValueError):
+                        continue
+                    if (state.get('pane') == pane and state.get('disposition') == 'DONE'
+                            and state.get('handoff_receipt') and state.get('exit', {}).get('status') in ('attempting', 'delivered', 'ambiguous')):
+                        exiting = True
+                        break
+                if exiting and not armed:
+                    # Rebase on the first verified exit phase: earlier work/progress
+                    # notices cannot become receipts just because history persists.
+                    baseline = count
+                    armed = True
+                elif armed and count > baseline:
+                    found.set()
+                    return
             stop.wait(.01)
     worker = threading.Thread(target=sample, daemon=True)
     worker.start()
@@ -202,7 +223,7 @@ def main():
             command = [HERE / 'retire.sh', pane, '--retire', '--wait', '60', '--poll', '1']
             observations = []
             while True:
-                with notice_watch(tmux, pane, pattern, notice_before) as seen:
+                with notice_watch(tmux, pane, pattern, notice_before, records) as seen:
                     result = run(command, env=environment, timeout=120)
                     observed_notice = observed_notice or seen.is_set()
                 observations.append({'returncode': result.returncode, 'stdout': result.stdout, 'stderr': result.stderr})
@@ -227,7 +248,6 @@ def main():
                 assert state['offer'].get('stale_draft_length') == len('Disposable retirement rehearsal reminder.'), 'ordinary stale draft was not co-submitted'
             assert state.get('handoff_receipt') and state.get('shard_hash')
             screen = require(run([*tmux, 'capture-pane', '-p', '-S', '-2000', '-t', pane]))
-            observed_notice = observed_notice or len(re.findall(pattern, screen, re.MULTILINE)) > notice_before
             assert observed_notice, f'fresh anchored {harness} exit receipt missing'
             actors = [state['identity']['process'], *state['identity']['process'].get('cores', [])]
             for actor in actors:
