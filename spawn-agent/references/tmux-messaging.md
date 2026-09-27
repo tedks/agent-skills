@@ -98,15 +98,20 @@ harness, and an end cursor.
 The compatibility `claude-send.sh` uses the same exact Claude co-submit input
 predicate and freezes its first recognized text/cursor fingerprint through its
 single Enter. It keeps its legacy `status=sent receipt=unverified` result and
-does not claim application delivery. Extra blank paragraphs, cropped composer
-views, and unsupported wrapped-prefix layouts remain ambiguous in both paths.
+does not claim application delivery. It preserves exact visible hard-newline
+rows, including matching trailing blank rows through the cursor; cropped views,
+unsupported wrapped-prefix layouts, changed rows, and misplaced cursors remain
+ambiguous. Its legacy Codex collapsed-append recognition retains its existing
+visible-input limits.
 
 For Claude 2.1.283's measured submitted-row layout, the native receipt may show
 the draft after `❯`, one blank separator row, then the payload on continuation
 rows with the measured two-space indent. The sender checks that complete block
 against the same expected co-submit body and the pre-paste count, using the
-existing receipt normalization for terminal wrapping. It only counts an
-explicit new column-zero `❯` user row before a recognized current composer;
+existing receipt normalization for terminal wrapping. This public receipt
+check supports only the measured single blank separator; extra blank paragraphs
+and cropped views remain ambiguous. It only counts an explicit new column-zero
+`❯` user row before a recognized current composer;
 assistant prose,
 an archived composer, an incomplete or cropped block, and an unchanged old
 body do not confirm delivery. Other blank-row or queued layouts remain subject to the

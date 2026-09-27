@@ -86,7 +86,8 @@ class Terminal:
         self.frames += 1
         history = self.history
         if self.accepted_at is not None and self.now >= self.accepted_at + self.delayed:
-            history += ('• Messages to be submitted after next tool call\n  ↳ ' if self.queued else '› ') + (self.submitted or self.payload).replace('\n', '\n  ') + '\n\n'
+            glyph = '❯ ' if self.harness == 'claude' else '› '
+            history += ('• Messages to be submitted after next tool call\n  ↳ ' if self.queued else glyph) + (self.submitted or self.payload).replace('\n', '\n  ') + '\n\n'
         text = self.draft
         if self.mutate and self.pastes:
             text += ' human'
@@ -1099,6 +1100,9 @@ assert screen.observe(frame, 'outgoing', 6, 1, pathlib.Path(sys.argv[2])) == 'dr
                 '\n\n● ACK-QUEUE-', '\n\n────────────────────────────────────────────────────────────────────────────────\n● ACK-QUEUE-', 1)),
             ('mixed continuation', fixture.replace('preserve this line as message bod\n\n● ACK-',
                                                    'preserve this line as message bod\n  unrelated row\n\n● ACK-', 1)),
+            ('extra blank paragraph', fixture.replace(
+                '❯ Disposable retirement rehearsal reminder.\n\n  After the current task',
+                '❯ Disposable retirement rehearsal reminder.\n\n\n  After the current task', 1)),
         )
         for reason, raw in cases:
             with self.subTest(reason=reason):
@@ -1122,7 +1126,15 @@ assert screen.observe(frame, 'outgoing', 6, 1, pathlib.Path(sys.argv[2])) == 'dr
         draft = 'Disposable retirement rehearsal reminder.'
         payload = (CO_SUBMIT_FIXTURES / 'claude-co-submit-payload.txt').read_text()
         old = claude_co_submit_frame()
-        baseline = m.claude_combined_receipts(old, m.composer(old), draft, payload)
+        old_history = ('Tool output before\n  ❯ ' + draft +
+                       '\nTool output after\n' + old.history)
+        old_with_quote = m.Frame(old.raw, old.x, old.y, old_history)
+        old_input = m.composer(old_with_quote)
+        expected_form = ('submitted', m.normalized(draft))
+        self.assertEqual(m.records(old_with_quote, old_input)[expected_form], 2)
+        self.assertEqual(m.records(old_with_quote, old_input,
+                                   strict_claude_submitted=True)[expected_form], 1)
+        baseline = m.claude_combined_receipts(old_with_quote, old_input, draft, payload)
         self.assertEqual(baseline, 1)
         rows = old.raw.splitlines()
         start = next(i for i, row in enumerate(rows)
@@ -1190,6 +1202,47 @@ assert screen.observe(frame, 'outgoing', 6, 1, pathlib.Path(sys.argv[2])) == 'dr
         with self.assertRaisesRegex(m.DeliveryError, 'receipt-timeout'):
             deliver(t)
         self.assertEqual((t.pastes, t.enters), (1, 1))
+
+    def test_claude_cosubmit_ignores_indented_quote_receipts_after_dropped_enter(self):
+        draft, payload = 'Stable ordinary draft.', 'hello'
+        for suffix in ('[Pasted text #3 +1 lines]', '\n' + payload):
+            with self.subTest(suffix=suffix):
+                t = Terminal(payload=payload, draft=draft, dropped=1)
+                t.harness = 'claude'
+                original_paste = t.paste
+
+                def paste(path):
+                    original_paste(path)
+                    t.draft = draft + suffix
+
+                original_frame = t.frame
+
+                def frame():
+                    if t.pastes and t.enters:
+                        if suffix.startswith('\n'):
+                            quote_body = '  ❯ ' + draft + '\n  ' + payload
+                            expected_form = m.normalized(draft + suffix)
+                        else:
+                            quote_body = '  ❯ ' + draft + suffix
+                            expected_form = m.normalized(draft + suffix)
+                        quote = 'Tool output before\n' + quote_body + '\nTool output after\n'
+                        receipt_frame = screen(t.draft, history=quote, harness='claude')
+                        receipt_input = m.composer(receipt_frame)
+                        # The unfiltered generic parser sees these deliberate
+                        # quote-shaped rows; only the scoped co-submit filter
+                        # rejects the indented non-user prompt.
+                        self.assertEqual(m.records(receipt_frame, receipt_input)
+                                         [('submitted', expected_form)], 1)
+                        self.assertEqual(m.records(receipt_frame, receipt_input,
+                                                   strict_claude_submitted=True)
+                                         [('submitted', expected_form)], 0)
+                        return screen(t.draft, history=quote, harness='claude')
+                    return original_frame()
+
+                t.paste, t.frame = paste, frame
+                with self.assertRaisesRegex(m.DeliveryError, 'receipt-timeout'):
+                    deliver(t)
+                self.assertEqual((t.pastes, t.enters), (1, 1))
 
     def test_measured_claude_marker_rejects_unowned_shapes(self):
         draft = 'Disposable retirement rehearsal reminder.'

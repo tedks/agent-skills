@@ -6,6 +6,8 @@ detector; Codex uses the known prompt and footer. Raw visible rows preserve
 cursor coordinates. Wrapped layouts the parser cannot compare exactly become
 unknown. The helper never prints composer content.
 """
+from __future__ import annotations
+
 import hashlib
 import pathlib
 import re
@@ -87,6 +89,8 @@ def claude_combined_input_evidence(kind: str, text: str, harness: str,
     """Recognize only the exact Claude draft append or its measured marker form."""
     if kind != "text" or harness != "claude" or not at_end:
         return False
+    if not draft:
+        return False
     if text == draft + "\n" + payload:
         return True
     suffix = text[len(draft):] if text.startswith(draft) else ""
@@ -146,24 +150,31 @@ def state(screen: str, payload: str, cx: int, cy: int,
     # remain exact. A wrapped visual row without the known hard-newline indent
     # will not compare as the payload and therefore fails closed.
     wanted = payload.rstrip("\n")
-    observed = observed.rstrip("\n")
-    if observed == "":
+    generic_observed = observed.rstrip("\n")
+    if generic_observed == "":
         return "empty" if cy == idx and cx == 2 else "busy"
     if co_submit_draft is not None:
         prefix = co_submit_draft + "\n"
         if not payload.startswith(prefix):
             return "unknown"
         outgoing = payload[len(prefix):]
-        at_end = ((cy - idx) == observed.count("\n")
-                  and cx == 2 + cell_width(observed.rsplit("\n", 1)[-1]))
-        if claude_combined_input_evidence("text", observed, "claude",
+        relative_row = cy - idx
+        if relative_row < 0 or relative_row >= len(parts) or cy >= bottom:
+            return "busy"
+        if any(part.rstrip() for part in parts[relative_row + 1:]):
+            return "busy"
+        candidate = "\n".join(part.rstrip() for part in parts[:relative_row + 1])
+        at_end = (relative_row == candidate.count("\n")
+                  and cx == 2 + cell_width(parts[relative_row].rstrip()))
+        if claude_combined_input_evidence("text", candidate, "claude",
                                           co_submit_draft, outgoing, at_end):
             if fingerprint_path is not None:
                 fingerprint_path.write_text(
-                    claude_combined_fingerprint(observed, cx, cy - idx),
+                    claude_combined_fingerprint(candidate, cx, relative_row),
                     encoding="ascii")
             return "own"
         return "busy"
+    observed = generic_observed
     expected_y = idx + payload.count("\n")
     expected_x = 2 + cell_width(payload.rsplit("\n", 1)[-1])
     if observed == wanted and (cy, cx) == (expected_y, expected_x):

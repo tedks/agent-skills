@@ -110,7 +110,7 @@ def composer(frame):
     return Input("unknown")
 
 
-def records(frame, inp):
+def records(frame, inp, strict_claude_submitted=False):
     """Candidate receipts outside the live composer, with semantic row markers.
 
     A new occurrence is required relative to the pre-paste history. Assistant
@@ -136,6 +136,10 @@ def records(frame, inp):
                 queued = False
             continue
         kind = "queued" if queue_match else "submitted"
+        # Co-submit receipts use the measured flush-left Claude prompt. Do not
+        # let an indented quote or tool transcript masquerade as a user turn.
+        if strict_claude_submitted and kind == "submitted" and not line.startswith("❯"):
+            continue
         text = queue_match.group(1) if queue_match else match.group(2)
         end = index + 1
         while end < len(lines) and lines[end].startswith("  ") and lines[end].strip():
@@ -528,7 +532,6 @@ class Sender:
             if (self.clock() >= self.readiness_deadline or check.kind != "empty"
                     or check.harness != command.harness or not self.at_end(check)):
                 raise DeliveryError("input-changed-after-clear", 3)
-        baseline = records(before, check)
         literal = getattr(self.o, "literal_exit", False)
         if literal and (self.payload != "/exit" or check.harness != "claude"):
             raise DeliveryError("literal-exit-requires-claude-exit")
@@ -540,6 +543,7 @@ class Sender:
             self.draft_harness = check.harness
             self.expected = check.text + "\n" + self.payload
         claude_co_submit = bool(self.stale_draft_length and self.draft_harness == "claude")
+        baseline = records(before, check, strict_claude_submitted=claude_co_submit)
         claude_receipt_baseline = (claude_combined_receipts(
             before, check, self.original_draft, self.payload) if claude_co_submit else 0)
         if literal:
@@ -572,7 +576,7 @@ class Sender:
             now = self.clock()
             if now >= deadline:
                 break
-            receipt = records(frame, current)
+            receipt = records(frame, current, strict_claude_submitted=claude_co_submit)
             if literal and self.enters == 1 and current.kind == "unknown":
                 resumed = resume_records(frame)
                 fresh = [session for session, count in resumed.items() if count > resume_before[session]]
@@ -609,7 +613,7 @@ class Sender:
                         and self.enters < max_enters and not input_disappeared):
                     # Refresh receipt AND input immediately before each Enter.
                     confirm, live = self.sample()
-                    fresh = records(confirm, live)
+                    fresh = records(confirm, live, strict_claude_submitted=claude_co_submit)
                     for kind in ("submitted", "queued"):
                         if not literal and self.enters and any(fresh[(kind, form)] > baseline[(kind, form)] for form in accepted_forms):
                             return {"status": "delivered", "receipt": kind, "enters": self.enters}

@@ -103,11 +103,19 @@ case "$cmd" in
       elif [[ "$(<"$FAKE_STATE/mode")" == busycontext ]]; then cursor='2:2'
       elif [[ "$(<"$FAKE_STATE/mode")" == busyqueue && -s "$FAKE_STATE/pasted" ]]; then cursor='37:27'
       elif [[ "$(<"$FAKE_STATE/mode")" == busyqueue ]]; then cursor='2:27'
+      elif [[ "$(<"$FAKE_STATE/mode")" == stable-claude-trailing-lf && -s "$FAKE_STATE/pasted" ]]; then cursor='2:4'
+      elif [[ "$(<"$FAKE_STATE/mode")" == stable-claude-marker-preenter && -s "$FAKE_STATE/pasted" ]]; then
+        ordinal=3; [[ "$(<"$FAKE_STATE/marker-screen-count")" -ge 3 ]] && ordinal=4
+        marker="stale TICK[Pasted text #$ordinal +2 lines]"
+        cursor="$(($(printf '%s' "$marker" | wc -m) + 2)):1"
       elif [[ "$(<"$FAKE_STATE/mode")" == stable-claude-marker && -s "$FAKE_STATE/pasted" ]]; then
         ordinal=3; [[ -s "$FAKE_STATE/marker-seen" ]] && ordinal=4
         marker="stale TICK[Pasted text #$ordinal +2 lines]"
         cursor="$(($(printf '%s' "$marker" | wc -m) + 2)):1"
       elif [[ "$(<"$FAKE_STATE/mode")" == stable-claude-marker-harness && -s "$FAKE_STATE/pasted" ]]; then
+        marker='stale TICK[Pasted text #3 +2 lines]'
+        cursor="$(($(printf '%s' "$marker" | wc -m) + 2)):1"
+      elif [[ "$(<"$FAKE_STATE/mode")" == stable-codex-marker-claude && -s "$FAKE_STATE/pasted" ]]; then
         marker='stale TICK[Pasted text #3 +2 lines]'
         cursor="$(($(printf '%s' "$marker" | wc -m) + 2)):1"
       elif [[ "$(<"$FAKE_STATE/mode")" == persistent-empty-after-paste && -s "$FAKE_STATE/pasted" ]]; then cursor='2:1'
@@ -175,6 +183,16 @@ PYQUEUE
       fi
     elif [[ "$mode" == home-*-unknown* && -s "$FAKE_STATE/end-moved" && ( "$mode" == *-timeout || $n -le $(($(<"$FAKE_STATE/end-capture") + 2)) ) ]]; then
       printf 'Starting Claude Code\n' > "$FAKE_STATE/last-screen"
+    elif [[ "$mode" == stable-claude-trailing-lf && ! -s "$FAKE_STATE/pasted" ]]; then
+      cat "$FIXTURES/claude-stable-draft.ansi" > "$FAKE_STATE/last-screen"
+    elif [[ "$mode" == stable-claude-trailing-lf && -s "$FAKE_STATE/pasted" ]]; then
+      printf '────────────────────────────────────────\n❯ stale TICK\n  alpha\n  beta\n  \n────────────────────────────────────────\n' > "$FAKE_STATE/last-screen"
+    elif [[ "$mode" == stable-claude-marker-preenter && ! -s "$FAKE_STATE/pasted" ]]; then
+      cat "$FIXTURES/claude-stable-draft.ansi" > "$FAKE_STATE/last-screen"
+    elif [[ "$mode" == stable-claude-marker-preenter && -s "$FAKE_STATE/pasted" ]]; then
+      n=$(($(<"$FAKE_STATE/marker-screen-count") + 1)); printf '%s' "$n" > "$FAKE_STATE/marker-screen-count"
+      ordinal=3; ((n >= 3)) && ordinal=4
+      printf '────────────────────────────────────────\n❯ stale TICK[Pasted text #%s +2 lines]\n────────────────────────────────────────\n' "$ordinal" > "$FAKE_STATE/last-screen"
     elif [[ "$mode" == stable-claude && ! -s "$FAKE_STATE/pasted" ]]; then
       cat "$FIXTURES/claude-stable-draft.ansi" > "$FAKE_STATE/last-screen"
     elif [[ "$mode" == stable-claude-marker && ! -s "$FAKE_STATE/pasted" ]]; then
@@ -192,6 +210,10 @@ PYQUEUE
       else
         printf '› stale TICK[Pasted text #3 +2 lines]\n\n  Any model · Context 50%% left\n' > "$FAKE_STATE/last-screen"
       fi
+    elif [[ "$mode" == stable-codex-marker-claude && ! -s "$FAKE_STATE/pasted" ]]; then
+      cat "$FIXTURES/codex-stable-draft.ansi" > "$FAKE_STATE/last-screen"
+    elif [[ "$mode" == stable-codex-marker-claude && -s "$FAKE_STATE/pasted" ]]; then
+      printf '────────────────────────────────────────\n❯ stale TICK[Pasted text #3 +2 lines]\n────────────────────────────────────────\n' > "$FAKE_STATE/last-screen"
     elif [[ "$mode" == stable-codex && ! -s "$FAKE_STATE/pasted" ]]; then
       cat "$FIXTURES/codex-stable-draft.ansi" > "$FAKE_STATE/last-screen"
     elif [[ "$mode" == busycontext ]]; then
@@ -224,7 +246,7 @@ import sys
 rows = Path(sys.argv[1]).read_text().splitlines()
 import os
 mode = Path(os.environ['FAKE_STATE'], 'mode').read_text().strip()
-codex = mode == 'stable-codex' or mode.startswith(('home-codex', 'command-codex'))
+codex = mode in {'stable-codex', 'stable-codex-marker-claude'} or mode.startswith(('home-codex', 'command-codex'))
 if not codex: print('─' * 40)
 else: print('')
 print(('› ' if codex else '❯\u00a0') + (rows[0] if rows else ''))
@@ -332,6 +354,7 @@ reset_case() {
   : > "$FAKE_STATE/tmux-trace"
   : > "$FAKE_STATE/parser-trace"
   : > "$FAKE_STATE/marker-seen"
+  printf 0 > "$FAKE_STATE/marker-screen-count"
   : > "$FAKE_STATE/sender-pid"
   printf '%s\n' "${1:-empty}" > "$FAKE_STATE/mode"
   if [[ "${1:-}" == busy*-draft || "${1:-}" == home-* || "${1:-}" == stable-* || "${1:-}" == changing-draft || "${1:-}" == second-change ]]; then printf 'stale TICK' > "$FAKE_STATE/composer"; fi
@@ -498,6 +521,20 @@ printf 'alpha\nbeta' > "$prompt_file"
       failures=$((failures + 1))
     fi
   done
+  reset_case stable-claude-trailing-lf
+  trailing_prompt="$TEST_DIR/trailing-prompt"
+  trailing_expected="$TEST_DIR/trailing-expected"
+  printf 'alpha\nbeta\n' > "$trailing_prompt"
+  printf 'stale TICK\nalpha\nbeta\n' > "$trailing_expected"
+  if out=$(run_sender %7 --submit-delay 0 --max-wait 1 --poll-interval 0.1 --prompt-file "$trailing_prompt" 2>"$TEST_DIR/trailing-lf.err") &&
+     cmp -s "$trailing_expected" "$FAKE_STATE/submitted" &&
+     [[ "$out" == 'status=sent receipt=unverified stale_draft_length=10' &&
+        "$(grep -c '^paste-start$' "$FAKE_LOG")" -eq 1 &&
+        "$(grep -c '^enter$' "$FAKE_LOG")" -eq 1 ]]; then
+    echo 'PASS: legacy Claude preserves exact trailing-LF input through one Enter'
+  else
+    echo 'FAIL: legacy Claude trailing-LF input did not preserve exact bytes'; failures=$((failures + 1))
+  fi
   reset_case stable-claude-marker
   if run_sender %7 --submit-delay 0 --render-wait 3 --max-wait 1 --poll-interval 0.1 --prompt-file "$prompt_file" >"$TEST_DIR/marker-change.out" 2>"$TEST_DIR/marker-change.err"; then
     echo 'FAIL: changed Claude paste marker was re-owned'; failures=$((failures + 1))
@@ -508,6 +545,16 @@ printf 'alpha\nbeta' > "$prompt_file"
   else
     echo 'FAIL: changed Claude paste marker did not fail closed'; failures=$((failures + 1))
   fi
+  reset_case stable-claude-marker-preenter
+  if run_sender %7 --submit-delay 0 --render-wait 3 --max-wait 1 --poll-interval 0.1 --prompt-file "$prompt_file" >"$TEST_DIR/marker-preenter.out" 2>"$TEST_DIR/marker-preenter.err"; then
+    echo 'FAIL: marker change at immediate pre-submit was re-owned'; failures=$((failures + 1))
+  elif grep -q 'reason=input-changed-before-submit' "$TEST_DIR/marker-preenter.err" &&
+       [[ $(grep -c '^paste-start$' "$FAKE_LOG") -eq 1 ]] &&
+       [[ $(grep -c '^enter$' "$FAKE_LOG" || true) -eq 0 ]]; then
+    echo 'PASS: changed Claude marker at immediate pre-submit defers'
+  else
+    echo 'FAIL: immediate pre-submit marker change did not fail closed'; failures=$((failures + 1))
+  fi
   reset_case stable-claude-marker-harness
   if run_sender %7 --submit-delay 0 --render-wait 3 --max-wait 1 --poll-interval 0.1 --prompt-file "$prompt_file" >"$TEST_DIR/marker-harness.out" 2>"$TEST_DIR/marker-harness.err"; then
     echo 'FAIL: changed Claude harness was re-owned'; failures=$((failures + 1))
@@ -517,6 +564,16 @@ printf 'alpha\nbeta' > "$prompt_file"
     echo 'PASS: changed Claude harness stops before Enter'
   else
     echo 'FAIL: changed Claude harness did not fail closed'; failures=$((failures + 1))
+  fi
+  reset_case stable-codex-marker-claude
+  if run_sender %7 --submit-delay 0 --render-wait 3 --max-wait 1 --poll-interval 0.1 --prompt-file "$prompt_file" >"$TEST_DIR/reverse-harness.out" 2>"$TEST_DIR/reverse-harness.err"; then
+    echo 'FAIL: Codex draft was re-owned as Claude combined input'; failures=$((failures + 1))
+  elif grep -q 'status=ambiguous' "$TEST_DIR/reverse-harness.err" &&
+       [[ $(grep -c '^paste-start$' "$FAKE_LOG") -eq 1 ]] &&
+       [[ $(grep -c '^enter$' "$FAKE_LOG" || true) -eq 0 ]]; then
+    echo 'PASS: original Codex draft cannot be re-owned by Claude'
+  else
+    echo 'FAIL: Codex-to-Claude harness switch did not fail closed'; failures=$((failures + 1))
   fi
   for mode in changing-draft modal; do
     reset_case "$mode"
@@ -852,6 +909,27 @@ with tempfile.TemporaryDirectory() as tmp:
         'unknown', expected, 'claude', draft, payload, True)
     assert not m.claude_combined_input_evidence(
         'text', expected, 'claude', draft, payload, False)
+    assert not m.claude_combined_input_evidence(
+        'text', '\n' + payload, 'claude', '', payload, True)
+
+    # Exact visible co-submit ownership retains trailing hard-newline rows
+    # through the real cursor and ignores only blank terminal padding below it.
+    for outgoing in ('alpha\nbeta', 'alpha\nbeta\n', 'alpha\nbeta\n\n'):
+        wanted = draft + '\n' + outgoing
+        parts = wanted.split('\n')
+        rows = ['─' * 20, '❯ ' + parts[0]] + ['  ' + row for row in parts[1:]]
+        cursor_y = len(rows) - 1
+        cursor_x = 2 + m.cell_width(parts[-1])
+        raw = '\n'.join(rows + ['─' * 20, ''])
+        assert m.state(raw, wanted, cursor_x, cursor_y, draft) == 'own', repr(outgoing)
+        padded = '\n'.join(rows + ['  ', '   ', '─' * 20, ''])
+        assert m.state(padded, wanted, cursor_x, cursor_y, draft) == 'own'
+        assert m.state(raw, wanted, cursor_x + 1, cursor_y, draft) == 'busy'
+        assert m.state(raw, wanted, cursor_x, cursor_y - 1, draft) == 'busy'
+        missing = '\n'.join(rows[:-1] + ['─' * 20, ''])
+        assert m.state(missing, wanted, cursor_x, cursor_y, draft) == 'busy'
+    extra = '\n'.join(rows + ['  unexpected continuation', '─' * 20, ''])
+    assert m.state(extra, wanted, cursor_x, cursor_y, draft) == 'busy'
 PYTEST
 
 # Fresh fork command/menu shape runs through the real sender once.

@@ -73,6 +73,8 @@ stable_file=
 expected_file=
 append_file=
 co_submit_fingerprint_file=
+draft_harness=
+co_submit_claude=0
 stale_draft_length=0
 clear_attempted=0
 cleared_command_draft_length=0
@@ -226,7 +228,7 @@ screen_state() {
     if claude_trust_modal_active "$screen"; then printf modal; return; fi
     claude_composer_ready "$screen" || { printf unknown; return; }
     printf claude > "$harness_file"
-    if ((stale_draft_length)) && [[ "$(<"$harness_file")" == claude ]]; then
+    if ((co_submit_claude)); then
         printf '%s' "$screen_raw" | python3 "$SCRIPT_DIR/claude-send-screen.py" --observe-file "$observe_file" --co-submit-draft-file "$stable_file" "$expected_file" "$cursor_x" "$cursor_y"
     else
         printf '%s' "$screen_raw" | python3 "$SCRIPT_DIR/claude-send-screen.py" --observe-file "$observe_file" "$expected_file" "$cursor_x" "$cursor_y"
@@ -330,13 +332,14 @@ if [[ "$state" == command ]]; then
 fi
 if [[ "$state" == draft ]]; then
     stale_draft_length=$(python3 -c 'import pathlib,sys; print(len(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8")))' "$stable_file")
+    draft_harness=$(<"$harness_file")
     { printf '\n'; cat "$prompt_file"; } > "$append_file"
     { cat "$stable_file"; cat "$append_file"; } > "$expected_file"
 else
+    draft_harness=$(<"$harness_file")
     cp -- "$prompt_file" "$append_file"
 fi
-co_submit_claude=0
-if ((stale_draft_length)) && [[ "$(<"$harness_file")" == claude ]]; then
+if ((stale_draft_length)) && [[ "$draft_harness" == claude ]]; then
     co_submit_claude=1
 fi
 
