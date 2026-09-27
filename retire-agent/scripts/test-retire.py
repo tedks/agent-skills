@@ -38,8 +38,46 @@ def shard_data(event, identity):
             'resources': []}
 
 
+def process_token(pid):
+    try:
+        stat = Path(f'/proc/{pid}/stat').read_text().rsplit(')', 1)[1].split()
+    except FileNotFoundError:
+        return None
+    if stat[0] == 'Z':
+        return None
+    # Other read/parse failures are not proof of process end. Cleanup retains
+    # its directory on such an error because its finalizer is already detached.
+    return {'pid': int(pid), 'start': stat[19],
+            'boot': Path('/proc/sys/kernel/random/boot_id').read_text().strip()}
+
+
+def register_fixture(directory, pid, role, argv0=None):
+    if role == 'pane-root':
+        try:
+            if str(directory).encode() not in Path(f'/proc/{pid}/cmdline').read_bytes():
+                return  # A reparented actor must not claim init or an unrelated parent.
+        except OSError:
+            return
+    token = process_token(pid)
+    if token:
+        with (directory / 'owned-processes.jsonl').open('a') as ledger:
+            ledger.write(json.dumps(dict(token, role=role, argv0=argv0)) + '\n')
+
+
+def fixture_command(directory, inner):
+    # The surviving shell also owns a fixture HOME, rather than the host's
+    # interactive history/config paths after the actor exits.
+    environment = {'RETIRE_TEST_PYTHON': sys.executable, 'HOME': str(directory / 'actor-home'),
+                   'CODEX_HOME': str(directory / 'codex-config'),
+                   'CLAUDE_CONFIG_DIR': str(directory / 'claude-config')}
+    exports = ' '.join(key + '=' + shlex.quote(value) for key, value in environment.items())
+    return 'export ' + exports + '; ' + shlex.join(['bash', '-c', inner]) + '; exec bash --norc'
+
+
 def terminal(directory, mode):
     directory = Path(directory)
+    register_fixture(directory, os.getpid(), 'terminal')
+    register_fixture(directory, os.getppid(), 'pane-root')
     session = 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa'
     rollout = Path(os.environ['CODEX_HOME']) / 'sessions/rollout-fixture-' / ('rollout-' + session + '.jsonl')
     rollout.parent.mkdir(parents=True, exist_ok=True)
@@ -80,10 +118,25 @@ def terminal(directory, mode):
                 body = 'import signal,time; signal.signal(signal.SIGHUP,signal.SIG_IGN); fd=open(' + repr(str(rollout)) + ',"a"); time.sleep(360)'
                 command = 'exec -a ' + shlex.quote(name) + ' ' + shlex.join([os.environ['RETIRE_TEST_PYTHON'], '-c', body])
                 children.append(subprocess.Popen(['bash', '-c', command], start_new_session=True))
-                (directory / 'owned-core-pid').write_text(str(children[-1].pid))
+                register_fixture(directory, children[-1].pid, 'linger-core', name)
             else:
                 body = 'import time; fd=open(' + repr(str(rollout)) + ',"a"); time.sleep(360)'
                 children.append(subprocess.Popen(['bash', '-c', 'exec -a ' + shlex.quote(name) + ' ' + shlex.join([os.environ['RETIRE_TEST_PYTHON'], '-c', body])]))
+                register_fixture(directory, children[-1].pid, 'child', name)
+    if mode == 'cleanup-writer':
+        parent = process_token(os.getpid())
+        body = ("import time\nfrom pathlib import Path\n"
+                + "target=Path(" + repr(str(directory / 'late-writer')) + ")\n"
+                + "def parent_live():\n"
+                + " try:\n  fields=Path('/proc/" + str(parent['pid']) + "/stat').read_text().rsplit(')',1)[1].split()\n"
+                + " except OSError: return False\n"
+                + " return fields[0]!='Z' and fields[19]==" + repr(parent['start']) + "\n"
+                + "def write(message):\n try: target.write_text(message)\n except FileNotFoundError: pass\n"
+                + "while parent_live():\n write('owned fixture writer')\n time.sleep(.01)\n"
+                + "deadline=time.monotonic()+.25\n"
+                + "while time.monotonic()<deadline:\n write('owned fixture shutdown tail')\n time.sleep(.01)\n")
+        children.append(subprocess.Popen([os.environ['RETIRE_TEST_PYTHON'], '-c', body], start_new_session=True))
+        register_fixture(directory, children[-1].pid, 'writer')
     def draw():
         plain_draft = not pasted_payload
         collapsed = f'[Pasted Content {len(draft.decode(errors="replace"))} chars]' if draft and not plain_draft else draft.decode(errors='replace')
@@ -294,7 +347,7 @@ def terminal(directory, mode):
                 draw()
     finally:
         for child in children:
-            if mode != 'linger-core':
+            if mode not in ('linger-core', 'cleanup-writer'):
                 child.terminate()
                 child.wait()
         native_fd.close()
@@ -340,17 +393,40 @@ class Tests(unittest.TestCase):
         self.env.pop('TMUX', None)
 
     def tearDown(self):
-        owned = self.directory / 'owned-core-pid'
-        if owned.exists():
-            try:
-                pid = int(owned.read_text())
-                argv = Path(f'/proc/{pid}/cmdline').read_bytes()
-                if argv.startswith(str(self.directory / '@openai/codex/').encode()):
-                    os.kill(pid, signal.SIGTERM)
-            except (ProcessLookupError, FileNotFoundError):
-                pass
+        self.release_fixture()
+
+    def release_fixture(self):
+        if getattr(self, 'fixture_released', False):
+            return
+        # A failed release must retain its private directory. Python's automatic
+        # finalizer must not later delete files beneath a still-writing actor.
+        self.temp._finalizer.detach()
+        ledger = self.directory / 'owned-processes.jsonl'
+        owned = [json.loads(line) for line in ledger.read_text().splitlines()] if ledger.exists() else []
+        for record in owned:
+            token = {key: record[key] for key in ('pid', 'start', 'boot')}
+            if record['role'] == 'linger-core' and process_token(record['pid']) == token:
+                try:
+                    argv0 = Path(f"/proc/{record['pid']}/cmdline").read_bytes().split(b'\0')[0].decode()
+                    if argv0 == record['argv0'] and argv0.startswith(str(self.directory / '@openai/codex/')):
+                        os.kill(record['pid'], signal.SIGTERM)  # Original deliberate owned-core release only.
+                except (ProcessLookupError, FileNotFoundError):
+                    pass
         subprocess.run(self.tmux + ['kill-server'], capture_output=True)
+        deadline = time.monotonic() + 4
+        while True:
+            live = [record for record in owned if process_token(record['pid']) ==
+                    {key: record[key] for key in ('pid', 'start', 'boot')}]
+            if not live:
+                break
+            if time.monotonic() >= deadline:
+                diagnostic = self.directory / 'cleanup-pending.json'
+                diagnostic.write_text(json.dumps({'retained': str(self.directory), 'owned_live': live,
+                                                  'reason': 'owned processes still live after server release'}, indent=2) + '\n')
+                self.fail('owned fixture cleanup pending; retained ' + str(diagnostic))
+            time.sleep(.02)
         self.temp.cleanup()
+        self.fixture_released = True
 
     def command(self, *args):
         return subprocess.check_output(args, text=True, stderr=subprocess.DEVNULL).strip()
@@ -373,7 +449,7 @@ class Tests(unittest.TestCase):
         command = shlex.join([sys.executable, str(fixture), '--terminal', str(self.directory), mode])
         # argv[0] is the harness identity; outer shell survives process exit.
         inner = 'exec -a ' + ('node' if node else ('claude' if mode.startswith('claude') else 'codex')) + ' ' + command
-        outer = shlex.join(['env', 'RETIRE_TEST_PYTHON=' + sys.executable, 'HOME=' + str(self.directory / 'actor-home'), 'CODEX_HOME=' + str(self.directory / 'codex-config'), 'CLAUDE_CONFIG_DIR=' + str(self.directory / 'claude-config'), 'bash', '-c', inner]) + '; exec bash --norc'
+        outer = fixture_command(self.directory, inner)
         options = ['-c', str(self.directory)] if relative else []
         pane = self.command(*self.tmux, 'new-session', '-d', '-P', '-F', '#{pane_id}', '-x', '240', '-y', '40', *options, outer)
         self.pane = pane
@@ -417,6 +493,18 @@ class Tests(unittest.TestCase):
         entry.write_bytes((HERE / 'retire.sh').read_bytes())
         entry.chmod(0o700)
         return entry
+
+    def test_cleanup_waits_for_owned_shutdown_writer(self):
+        self.actor('cleanup-writer')
+        self.wait_for(lambda: (self.directory / 'late-writer').exists())
+        records = [json.loads(line) for line in (self.directory / 'owned-processes.jsonl').read_text().splitlines()]
+        writer = next(record for record in records if record['role'] == 'writer')
+        self.assertIsNotNone(process_token(writer['pid']))
+        directory = self.directory
+        self.release_fixture()
+        self.assertFalse(directory.exists())
+        current = process_token(writer['pid'])
+        self.assertNotEqual(current, {key: writer[key] for key in ('pid', 'start', 'boot')})
 
     def test_foreign_private_json_does_not_block_new_retirement(self):
         self.actor()
@@ -1220,7 +1308,7 @@ class Tests(unittest.TestCase):
     def test_independent_exit_with_replacement_refuses_successor(self):
         self.actor()
         inner = 'exec -a codex ' + shlex.join([sys.executable, str(Path(__file__).resolve()), '--terminal', str(self.directory), 'done'])
-        outer = shlex.join(['env', 'RETIRE_TEST_PYTHON=' + sys.executable, 'HOME=' + str(self.directory / 'actor-home'), 'CODEX_HOME=' + str(self.directory / 'codex-config'), 'CLAUDE_CONFIG_DIR=' + str(self.directory / 'claude-config'), 'bash', '-c', inner]) + '; exec bash --norc'
+        outer = fixture_command(self.directory, inner)
         before = "        if not self.state.get('exit'):\n"
         after = ('        signal = self.repo.parent / "human-independent-exit"\n'
                  '        signal.touch()\n'
@@ -1373,8 +1461,8 @@ class Tests(unittest.TestCase):
         record = json.loads(self.git('show', 'origin/master:' + state['handoff_receipt']))
         self.assertNotEqual(record['status'], 'retired')
         self.assertFalse((self.directory / 'spawn.json').exists())
+        self.assertEqual(process_token(core['pid']), {key: core[key] for key in ('pid', 'start', 'boot')})
         os.kill(core['pid'], signal.SIGTERM)  # exact test-owned lingering core
-        (self.directory / 'owned-core-pid').unlink()
         time.sleep(.05)
         result = self.invoke('--handoff', 'codex', 'test-model', '--roles', str(self.roles), '--resume', str(path))
         self.assertEqual(result.returncode, 0, result.stderr)
