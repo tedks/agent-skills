@@ -215,6 +215,10 @@ def terminal(directory, mode):
                                     history += '● RETIRE-' + disposition + '-' + event + '\r\n'
                                     if mode == 'padded-marker':
                                         history = history[:-2] + '   \t\r\n'
+                                    if 'codex-footer' in mode:
+                                        history += '  Worked for 1m 21s · 12:23\r\n'
+                                        if mode.endswith('extra-prose'):
+                                            history += '  Recovery still needs correction.\r\n'
                                     if mode.endswith('suffix'):
                                         history += '  Do not retire yet; recovery still needs correction.\r\n'
                                     elif mode.endswith('later-assistant'):
@@ -1170,6 +1174,18 @@ class Tests(unittest.TestCase):
         self.assertNotIn('handoff_receipt', state)
         self.assertFalse((self.directory / 'exit-order.json').exists())
         self.assertTrue(Path('/proc/' + str(state['identity']['process']['pid'])).exists())
+
+    def test_codex_ui_footer_allows_marker_completion(self):
+        self.actor('done-codex-footer')
+        result = self.invoke()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.observed()['exit_enters'], 1)
+
+    def test_codex_ui_footer_never_hides_additional_prose(self):
+        self.assert_completion_block_pending('done-codex-footer-extra-prose')
+
+    def test_claude_cannot_use_codex_ui_footer(self):
+        self.assert_completion_block_pending('claude-codex-footer')
 
     def test_codex_marker_suffix_is_not_completion(self):
         self.assert_completion_block_pending('done-suffix')

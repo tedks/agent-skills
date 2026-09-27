@@ -9,6 +9,8 @@ import tempfile
 HERE = Path(__file__).resolve().parent
 source = (HERE / 'retire.py').read_text()
 mutations = [
+    ('native Codex UI footer', "and len(tail) == 1", 'and False', 'test_codex_ui_footer_allows_marker_completion'),
+    ('Codex footer harness attribution', "codex_footer = (self.state['identity']['process']['agent'] == 'codex'", "codex_footer = (True", 'test_claude_cannot_use_codex_ui_footer'),
     ('foreign private state namespace', "                           if re.fullmatch(r'[0-9a-f]{32}\\.json', path.name)", '', 'test_foreign_private_json_does_not_block_new_retirement'),
     ('long handoff observation', 'not 0 < args.wait <= 1800', 'not 0 < args.wait <= 600', 'test_twenty_minute_wait_is_accepted'),
     ('remote host', "'https://github.com/' + match[1]", 'match[1]', 'test_gh_privacy_pins_remote_host'),
@@ -39,7 +41,7 @@ mutations = [
     ('receipt handoff status', "if record.get('status') not in ('handoff-verified', 'pending-exit', 'retired'):", 'if False:', 'test_remote_requested_receipt_cannot_authorize_successor'),
     ('owned atomic temporary', "descriptor, name = tempfile.mkstemp(prefix='.' + path.name + '-', suffix='.tmp', dir=path.parent)", "descriptor, name = os.open(path.with_suffix('.tmp'), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600), str(path.with_suffix('.tmp'))", 'test_foreign_adjacent_temp_preserved'),
     ('locked resume reread', 'self.load_resume()  # Another controller may have advanced state before this lock.', 'pass  # Trust stale pre-lock state.', 'test_resume_rereads_state_after_event_lock'),
-    ('completion suffix', "if any(row.strip() and not (len(row.strip()) >= 3 and set(row.strip()) == {'─'}) for row in rows[position + 1:]):", 'if False:', 'test_codex_marker_suffix_is_not_completion'),
+    ('completion suffix', 'if tail and not codex_footer:', 'if False:', 'test_codex_marker_suffix_is_not_completion'),
     ('pending evidence authority', "if self.state.get('handoff_receipt') and not getattr(self, 'evidence_verified', False):", 'if False:', 'test_remote_requested_receipt_cannot_authorize_successor'),
     ('index preflight ordering', ['self.publication_preflight()  # Preconditions before any INDEX write.', "        if self.git('diff', 'HEAD', '--', *paths)"], ['pass  # Preconditions delayed until after index write.', "        self.publication_preflight()\n        if self.git('diff', 'HEAD', '--', *paths)"], 'test_index_preflight_failure_preserves_legacy_then_resumes'),
     ('owned tracked index retry', "self.state['index_outside'] = hashlib.sha256(outside_section(updated).encode()).hexdigest()", 'pass  # Lose ownership of our tracked legacy index write.', 'test_own_legacy_index_write_recovers_after_commit_hook_failure'),

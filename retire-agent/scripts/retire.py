@@ -308,7 +308,14 @@ class Retirement:
         marker = re.fullmatch(r'[●•] RETIRE-(DONE|DECLINED)-' + event, rows[position].rstrip())
         if not marker:
             return None
-        if any(row.strip() and not (len(row.strip()) >= 3 and set(row.strip()) == {'─'}) for row in rows[position + 1:]):
+        tail = [row for row in rows[position + 1:]
+                if row.strip() and not (len(row.strip()) >= 3 and set(row.strip()) == {'─'})]
+        # Codex renders this measured UI duration/time line after a final reply.
+        # It is not agent prose; permit one exact footer only for pinned Codex.
+        codex_footer = (self.state['identity']['process']['agent'] == 'codex'
+                        and len(tail) == 1
+                        and re.fullmatch(r'  Worked for [1-9][0-9]*m [0-5]?[0-9]s · (?:[01][0-9]|2[0-3]):[0-5][0-9]', tail[0]))
+        if tail and not codex_footer:
             return None
         return marker[1]
 

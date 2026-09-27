@@ -14,7 +14,11 @@ writing the shard; a decline is `RETIRE-DECLINED-<event>`. The marker must be
 the agent's entire final reply, without prose before or after it. The terminal
 must show that marker as the final assistant block; trailing continuation text
 or a later assistant response keeps completion pending. Blank rows and the
-pure horizontal Claude composer separator are the only permitted suffix rows.
+pure horizontal Claude composer separator are permitted suffix rows. A pinned
+Codex target may also render one measured UI footer `  Worked for 1m 21s · 12:23`
+(the duration and 24-hour time vary). Only that anchored minute/second/time
+layout is recognized; additional prose, duplicate footers, other status text,
+and that footer on a Claude target still keep completion pending.
 The observed terminal
 must render an assistant `●` or `•` row marker. Bare wrapped user text and
 live composer text do not count. Unsupported response layouts stay pending.

@@ -120,8 +120,22 @@ def main():
             # sender must preserve and co-submit it with the retirement offer.
             if args.stale_offer_draft:
                 require(run([*tmux, 'send-keys', '-t', pane, '-l', 'Disposable retirement rehearsal reminder.']))
-            result = run([HERE / 'retire.sh', pane, '--retire', '--wait', '1200', '--poll', '1'], env=environment, timeout=1320)
-            (directory / (harness + '-retire.json')).write_text(json.dumps({'returncode': result.returncode, 'stdout': result.stdout, 'stderr': result.stderr}, indent=2))
+            deadline = time.monotonic() + 1200
+            command = [HERE / 'retire.sh', pane, '--retire', '--wait', '60', '--poll', '1']
+            observations = []
+            while True:
+                result = run(command, env=environment, timeout=120)
+                observations.append({'returncode': result.returncode, 'stdout': result.stdout, 'stderr': result.stderr})
+                (directory / (harness + '-retire.json')).write_text(json.dumps(observations, indent=2))
+                if result.returncode == 0:
+                    break
+                # A delivered offer needs observation, never another send. All
+                # other failures remain failures and require deliberate inspection.
+                pending = json.loads(result.stderr)
+                if (result.returncode != 2 or not pending.get('reason', '').startswith('DONE not observed;')
+                        or time.monotonic() >= deadline):
+                    require(result)
+                command = [HERE / 'retire.sh', pane, '--retire', '--resume', pending['state'], '--wait', '60', '--poll', '1']
             require(result)
             states = [json.loads(path.read_text()) for path in records.glob('*.json') if re.fullmatch(r'[0-9a-f]{32}', path.stem)]
             state = next(item for item in states if item['pane'] == pane)
