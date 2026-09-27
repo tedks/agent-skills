@@ -80,6 +80,7 @@ def main():
         require(run([*tmux, 'new-session', '-d', '-s', 'retire-native', '-x', '240', '-y', '60'], env=environment))
         server_started = True
         require(run([*tmux, 'set-option', '-g', 'history-limit', '10000']))
+        require(run([*tmux, 'set-option', '-g', 'remain-on-exit', 'on']))
         report['shared_head'] = require(run(['git', '-C', args.shared_skill, 'rev-parse', 'HEAD']))
         report['versions'] = {name: require(run([name, '--version'])) for name in ('codex', 'claude')}
         (directory / 'report.json').write_text(json.dumps(report, indent=2) + '\n')
