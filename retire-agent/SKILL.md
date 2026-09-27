@@ -84,7 +84,9 @@ the default is this checkout's sibling spawn-agent.
 naming an exclusively owned, clean disposable Git directory, `--evidence`
 naming a new private directory, and `--shared-skill` naming the published
 spawn-agent installation. The cwd must be separate from the skill's source
-worktree. The launcher grants Claude trust only to that exact disposable cwd.
+worktree. The launcher grants Claude trust only to that exact disposable cwd. Codex
+receives an exact-cwd project trust table through its documented per-process
+`-c` option via the launcher's `--codex-bin` wrapper; no global config is written.
 The test compares cwd HEAD/status/tracked diff on success and failure, samples
 fresh exit notices, checks the actual local bare remote, and releases its owned
 server. These checks do not provide an OS sandbox or prove absence of writes

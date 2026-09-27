@@ -885,6 +885,7 @@ class Tests(unittest.TestCase):
         path, state = self.state()
         self.assertEqual(state['exit']['receipt'], 'command')
         self.assertEqual(state['exit']['transport'], 'literal')
+        self.assertEqual(state['exit']['input_method'], 'typed')
 
     def test_post_offer_push_failure_blocks_exit(self):
         self.actor('push-reject')

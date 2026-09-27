@@ -14,6 +14,7 @@ import os
 from pathlib import Path
 import re
 import shlex
+import shutil
 import signal
 import subprocess
 import sys
@@ -121,6 +122,11 @@ def main():
         parser.error('disposable worktree must start clean')
     directory = args.evidence.resolve()
     directory.mkdir(mode=0o700, parents=True, exist_ok=False)
+    real_codex = Path(shutil.which('codex')).resolve()
+    trust_override = 'projects={' + json.dumps(str(worktree)) + '={trust_level="trusted"}}'
+    codex_wrapper = directory / 'codex-exact-cwd'
+    codex_wrapper.write_text('#!/bin/sh\nexec ' + shlex.quote(str(real_codex)) + ' -c ' + shlex.quote(trust_override) + ' "$@"\n')
+    codex_wrapper.chmod(0o700)
     repo = directory / 'repo'
     remote = directory / 'remote.git'
     require(run(['git', 'init', '--bare', remote]))
@@ -154,6 +160,7 @@ def main():
               'worktree_before': worktree_before, 'source_fidelity': fingerprint(source_root),
               'shared_fidelity': fingerprint(args.shared_skill),
               'claude_trust_grant': str(worktree),
+              'codex_per_process_trust': trust_override, 'real_codex': str(real_codex),
               'containment_limit': 'worktree HEAD/status/tracked diff checks do not prove absence of writes elsewhere; agents retain normal host access'}
     server_started = False
     failed = False
@@ -177,7 +184,7 @@ def main():
                       'do not change or commit this working tree. The controller alone commits and pushes the shard '
                       'to its isolated local bare remote. After setup your entire final reply must be RETIRE-NATIVE-READY.')
             launched = run([launcher, 'retire-native:' + harness, harness, args.worktree.resolve(),
-                            '--model', model, *(['--trust'] if harness == 'claude' else []), prompt], env=environment)
+                            '--model', model, *(['--trust'] if harness == 'claude' else ['--codex-bin', codex_wrapper]), prompt], env=environment)
             (directory / (harness + '-launch.txt')).write_text(launched.stdout + launched.stderr)
             require(launched)
             rows = require(run([*tmux, 'list-panes', '-t', 'retire-native:' + harness, '-F', '#{pane_id}'])).splitlines()
