@@ -43,11 +43,12 @@ explicitly for single-line slash commands; ordinary messages retain bracketed pa
    text, tolerating wrapping/whitespace layout, or recognize a newly introduced
    collapsed paste marker. For co-submission, require the exact combined input
    or a measured harness-specific append marker described below.
-4. Send Enter after paste evidence and the settling delay. Wait for a new
-   submitted user row or pending queue entry. For other ordinary deliveries, if
-   the same input remains after the retry interval, recheck and send Enter once
-   more. A co-submitted Claude draft gets one Enter; an unclear result is
-   ambiguous. Never paste again.
+4. Send Enter after paste evidence and the settling delay. A Claude
+   stable-draft co-submission gets one Enter maximum. Other ordinary deliveries
+   retain one bounded Enter retry if the same input remains after the retry
+   interval. Wait for a new submitted user row or pending queue entry. An
+   unclear result is ambiguous and may leave a combined draft and hidden paste
+   unsent; never paste again or send another Enter after ambiguity.
 5. Once the input empties, only wait for confirmation. Disappearance alone is
    not confirmation, and cannot authorize Enter into the next empty input.
 
@@ -82,7 +83,7 @@ draft prefix visible. The sender accepts only this measured co-submit shape when
 the prefix is exact, the marker is the only suffix, K equals one plus the
 outgoing payload's newline count, the current and original harness are Claude,
 and the cursor is at the verified end. The transient `paste again to expand`
-hint may corroborate the shape but is not required. The current paste operation
+hint is transient and is ignored. The current paste operation
 appends one newline and the outgoing payload, and readiness excludes old paste
 markers, so this marker is consistent with the one fresh paste. Its hidden
 bytes cannot be inspected, so the marker does not prove the pasted contents.

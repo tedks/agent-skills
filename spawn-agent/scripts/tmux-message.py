@@ -324,7 +324,7 @@ class Sender:
             # visible shape. The known draft prefix, one current paste marker,
             # its appended-line count, harness and end cursor are consistent
             # with the one append operation above; the hidden bytes stay opaque.
-            # marker/hint is transient, so hint text is corroboration only.
+            # The optional expansion hint is transient and ignored.
             if (inp.harness == self.draft_harness == "claude" and self.at_end(inp)
                     and inp.text.startswith(self.original_draft)):
                 suffix = inp.text[len(self.original_draft):]
@@ -505,7 +505,8 @@ class Sender:
         evidence_since = None
         last_enter = None
         input_disappeared = False
-        max_enters = 1 if literal or (self.stale_draft_length and self.draft_harness == "claude") else 2
+        claude_co_submit = bool(self.stale_draft_length and self.draft_harness == "claude")
+        max_enters = 1 if literal or claude_co_submit else 2
         accepted_forms = {normalized(self.expected)}
         while self.clock() < deadline:
             frame, current = self.sample()
@@ -534,7 +535,6 @@ class Sender:
             evidence = self.input_evidence(current)
             if evidence:
                 fp = current.fingerprint()
-                claude_co_submit = bool(self.stale_draft_length and self.draft_harness == "claude")
                 if owned is not None and fp != owned and (self.enters or claude_co_submit):
                     raise DeliveryError("input-changed-after-paste", 3)
                 if owned != fp:

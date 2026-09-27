@@ -1009,10 +1009,10 @@ assert screen.observe(frame, 'outgoing', 6, 1, pathlib.Path(sys.argv[2])) == 'dr
             t.draft = draft + '[Pasted text #1 +1 lines]'
         def frame():
             if t.pastes and t.accepted_at is None:
-                text = draft + '[Pasted text #1 +1 lines]'
-                raw = '──────────────\n❯\u00a0' + text + '\n──────────────\n'
-                return m.Frame(raw, 2 + m.styles.cell_width(text.rsplit('\n', 1)[-1]),
-                               1 + text.count('\n'), raw)
+                first, second = draft.split('\n')
+                suffix = '[Pasted text #1 +1 lines]'
+                raw = '──────────────\n❯\u00a0' + first + '\n  ' + second + suffix + '\n──────────────\n'
+                return m.Frame(raw, 2 + m.styles.cell_width(second + suffix), 2, raw)
             return original_frame()
         t.paste, t.frame = paste, frame
         result = deliver(t)
@@ -1229,6 +1229,56 @@ assert screen.observe(frame, 'outgoing', 6, 1, pathlib.Path(sys.argv[2])) == 'dr
             return original_frame()
         t.paste, t.frame = paste, frame
         with self.assertRaisesRegex(m.DeliveryError, 'input-changed-before-enter'):
+            deliver(t)
+        self.assertEqual((t.pastes, t.enters), (1, 0))
+
+    def test_claude_collapsed_append_unknown_then_new_marker_defers(self):
+        draft = 'Disposable retirement rehearsal reminder.'
+        t = Terminal(payload='x' * 1368, draft=draft)
+        t.harness = 'claude'
+        original_frame, original_paste = t.frame, t.paste
+        samples = 0
+        def paste(path):
+            original_paste(path)
+            t.draft = draft + '[Pasted text #1 +1 lines]'
+        def frame():
+            nonlocal samples
+            if t.pastes and t.accepted_at is None:
+                samples += 1
+                if samples == 2:
+                    return m.Frame('', -1, -1)
+                ordinal = 1 if samples == 1 else 2
+                text = draft + f'[Pasted text #{ordinal} +1 lines]'
+                raw = '──────────────\n❯\u00a0' + text + '\n──────────────\n'
+                return m.Frame(raw, 2 + m.styles.cell_width(text), 1, raw)
+            return original_frame()
+        t.paste, t.frame = paste, frame
+        with self.assertRaisesRegex(m.DeliveryError, 'input-changed-after-paste'):
+            deliver(t)
+        self.assertEqual((t.pastes, t.enters), (1, 0))
+
+    def test_claude_collapsed_append_bare_draft_change_defers(self):
+        draft = 'Disposable retirement rehearsal reminder.'
+        t = Terminal(payload='x' * 1368, draft=draft)
+        t.harness = 'claude'
+        original_frame, original_paste = t.frame, t.paste
+        samples = 0
+        def paste(path):
+            original_paste(path)
+            t.draft = draft + '[Pasted text #1 +1 lines]'
+        def frame():
+            nonlocal samples
+            if t.pastes and t.accepted_at is None:
+                samples += 1
+                if samples == 2:
+                    return screen(draft, harness='claude')
+                ordinal = 1 if samples == 1 else 2
+                text = draft + f'[Pasted text #{ordinal} +1 lines]'
+                raw = '──────────────\n❯\u00a0' + text + '\n──────────────\n'
+                return m.Frame(raw, 2 + m.styles.cell_width(text), 1, raw)
+            return original_frame()
+        t.paste, t.frame = paste, frame
+        with self.assertRaisesRegex(m.DeliveryError, 'mixed-input-after-paste'):
             deliver(t)
         self.assertEqual((t.pastes, t.enters), (1, 0))
 
