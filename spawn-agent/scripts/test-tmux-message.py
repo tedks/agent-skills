@@ -405,6 +405,63 @@ class DeliveryTests(unittest.TestCase):
             self.assertEqual(list(Path(tmp).iterdir()), [path])
             self.assertEqual(t.enters, 0)
 
+    def test_combined_residue_two_attempts_never_repastes(self):
+        for harness in ('codex', 'claude'):
+            with self.subTest(harness=harness):
+                t = Terminal(draft='stale TICK', dropped=99)
+                t.harness = harness
+                with self.assertRaisesRegex(m.DeliveryError, 'receipt-timeout'):
+                    deliver(t)
+                self.assertEqual(t.draft, 'stale TICK\nhello')
+                first_actions = list(t.actions)
+                try:
+                    deliver(t)
+                except m.DeliveryError:
+                    pass
+                self.assertEqual(t.actions, first_actions, 'retained combined input was replayed')
+                self.assertEqual(t.pastes, 1)
+
+    def test_mixed_own_payload_residue_both_harnesses(self):
+        for harness in ('codex', 'claude'):
+            for draft in ('hello human', 'human hello', 'human he\nllo'):
+                with self.subTest(harness=harness, draft=draft):
+                    t = Terminal(draft=draft)
+                    t.harness = harness
+                    try:
+                        deliver(t)
+                    except m.DeliveryError:
+                        pass
+                    self.assertEqual(t.actions, [], 'recognizable outgoing content was replayed')
+
+    def test_observe_private_draft_file_utf8_in_ascii_locale(self):
+        import os
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / 'draft'
+            child = r"""
+import importlib.util, locale, pathlib, sys
+assert sys.flags.utf8_mode == 0
+assert locale.getpreferredencoding(False).lower() in {'ascii', 'ansi_x3.4-1968'}
+spec = importlib.util.spec_from_file_location('screen', sys.argv[1])
+screen = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(screen)
+draft = 'caf\u00e9'
+frame = '\u2500' * 40 + '\n\u276f\u00a0' + draft + '\n' + '\u2500' * 40 + '\n'
+assert screen.observe(frame, 'outgoing', 6, 1, pathlib.Path(sys.argv[2])) == 'draft'
+"""
+            env = dict(os.environ, LC_ALL='C', PYTHONUTF8='0', PYTHONCOERCECLOCALE='0')
+            result = subprocess.run([sys.executable, '-c', child,
+                                     str(Path(__file__).with_name('claude-send-screen.py')), str(path)],
+                                    env=env, capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(path.read_bytes(), 'caf\u00e9'.encode('utf-8'))
+
+    def test_partial_outgoing_overlap_is_still_a_stale_draft(self):
+        for draft in ('he human', 'world hell', 'ello'):
+            t = Terminal(draft=draft)
+            self.assertEqual(deliver(t)['status'], 'delivered')
+            self.assertEqual(t.submitted, draft + '\nhello')
+            self.assertEqual(t.pastes, 1)
+
     def test_existing_ambiguous_payload_never_reappended(self):
         for draft in ('hello', '[Pasted text #1 +20 lines]', '[Pasted Content 5 chars]'):
             t = Terminal(draft=draft)

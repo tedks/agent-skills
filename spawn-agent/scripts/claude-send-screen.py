@@ -249,9 +249,15 @@ def codex_state(lines: list[str], raw_lines: list[str], payload: str, cx: int, c
     return "busy"
 
 
+def contains_payload(text: str, payload: str) -> bool:
+    """Conservative replay guard: a full payload survives wrapping/spacing."""
+    wanted = "".join(payload.split())
+    return bool(wanted) and wanted in "".join(text.split())
+
+
 def observe(screen: str, payload: str, cx: int, cy: int, path: pathlib.Path) -> str:
     """Write only a validated exact draft to a caller-owned private scratch file."""
-    path.write_text("")
+    path.write_text("", encoding="utf-8")
     result = state(screen, payload, cx, cy)
     if result != "busy":
         return result
@@ -272,9 +278,10 @@ def observe(screen: str, payload: str, cx: int, cy: int, path: pathlib.Path) -> 
         fragment = fragment[1:]
     parts = [fragment.rstrip()] + [row[2:].rstrip() if row.startswith("  ") else row.rstrip() for row in lines[idx + 1:ends[0]]]
     draft = "\n".join(parts).rstrip("\n")
-    if (draft and state(screen, draft, cx, cy) == "own"
+    if (draft and not contains_payload(draft, payload)
+            and state(screen, draft, cx, cy) == "own"
             and not re.search(r"\[Pasted (?:text|Content)", draft, re.I)):
-        path.write_text(draft)
+        path.write_text(draft, encoding="utf-8")
         return "draft"
     return result
 

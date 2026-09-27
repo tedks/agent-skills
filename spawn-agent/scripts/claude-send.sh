@@ -242,7 +242,7 @@ remaining=$(awk -v d="$max_wait" -v e="$elapsed" 'BEGIN { printf "%.3f",d-e }')
 awk -v r="$remaining" 'BEGIN { exit !(r > 0) }' || { preserve_pending deferred final-pre-paste-timeout; exit 2; }
 if [[ "$state" != "$previous_state" ]] || ! cmp -s "$observe_file" "$stable_file"; then preserve_pending deferred "pre-paste-$state"; exit 2; fi
 if [[ "$state" == draft ]]; then
-    stale_draft_length=$(python3 -c 'import pathlib,sys; print(len(pathlib.Path(sys.argv[1]).read_text()))' "$stable_file")
+    stale_draft_length=$(python3 -c 'import pathlib,sys; print(len(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8")))' "$stable_file")
     { printf '\n'; cat "$prompt_file"; } > "$append_file"
     { cat "$stable_file"; cat "$append_file"; } > "$expected_file"
 else

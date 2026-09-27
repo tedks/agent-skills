@@ -347,7 +347,7 @@ class Sender:
                         and not getattr(self.o, "literal_exit", False)
                         and not PASTE.search(inp.text)
                         and "[Pasted Content " not in inp.text
-                        and inp.text != self.payload
+                        and not styles.contains_payload(inp.text, self.payload)
                         and inp.cursor == (2 + styles.cell_width(inp.text.rsplit("\n", 1)[-1]), inp.text.count("\n"))):
                     return frame, inp
                 # Retirement's literal exit permits only Claude's canonical

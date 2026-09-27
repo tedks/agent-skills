@@ -136,8 +136,9 @@ PY
       printf 'human mixed input\n' > "$FAKE_STATE/composer"
     fi
     if [[ "$mode" == render-late-unknown && -s "$FAKE_STATE/pasted" && $n -eq 4 ]]; then /usr/bin/sleep 1.2; fi
-    if [[ "$mode" == human-during-delay && -s "$FAKE_STATE/pasted" && $n -ge 5 ]]; then
-      printf 'a human began typing\n' > "$FAKE_STATE/composer"
+    if [[ "$mode" == human-during-delay && -s "$FAKE_STATE/pasted" && ! -s "$FAKE_STATE/mutated" ]]; then
+      printf ' human began typing' >> "$FAKE_STATE/composer"
+      printf 'mutated' > "$FAKE_STATE/mutated"
     fi
     if [[ "$mode" == forkcompact ]]; then
       if [[ -s "$FAKE_STATE/pasted" ]]; then
@@ -245,6 +246,7 @@ chmod +x "$TEST_DIR/bin/python3" "$TEST_DIR/bin/tmux" "$TEST_DIR/bin/sleep" "$TE
 reset_case() {
   : > "$FAKE_LOG"
   : > "$FAKE_STATE/composer"
+  : > "$FAKE_STATE/mutated"
   : > "$FAKE_STATE/pasted"
   : > "$FAKE_STATE/captures"
   : > "$FAKE_STATE/sleeps"
@@ -308,6 +310,28 @@ printf 'alpha\nbeta' > "$prompt_file"
   done
   ((failures == 0))
   if [[ "${STABLE_INPUT_ONLY:-0}" == 1 ]]; then exit; fi
+}
+
+# Identifiable retained combined or mixed payload must not be appended again.
+{
+  failures=0
+  for mode in stable-claude stable-codex; do
+    for residue in combined mixed; do
+      reset_case "$mode"
+      if [[ "$residue" == combined ]]; then printf 'stale TICK\nalpha\nbeta' > "$FAKE_STATE/composer"
+      else printf 'alpha\nbeta human' > "$FAKE_STATE/composer"; fi
+      printf 'pasted\n' > "$FAKE_STATE/pasted"
+      if run_sender %7 --submit-delay 0 --max-wait 1 --poll-interval 0.1 --prompt-file "$prompt_file" >"$TEST_DIR/replay.out" 2>"$TEST_DIR/replay.err"; then
+        echo "FAIL: $mode $residue outgoing payload replayed"; failures=$((failures + 1))
+      elif [[ ! -s "$FAKE_LOG" ]]; then
+        echo "PASS: $mode $residue deferred without repeated input"
+      else
+        echo "FAIL: $mode $residue attempted repeated input"; failures=$((failures + 1))
+      fi
+    done
+  done
+  ((failures == 0))
+  if [[ "${REPLAY_INPUT_ONLY:-0}" == 1 ]]; then exit; fi
 }
 
 # Invalid byte sequences, control characters, blank content, and trailing
@@ -667,9 +691,9 @@ else rc=$?; [[ $rc -eq 3 ]]; fi
 pending=$(assert_pending ambiguous "$TEST_DIR/midflight.err")
 [[ $(grep -c '^paste-start$' "$FAKE_LOG") -eq 1 ]]
 [[ $(grep -c '^enter$' "$FAKE_LOG" || true) -eq 0 ]]
-[[ $(<"$FAKE_STATE/composer") == 'a human began typing' ]]
+[[ $(<"$FAKE_STATE/composer") == $'alpha\nbeta human began typing' ]]
 # A second attempt while the ambiguous composer is occupied must defer, never duplicate.
-if run_sender %7 --stable-window 8 --submit-delay 0 --max-wait 1 --poll-interval 0.1 --prompt-file "$pending" 2>"$TEST_DIR/retry-occupied.err"; then
+if run_sender %7 --submit-delay 0 --max-wait 1 --poll-interval 0.1 --prompt-file "$pending" 2>"$TEST_DIR/retry-occupied.err"; then
   echo 'FAIL: retry was pasted over occupied composer' >&2; exit 1
 else rc=$?; [[ $rc -eq 2 ]]; fi
 [[ $(grep -c '^paste-start$' "$FAKE_LOG") -eq 1 ]]

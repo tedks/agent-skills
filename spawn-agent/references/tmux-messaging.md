@@ -21,8 +21,12 @@ and types them literally; public callers use `--typed-command` explicitly.
    backoff. Preserve an unchanged draft and append a newline plus the outgoing
    payload; submit both only after verifying the combined input. Record only
    draft length (`stale_draft_length`). Modals and unsupported layouts defer.
-   A draft must have a visibly verified end cursor; collapsed markers and an
-   exact copy of this outgoing payload remain ambiguous and defer. A Claude `Try …`
+   A draft must have a visibly verified end cursor; collapsed markers and
+   recognizable full outgoing content already in the draft remain ambiguous
+   and defer. This prevents a retained combined input from receiving the same
+   payload twice after a failed attempt. The replay guard compares full payload
+   content ignoring whitespace; independently authored text containing the
+   same content also conservatively defers. A Claude `Try …`
    suggestion retains the conservative Space/Backspace probe; suggestions are
    disabled fleet-wide, so normal idle Claude input is empty.
 3. Snapshot receipt history, recheck input, and paste actual text once through
