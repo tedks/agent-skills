@@ -41,7 +41,7 @@ def shard_data(event, identity):
 def process_token(pid):
     try:
         stat = Path(f'/proc/{pid}/stat').read_text().rsplit(')', 1)[1].split()
-    except FileNotFoundError:
+    except (FileNotFoundError, ProcessLookupError):
         return None
     if stat[0] == 'Z':
         return None
@@ -64,10 +64,21 @@ def register_fixture(directory, pid, role, argv0=None):
             ledger.write(json.dumps(dict(token, role=role, argv0=argv0)) + '\n')
 
 
+def fixture_records(directory):
+    ledger = directory / 'owned-processes.jsonl'
+    if not ledger.exists():
+        return []
+    # Append writers may not have flushed the trailing newline yet. Re-read
+    # later rather than treating an incomplete record as ownership authority.
+    return [json.loads(line) for line in ledger.read_text().splitlines(keepends=True)
+            if line.endswith('\n')]
+
+
 def fixture_command(directory, inner):
     # The surviving shell also owns a fixture HOME, rather than the host's
     # interactive history/config paths after the actor exits.
     environment = {'RETIRE_TEST_PYTHON': sys.executable, 'HOME': str(directory / 'actor-home'),
+                   'HISTFILE': str(directory / 'actor-home/history'),
                    'CODEX_HOME': str(directory / 'codex-config'),
                    'CLAUDE_CONFIG_DIR': str(directory / 'claude-config')}
     exports = ' '.join(key + '=' + shlex.quote(value) for key, value in environment.items())
@@ -360,6 +371,11 @@ class Tests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.directory = Path(self.temp.name)
+        (self.directory / 'actor-home').mkdir()
+        # The uniquely owned server and any extra default-shell panes inherit
+        # fixture history/config paths, even without fixture_command.
+        self.server_env = dict(os.environ, HOME=str(self.directory / 'actor-home'),
+                               HISTFILE=str(self.directory / 'actor-home/history'))
         self.label = 'retire-test-' + uuid.uuid4().hex
         self.tmux = ['tmux', '-L', self.label]
         self.repo = self.directory / 'repo'
@@ -396,26 +412,34 @@ class Tests(unittest.TestCase):
         self.release_fixture()
 
     def release_fixture(self):
-        if getattr(self, 'fixture_released', False):
-            return
-        # A failed release must retain its private directory. Python's automatic
-        # finalizer must not later delete files beneath a still-writing actor.
+        if getattr(self, 'fixture_release_attempted', False):
+            return  # Never retry deletion after a retained release diagnostic.
+        self.fixture_release_attempted = True
+        # CPython TemporaryDirectory's private finalizer is detached so an
+        # exception cannot later delete files beneath a still-writing actor.
+        # cleanup() still explicitly removes the directory on Python 3.11+.
         self.temp._finalizer.detach()
-        ledger = self.directory / 'owned-processes.jsonl'
-        owned = [json.loads(line) for line in ledger.read_text().splitlines()] if ledger.exists() else []
-        for record in owned:
-            token = {key: record[key] for key in ('pid', 'start', 'boot')}
-            if record['role'] == 'linger-core' and process_token(record['pid']) == token:
-                try:
-                    argv0 = Path(f"/proc/{record['pid']}/cmdline").read_bytes().split(b'\0')[0].decode()
-                    if argv0 == record['argv0'] and argv0.startswith(str(self.directory / '@openai/codex/')):
-                        os.kill(record['pid'], signal.SIGTERM)  # Original deliberate owned-core release only.
-                except (ProcessLookupError, FileNotFoundError):
-                    pass
+        owned = {}
+        signaled = set()
+        def refresh_owned():
+            for record in fixture_records(self.directory):
+                key = tuple(record[field] for field in ('pid', 'start', 'boot', 'role'))
+                owned[key] = record
+                token = {field: record[field] for field in ('pid', 'start', 'boot')}
+                if key not in signaled and record['role'] == 'linger-core' and process_token(record['pid']) == token:
+                    try:
+                        argv0 = Path(f"/proc/{record['pid']}/cmdline").read_bytes().split(b'\0')[0].decode()
+                        if argv0 == record['argv0'] and argv0.startswith(str(self.directory / '@openai/codex/')):
+                            os.kill(record['pid'], signal.SIGTERM)  # Original deliberate owned-core release only.
+                            signaled.add(key)
+                    except (ProcessLookupError, FileNotFoundError):
+                        pass
+        refresh_owned()
         subprocess.run(self.tmux + ['kill-server'], capture_output=True)
         deadline = time.monotonic() + 4
         while True:
-            live = [record for record in owned if process_token(record['pid']) ==
+            refresh_owned()  # Include actors enrolled during server shutdown.
+            live = [record for record in owned.values() if process_token(record['pid']) ==
                     {key: record[key] for key in ('pid', 'start', 'boot')}]
             if not live:
                 break
@@ -429,7 +453,7 @@ class Tests(unittest.TestCase):
         self.fixture_released = True
 
     def command(self, *args):
-        return subprocess.check_output(args, text=True, stderr=subprocess.DEVNULL).strip()
+        return subprocess.check_output(args, text=True, stderr=subprocess.DEVNULL, env=self.server_env).strip()
 
     def git(self, *args):
         return self.command('git', '-C', str(self.repo), *args)
@@ -494,14 +518,51 @@ class Tests(unittest.TestCase):
         entry.chmod(0o700)
         return entry
 
+    def test_process_end_during_stat_read_is_ended(self):
+        with patch.object(Path, 'read_text', side_effect=ProcessLookupError):
+            self.assertIsNone(process_token(os.getpid()))
+
+    def test_fixture_ledger_waits_for_complete_record(self):
+        ledger = self.directory / 'owned-processes.jsonl'
+        record = {'pid': os.getpid(), 'start': 'fixture', 'boot': 'fixture', 'role': 'writer'}
+        ledger.write_text(json.dumps(record))
+        self.assertEqual(fixture_records(self.directory), [])
+        with ledger.open('a') as handle:
+            handle.write('\n')
+        self.assertEqual(fixture_records(self.directory), [record])
+        ledger.unlink()  # This simulated record never enrolled a real actor.
+
+    def test_failed_release_preserves_diagnostic_on_second_call(self):
+        record = dict(process_token(os.getpid()), role='writer', argv0=None)
+        (self.directory / 'owned-processes.jsonl').write_text(json.dumps(record) + '\n')
+        with patch('time.monotonic', side_effect=[0, 5]):
+            with self.assertRaises(self.failureException):
+                self.release_fixture()
+        diagnostic = self.directory / 'cleanup-pending.json'
+        original = diagnostic.read_bytes()
+        self.release_fixture()
+        self.assertEqual(diagnostic.read_bytes(), original)
+        # Only the test's own live controller was simulated; no actor/server
+        # exists, so explicitly remove this owned negative-test directory.
+        self.temp.cleanup()
+
     def test_cleanup_waits_for_owned_shutdown_writer(self):
         self.actor('cleanup-writer')
         self.wait_for(lambda: (self.directory / 'late-writer').exists())
-        records = [json.loads(line) for line in (self.directory / 'owned-processes.jsonl').read_text().splitlines()]
-        writer = next(record for record in records if record['role'] == 'writer')
+        self.wait_for(lambda: any(record['role'] == 'writer' for record in fixture_records(self.directory)))
+        writer = next(record for record in fixture_records(self.directory) if record['role'] == 'writer')
         self.assertIsNotNone(process_token(writer['pid']))
         directory = self.directory
-        self.release_fixture()
+        read_records = fixture_records
+        reads = 0
+        def late_enrollment(path):
+            nonlocal reads
+            reads += 1
+            records = read_records(path)
+            return [record for record in records if record['role'] != 'writer'] if reads == 1 else records
+        with patch(__name__ + '.fixture_records', side_effect=late_enrollment):
+            self.release_fixture()
+        self.assertGreaterEqual(reads, 2)
         self.assertFalse(directory.exists())
         current = process_token(writer['pid'])
         self.assertNotEqual(current, {key: writer[key] for key in ('pid', 'start', 'boot')})
