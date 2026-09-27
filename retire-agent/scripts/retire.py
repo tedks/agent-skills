@@ -233,6 +233,69 @@ class Retirement:
         if self.identity() != self.state['identity']:
             raise Stop('pane/process identity changed')
 
+    def verify_native_session(self, session_id):
+        # Recheck the live actor around its provider-owned binding. Neither an
+        # inherited environment UUID nor a matching cwd identifies this process.
+        self.verify_identity()
+        original = self.state['identity']['process']
+        actor = (original.get('cores') or [original])[0]
+        if not re.fullmatch(r'[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}', session_id):
+            raise Stop('handoff verified; exit pending verifiable native session UUID')
+        if original['agent'] == 'codex':
+            source = Path(__file__).resolve()
+            roots = [source.parents[4]] if len(source.parents) > 4 else []
+            installed = Path.home() / '.codex/skills/retire-agent/scripts/retire.py'
+            if installed.is_file() and len(installed.resolve().parents) > 4:
+                roots.append(installed.resolve().parents[4])
+            helper = next((root / 'mcp/claude-introspect/codex_status.py' for root in roots
+                           if (root / 'mcp/claude-introspect/codex_status.py').is_file()), None)
+            if helper is None:
+                raise Stop('native Codex session reader unavailable')
+            try:
+                spec = importlib.util.spec_from_file_location('retire_codex_status', helper)
+                if spec is None or spec.loader is None:
+                    raise Stop('native Codex session reader unavailable')
+                module = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(module)
+                proof = module.read_codex_status(actor['pid'])
+            except Exception as error:
+                raise Stop('handoff verified; native Codex session reader failed') from error
+            if not isinstance(proof, dict) or proof.get('state') != 'observed' or proof.get('session_id') != session_id:
+                raise Stop('handoff verified; pinned Codex native session binding differs or unavailable')
+        elif original['agent'] == 'claude':
+            try:
+                environment = dict(item.split(b'=', 1) for item in
+                                   Path(f"/proc/{actor['pid']}/environ").read_bytes().split(b'\0') if b'=' in item)
+                home = Path(environment[b'HOME'].decode())
+                configured = environment.get(b'CLAUDE_CONFIG_DIR')
+                directories = [home / '.claude/session-state']  # Installed capture-session-state hook contract.
+                if configured:
+                    config = Path(configured.decode())
+                    if not config.is_absolute():
+                        raise Stop('relative Claude config directory unsupported')
+                    directories.insert(0, config / 'session-state')
+                if not home.is_absolute():
+                    raise Stop('relative pinned HOME unsupported')
+                bindings = []
+                for directory in dict.fromkeys(directories):
+                    pointer = directory / ('current.' + str(actor['pid']))
+                    try:
+                        fields = pointer.read_text().split()
+                    except FileNotFoundError:
+                        continue
+                    if len(fields) != 3 or fields[1:] != [actor['start'], actor['boot']]:
+                        raise Stop('handoff verified; stale or malformed Claude process pointer')
+                    bindings.append((fields[0], str(pointer)))
+                if not bindings or any(value != session_id for value, _ in bindings):
+                    raise Stop('handoff verified; pinned Claude native session binding differs or unavailable')
+                proof = {'status': 'observed', 'session_id': session_id, 'pointer': bindings[0][1]}
+            except (OSError, UnicodeError, KeyError) as error:
+                raise Stop('handoff verified; Claude native session binding unavailable') from error
+        else:
+            raise Stop('handoff verified; native session binding unsupported')
+        self.verify_identity()
+        return proof
+
     def persist(self):
         save(self.path, self.state)
 
@@ -254,6 +317,9 @@ class Retirement:
             if attempt['status'] == 'delivered':
                 return
             raise Stop(f'{phase} has an unresolved send; inspect receipt, never replay')
+        if phase == 'exit':
+            preserved = object_record(self.git('show', self.state['shard_hash'], raw=True), 'preserved shard')
+            self.verify_native_session(preserved.get('session_id', 'unknown'))
         payload_path = self.path.parent / (self.state['id'] + '-' + phase + '.txt')
         payload_path.write_text(payload)
         payload_path.chmod(0o600)
@@ -318,7 +384,14 @@ class Retirement:
         codex_footer = (self.state['identity']['process']['agent'] == 'codex'
                         and len(tail) == 1
                         and re.fullmatch(r'  Worked for [1-9][0-9]*m [0-5]?[0-9]s · (?:[01][0-9]|2[0-3]):[0-5][0-9]', tail[0].rstrip()))
-        if tail and not codex_footer:
+        # Claude 2.1.283 emits this native turn-duration row plus a padded
+        # token status row. Verb pool/glyph/duration were verified in its local
+        # renderer; only the measured default 12-hour done time is recognized.
+        claude_footer = (self.state['identity']['process']['agent'] == 'claude'
+                         and len(tail) == 2
+                         and re.fullmatch(r'✻ (?:Baked|Brewed|Churned|Cogitated|Cooked|Crunched|Sautéed|Worked) for (?:[0-5]?[0-9]s|[1-9][0-9]*m [0-5]?[0-9]s) · done (?:[1-9]|1[0-2]):[0-5][0-9] (?:AM|PM)', tail[0].rstrip())
+                         and re.fullmatch(r' +[0-9]+ tokens', tail[1].rstrip()))
+        if tail and not (codex_footer or claude_footer):
             return None
         return marker[1]
 
@@ -523,9 +596,9 @@ class Retirement:
         fields = self.pane()
         if fields[1] != self.state['identity']['pane_pid']:
             raise Stop('pane root identity changed; exit notice withheld')
-        frame = checked(self.tmux + ['capture-pane', '-p', '-S', '-2000', '-t', self.args.pane], strip=False)
-        prefix = (r'^Token usage: [^\n]+\nTo continue this session, run:\n' if agent == 'codex'
-                  else r'^Resume this session with:\n')
+        frame = checked(self.tmux + ['capture-pane', '-p', '-J', '-S', '-', '-t', self.args.pane], strip=False)
+        prefix = (r'^Token usage: [^\n]+\nTo continue this session, run:[ \t]*\n' if agent == 'codex'
+                  else r'^Resume this session with:[ \t]*\n')
         return len(re.findall(prefix + r'[ \t]*' + re.escape(command + session_id) + r'[ \t]*$', frame, re.MULTILINE))
 
     def fresh_exit_notice(self, session_id):
@@ -693,6 +766,7 @@ class Retirement:
         if not self.state.get('exit'):
             if self.ended():
                 raise Stop('handoff verified; original ended before exit request, fresh notice unavailable')
+            self.verify_native_session(session_id)
             self.state['exit_notice'] = {'session_id': session_id, 'before': self.exit_notice_count(session_id)}
             self.persist()  # Save only the count before any exit input, for safe resume.
             try:

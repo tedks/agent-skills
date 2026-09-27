@@ -9,7 +9,7 @@ Use this for an explicitly authorized retirement, waiting handoff, or migration.
 A saved handoff and an ended agent process are separate receipts. Preserve
 human input and leave a session open when either receipt cannot be established.
 Read [the shard and recovery contract](references/protocol.md) before invoking
-the script. Linux `/proc`, tmux, Git, Python 3 and the installed spawn-agent
+the script. Linux `/proc`, tmux, Git, Python 3.11+ and the installed spawn-agent
 skill are required. The sender must provide the stable ordinary draft
 co-submission contract from dotfiles PR #156, plus guarded typed Claude exit. Defaults: `~/Projects/off-duty` on `master`, origin private
 on GitHub, and `~/Projects/orgs/master/doctrine/ROLES.md`.
@@ -54,8 +54,11 @@ from personal thanks. A provider-native resume handle comes last and must not
 be required to reconstruct the work.
 
 Record attempts privately without storing pane contents or unfinished human
-text. Verify all pinned original processes ended and a fresh native resume notice
-names the immutable shard’s same session UUID; an exit transport result alone is
+text. Before exit, match the immutable shard UUID to the pinned native process:
+Codex uses its unique writable CLI rollout descriptor; Claude uses its
+per-process session pointer with start/boot identity. Missing or conflicting
+bindings leave the handoff pending without exit input. Verify all pinned original processes ended and a fresh native resume notice
+names the immutable shard's same session UUID; an exit transport result alone is
 insufficient. Never kill a session. Do not stop unrelated services or delete
 worktrees, branches, transcripts, or another actor's files.
 
@@ -87,7 +90,9 @@ the default is this checkout's sibling spawn-agent.
 naming an exclusively owned, clean disposable Git directory, `--evidence`
 naming a new private directory, and `--shared-skill` naming the published
 spawn-agent installation. The cwd must be separate from the skill's source
-worktree. The launcher grants Claude trust only to that exact disposable cwd. Codex
+worktree. Use `--preflight-only` for read-only validation without evidence or
+model launches. The launcher grants Claude trust only to that exact disposable
+cwd. Codex
 receives an exact-cwd project trust table through its documented per-process
 `-c` option via the launcher's `--codex-bin` wrapper; no global config is written.
 The test compares cwd HEAD/status/tracked diff on success and failure, samples

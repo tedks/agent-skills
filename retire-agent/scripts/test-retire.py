@@ -39,6 +39,25 @@ def shard_data(event, identity):
 
 def terminal(directory, mode):
     directory = Path(directory)
+    session = 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa'
+    rollout = Path(os.environ['CODEX_HOME']) / 'sessions/rollout-fixture-' / ('rollout-' + session + '.jsonl')
+    rollout.parent.mkdir(parents=True, exist_ok=True)
+    if not rollout.exists():
+        rollout.write_text(json.dumps({'type': 'session_meta', 'payload': {'id': session, 'source': 'cli', 'cwd': os.getcwd()}}) + '\n')
+    extra_fd = None
+    if mode == 'ambiguous-native-fd':
+        second = rollout.with_name('rollout-bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb.jsonl')
+        second.write_text(json.dumps({'type': 'session_meta', 'payload': {'id': 'bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb', 'source': 'cli', 'cwd': os.getcwd()}}) + '\n')
+        extra_fd = second.open('a')
+    native_fd = rollout.open('a')  # Provider reader requires a writable CLI rollout fd.
+    if mode == 'missing-native-fd':
+        native_fd.close()
+    if mode.startswith('claude'):
+        state_dir = Path(os.environ['CLAUDE_CONFIG_DIR']) / 'session-state'
+        state_dir.mkdir(parents=True, exist_ok=True)
+        start = Path('/proc/self/stat').read_text().rsplit(')', 1)[1].split()[19]
+        boot = Path('/proc/sys/kernel/random/boot_id').read_text().strip()
+        (state_dir / ('current.' + str(os.getpid()))).write_text(session + ' ' + start + ' ' + boot + '\n')
     old = termios.tcgetattr(0)
     tty.setraw(0)
     draft = b'human unfinished draft' if mode in ('draft', 'stable-draft') else b''
@@ -57,12 +76,13 @@ def terminal(directory, mode):
         names = (core,) if mode == 'linger-core' else (core, core if mode == 'extra-core' else 'node')
         for name in names:
             if mode == 'linger-core':
-                body = 'import signal,time; signal.signal(signal.SIGHUP,signal.SIG_IGN); time.sleep(360)'
+                body = 'import signal,time; signal.signal(signal.SIGHUP,signal.SIG_IGN); fd=open(' + repr(str(rollout)) + ',"a"); time.sleep(360)'
                 command = 'exec -a ' + shlex.quote(name) + ' ' + shlex.join([os.environ['RETIRE_TEST_PYTHON'], '-c', body])
                 children.append(subprocess.Popen(['bash', '-c', command], start_new_session=True))
                 (directory / 'owned-core-pid').write_text(str(children[-1].pid))
             else:
-                children.append(subprocess.Popen(['bash', '-c', 'exec -a ' + shlex.quote(name) + ' sleep 360']))
+                body = 'import time; fd=open(' + repr(str(rollout)) + ',"a"); time.sleep(360)'
+                children.append(subprocess.Popen(['bash', '-c', 'exec -a ' + shlex.quote(name) + ' ' + shlex.join([os.environ['RETIRE_TEST_PYTHON'], '-c', body])]))
     def draw():
         plain_draft = not pasted_payload
         collapsed = f'[Pasted Content {len(draft.decode(errors="replace"))} chars]' if draft and not plain_draft else draft.decode(errors='replace')
@@ -154,7 +174,7 @@ def terminal(directory, mode):
                                 verified_hash = subprocess.run(['git', '--git-dir', str(remote), 'rev-parse', record.get('commit', 'missing') + ':' + expected], capture_output=True, text=True)
                                 recorded_blob = subprocess.run(['git', '--git-dir', str(remote), 'show', record.get('commit', 'missing') + ':' + expected], capture_output=True)
                                 master_blob = subprocess.run(['git', '--git-dir', str(remote), 'show', 'master:' + expected], capture_output=True)
-                                verified = (record.get('status') == 'handoff-verified' and record.get('event') == event
+                                verified = (record.get('status') in ('handoff-verified', 'pending-exit') and record.get('event') == event
                                             and record.get('shard') == expected and remote_hash.returncode == 0
                                             and verified_hash.returncode == 0 and remote_hash.stdout == verified_hash.stdout
                                             and recorded_blob.returncode == 0 and master_blob.returncode == 0
@@ -177,7 +197,7 @@ def terminal(directory, mode):
                                 (directory / 'terminal.json').write_text(json.dumps({'pastes': pastes, 'enters': enters, 'event': event, 'exit_pasted': pasted_payload, 'exit_enters': exit_enters}))
                                 if mode != 'no-exit-notice':
                                     session = 'bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb' if mode.endswith('wrong-exit-notice') else 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa'
-                                    notice = ('Resume this session with:\r\nclaude --resume ' if mode.startswith('claude') else 'Token usage: total=42\r\nTo continue this session, run:\r\n  codex resume ') + session + '\r\n'
+                                    notice = ('Resume this session with:\r\nclaude --resume ' if mode.startswith('claude') else ('Token usage: total=42 input=100000 (+ 90000 cached) output=10000 (reasoning 9000)\r\nTo continue this session, run:\r\n  codex resume ' if mode == 'narrow-notice' else 'Token usage: total=42\r\nTo continue this session, run:\r\n  codex resume ')) + session + '\r\n'
                                     sys.stdout.write('\r\n\x1b[J' + notice)
                                     sys.stdout.flush()
                                 return
@@ -190,6 +210,8 @@ def terminal(directory, mode):
                             identity = json.JSONDecoder().raw_decode(payload.split(', identity ', 1)[1])[0]
                             shard = directory / 'repo' / '.git' / 'retirements' / (event + '.shard')
                             data = shard_data(event, identity)
+                            if mode.endswith('wrong-shard-id'):
+                                data['session_id'] = 'bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb'
                             if mode != 'waiting-bad':
                                 data['waiting'] = {'decision': 'Choose scope', 'owner': 'Ted'}
                             if mode == 'resource':
@@ -210,7 +232,7 @@ def terminal(directory, mode):
                                 hook.chmod(0o700)
                         history = ('❯' if mode.startswith('claude') else '›') + ' [Pasted Content ' + str(len(payload)) + ' chars]\r\n'
                         if mode == 'stable-draft' and paste_prefix:
-                            history = '› ' + paste_prefix.decode(errors='replace') + ' [Pasted Content ' + str(len(payload) - len(paste_prefix.decode(errors='replace'))) + ' chars]\r\n'
+                            history = '› ' + paste_prefix.decode(errors='replace') + '[Pasted Content ' + str(len(payload) - len(paste_prefix.decode(errors='replace'))) + ' chars]\r\n'
                         if mode.startswith('claude'):
                             history = '• Messages to be submitted after next tool call\r\n  ↳ [Pasted Content ' + str(len(payload)) + ' chars]\r\n'
                         if mode == 'ambiguous':
@@ -239,11 +261,28 @@ def terminal(directory, mode):
                                             history += '  Recovery still needs correction.\r\n'
                                         elif mode.endswith('same-row-prose'):
                                             history = history[:-2] + ' Recovery still needs correction.\r\n'
+                                    if 'claude-footer' in mode:
+                                        timing = '✻ Baked for 19s · done 1:27 PM'
+                                        if mode.endswith('minute'):
+                                            timing = '✻ Sautéed for 1m 0s · done 12:27 AM'
+                                        if mode.endswith('same-row-prose'):
+                                            timing += ' Recovery still needs correction.'
+                                        elif mode.endswith('unknown-verb'):
+                                            timing = timing.replace('Baked', 'Invented')
+                                        tokens = '50713 tokens'
+                                        if mode.endswith('token-partial'):
+                                            tokens = '50713 token'
+                                        history += timing + '\r\n' + ' ' * 200 + tokens + '\r\n'
+                                        if mode.endswith('extra-prose'):
+                                            history += '  Recovery still needs correction.\r\n'
                                     if mode.endswith('suffix'):
                                         history += '  Do not retire yet; recovery still needs correction.\r\n'
                                     elif mode.endswith('later-assistant'):
                                         history += '● Recovery still needs correction.\r\n'
                         draft = ('● RETIRE-DONE-' + event).encode() if mode in ('composer', 'claude-composer') else (b'ordinary human draft' if mode in ('claude-exit-draft', 'codex-exit-draft') else b'')
+                        pasted_payload = False
+                    elif not pasting and char == b'\x15':
+                        draft = b''
                         pasted_payload = False
                     else:
                         draft += char
@@ -257,6 +296,9 @@ def terminal(directory, mode):
             if mode != 'linger-core':
                 child.terminate()
                 child.wait()
+        native_fd.close()
+        if extra_fd:
+            extra_fd.close()
         termios.tcsetattr(0, termios.TCSADRAIN, old)
 
 
@@ -330,7 +372,7 @@ class Tests(unittest.TestCase):
         command = shlex.join([sys.executable, str(fixture), '--terminal', str(self.directory), mode])
         # argv[0] is the harness identity; outer shell survives process exit.
         inner = 'exec -a ' + ('node' if node else ('claude' if mode.startswith('claude') else 'codex')) + ' ' + command
-        outer = shlex.join(['env', 'RETIRE_TEST_PYTHON=' + sys.executable, 'bash', '-c', inner]) + '; exec bash --norc'
+        outer = shlex.join(['env', 'RETIRE_TEST_PYTHON=' + sys.executable, 'CODEX_HOME=' + str(self.directory / 'codex-config'), 'CLAUDE_CONFIG_DIR=' + str(self.directory / 'claude-config'), 'bash', '-c', inner]) + '; exec bash --norc'
         options = ['-c', str(self.directory)] if relative else []
         pane = self.command(*self.tmux, 'new-session', '-d', '-P', '-F', '#{pane_id}', '-x', '240', '-y', '40', *options, outer)
         self.pane = pane
@@ -471,6 +513,86 @@ class Tests(unittest.TestCase):
         self.assertFalse((self.directory / 'exit-order.json').exists())
         self.assertEqual(self.git('rev-parse', 'origin/master:' + state['shard']), state['shard_hash'])
 
+    def test_native_reader_failure_is_pending_without_exit(self):
+        self.actor()
+        entry = self.instrument("                proof = module.read_codex_status(actor['pid'])", "                raise RuntimeError('fixture reader unavailable')")
+        with patch.dict(os.environ, {'RETIRE_TEST_SCRIPT': str(entry)}):
+            result = self.invoke()
+        self.assertEqual(result.returncode, 2, result.stderr)
+        self.assertIn('native Codex session reader failed', result.stderr)
+        self.assertNotIn('Traceback', result.stderr)
+        self.assertNotIn('exit', self.state()[1])
+
+    def test_wrong_native_session_shard_never_requests_exit(self):
+        self.actor('wrong-shard-id')
+        result = self.invoke()
+        self.assertEqual(result.returncode, 2, result.stderr)
+        self.assertIn('native session binding differs', result.stderr)
+        state = self.state()[1]
+        self.assertTrue(state.get('handoff_receipt'))
+        self.assertNotIn('exit', state)
+        self.assertFalse((self.directory / 'exit-order.json').exists())
+
+    def assert_native_fd_pending(self, mode):
+        self.actor(mode)
+        result = self.invoke()
+        self.assertEqual(result.returncode, 2, result.stderr)
+        self.assertIn('native session binding differs or unavailable', result.stderr)
+        self.assertNotIn('exit', self.state()[1])
+
+    def test_codex_missing_native_fd_never_requests_exit(self):
+        self.assert_native_fd_pending('missing-native-fd')
+
+    def test_codex_ambiguous_native_fd_never_requests_exit(self):
+        self.assert_native_fd_pending('ambiguous-native-fd')
+
+    def test_claude_missing_pointer_never_requests_exit(self):
+        self.actor('claude')
+        next((self.directory / 'claude-config/session-state').glob('current.*')).unlink()
+        result = self.invoke()
+        self.assertEqual(result.returncode, 2, result.stderr)
+        self.assertIn('native session binding differs or unavailable', result.stderr)
+        self.assertNotIn('exit', self.state()[1])
+
+    def test_claude_stale_process_pointer_never_requests_exit(self):
+        self.actor('claude')
+        pointer = next((self.directory / 'claude-config/session-state').glob('current.*'))
+        fields = pointer.read_text().split()
+        pointer.write_text(fields[0] + ' 0 ' + fields[2] + '\n')
+        result = self.invoke()
+        self.assertEqual(result.returncode, 2, result.stderr)
+        self.assertIn('stale or malformed Claude process pointer', result.stderr)
+        self.assertNotIn('exit', self.state()[1])
+        self.assertFalse((self.directory / 'exit-order.json').exists())
+
+    def test_claude_wrong_native_session_shard_never_requests_exit(self):
+        self.actor('claude-wrong-shard-id')
+        result = self.invoke()
+        self.assertEqual(result.returncode, 2, result.stderr)
+        self.assertIn('native session binding differs', result.stderr)
+        self.assertNotIn('exit', self.state()[1])
+        self.assertFalse((self.directory / 'exit-order.json').exists())
+
+    def test_narrow_pane_joined_native_exit_notice(self):
+        self.actor('narrow-notice')
+        self.command(*self.tmux, 'resize-window', '-t', self.pane, '-x', '60')
+        result = self.invoke()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.state()[1]['status'], 'retired')
+
+    def test_retry_deferred_exit_requires_current_pair(self):
+        self.actor('codex-exit-draft')
+        self.assertEqual(self.invoke().returncode, 2)
+        path, state = self.state()
+        self.assertEqual(state['exit']['status'], 'deferred')
+        self.command(*self.tmux, 'send-keys', '-t', self.pane, 'C-u')
+        result = self.invoke('--resume', str(path), '--retry-deferred', 'exit')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        current = self.state()[1]
+        self.assertEqual(current['status'], 'retired')
+        self.assertGreaterEqual(current['exit']['enters'], 1)
+        self.assertTrue(json.loads((self.directory / 'exit-order.json').read_text())['receipt_before_exit'])
+
     def test_wrong_session_exit_notice_is_pending(self):
         self.actor('wrong-exit-notice')
         result = self.invoke()
@@ -498,6 +620,7 @@ class Tests(unittest.TestCase):
         module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(module)
         observer = module.Retirement(SimpleNamespace(pane='%1'))
+        observer.tmux = ['tmux', '-L', 'inert-owned-unit-test']
         session = 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa'
         observer.state = {'identity': {'pane_pid': '123', 'process': {'agent': 'codex'}},
                           'exit': {'status': 'ambiguous', 'input_attempted': True, 'enters': 1},
@@ -516,13 +639,28 @@ class Tests(unittest.TestCase):
             observer.state['exit_notice']['before'] = 1
             self.assertFalse(observer.fresh_exit_notice(session))  # Old full banner.
             observer.state['exit_notice']['before'] = 0
-            observer.state['exit'] = {'status': 'deferred', 'input_attempted': False}
+            observer.state['exit'] = {'status': 'deferred', 'input_attempted': False, 'enters': 1}
             self.assertFalse(observer.fresh_exit_notice(session))
         # A resumed missing or mismatched baseline cannot gain cached authority.
         observer.state['exit'] = {'status': 'ambiguous', 'input_attempted': True, 'enters': 1}
         observer.state['exit_notice']['session_id'] = 'bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb'
         with self.assertRaises(module.Stop):
             observer.fresh_exit_notice(session)
+
+    def test_deferred_positive_enter_is_not_exit_request(self):
+        spec = importlib.util.spec_from_file_location('retire-deferred-test', Path(os.environ.get('RETIRE_TEST_SCRIPT', str(HERE / 'retire.sh'))).with_name('retire.py'))
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        observer = module.Retirement(SimpleNamespace(pane='%1'))
+        observer.tmux = ['tmux', '-L', 'inert-owned-unit-test']
+        session = 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa'
+        observer.state = {'identity': {'pane_pid': '123', 'process': {'agent': 'codex'}},
+                          'exit': {'status': 'deferred', 'input_attempted': False, 'enters': 1},
+                          'exit_notice': {'session_id': session, 'before': 0}}
+        observer.pane = lambda: ['%1', '123', 'owned', '/owned']
+        banner = 'Token usage: total=42\nTo continue this session, run:\n  codex resume ' + session + '\n'
+        with patch.object(module, 'checked', return_value=banner):
+            self.assertFalse(observer.fresh_exit_notice(session))
 
     def test_unknown_caller_identity_preserves_handoff_without_exit(self):
         self.actor('decline')
@@ -545,12 +683,35 @@ class Tests(unittest.TestCase):
             candidates.append(master)
         for index, directory in enumerate(candidates):
             evidence = self.directory / ('rejected-native-' + str(index))
-            result = subprocess.run([sys.executable, str(HERE / 'test-retire-native.py'),
+            result = subprocess.run([sys.executable, str(HERE / 'test-retire-native.py'), '--preflight-only',
                                      '--worktree', str(directory), '--evidence', str(evidence),
                                      '--shared-skill', str(SHARED.parent)], text=True, capture_output=True, timeout=5)
             self.assertEqual(result.returncode, 2, result.stderr)
             self.assertIn('disposable', result.stderr)
             self.assertFalse(evidence.exists(), 'unsafe cwd rejection produced native side effects')
+
+    def test_native_preflight_is_read_only_and_checks_evidence_containment(self):
+        # Even a future guard regression cannot turn this isolated test into a
+        # model call: successful preflight returns before evidence or launch.
+        script = HERE / 'test-retire-native.py'
+        cwd = self.directory / 'dedicated-cwd'
+        self.command('git', 'init', '-b', 'master', str(cwd))
+        self.command('git', '-C', str(cwd), 'config', 'user.email', 'test@example.invalid')
+        self.command('git', '-C', str(cwd), 'config', 'user.name', 'Test')
+        self.command('git', '-C', str(cwd), 'commit', '--allow-empty', '-m', 'owned seed')
+        for evidence, code in ((self.directory / 'preflight-evidence', 0), (cwd / 'evidence', 2)):
+            result = subprocess.run([sys.executable, str(script), '--preflight-only',
+                                     '--worktree', str(cwd), '--evidence', str(evidence),
+                                     '--shared-skill', str(SHARED.parent)], text=True, capture_output=True, timeout=5)
+            self.assertEqual(result.returncode, code, result.stderr)
+            self.assertFalse(evidence.exists())
+        with tempfile.TemporaryDirectory(prefix='retire-owned-nested-', dir=HERE.parents[3]) as nested:
+            self.command('git', 'init', '-b', 'master', nested)
+            result = subprocess.run([sys.executable, str(script), '--preflight-only',
+                                     '--worktree', nested, '--evidence', str(self.directory / 'nested-evidence'),
+                                     '--shared-skill', str(SHARED.parent)], text=True, capture_output=True, timeout=5)
+            self.assertEqual(result.returncode, 2, result.stderr)
+            self.assertFalse((self.directory / 'nested-evidence').exists())
 
     def test_same_session_notice_cannot_retire_live_actor(self):
         self.actor('hold-notice')
@@ -643,7 +804,7 @@ class Tests(unittest.TestCase):
             return result
         argv = [str(HERE / 'test-retire-native.py'), '--worktree', str(cwd), '--evidence', str(evidence),
                 '--shared-skill', str(SHARED.parent)]
-        handlers = {signum: signal.getsignal(signum) for signum in (signal.SIGTERM, signal.SIGHUP)}
+        handlers = {signum: signal.getsignal(signum) for signum in (signal.SIGTERM, signal.SIGHUP, signal.SIGINT)}
         try:
             with patch.object(sys, 'argv', argv), patch.object(native.shutil, 'which', return_value=sys.executable), patch.object(native, 'run', side_effect=interrupted_creation):
                 with self.assertRaises(SystemExit) as stopped:
@@ -990,7 +1151,7 @@ class Tests(unittest.TestCase):
     def test_independent_exit_with_replacement_refuses_successor(self):
         self.actor()
         inner = 'exec -a codex ' + shlex.join([sys.executable, str(Path(__file__).resolve()), '--terminal', str(self.directory), 'done'])
-        outer = shlex.join(['bash', '-c', inner]) + '; exec bash --norc'
+        outer = shlex.join(['env', 'RETIRE_TEST_PYTHON=' + sys.executable, 'CODEX_HOME=' + str(self.directory / 'codex-config'), 'CLAUDE_CONFIG_DIR=' + str(self.directory / 'claude-config'), 'bash', '-c', inner]) + '; exec bash --norc'
         before = "        if not self.state.get('exit'):\n"
         after = ('        signal = self.repo.parent / "human-independent-exit"\n'
                  '        signal.touch()\n'
@@ -1471,6 +1632,35 @@ class Tests(unittest.TestCase):
 
     def test_claude_cannot_use_codex_ui_footer(self):
         self.assert_completion_block_pending('claude-codex-footer')
+
+    def test_claude_native_ui_footer_allows_marker_completion(self):
+        self.actor('claude-footer')
+        result = self.invoke()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.observed()['exit_enters'], 1)
+
+    def test_claude_verified_verb_minute_footer_allows_completion(self):
+        self.actor('claude-footer-minute')
+        result = self.invoke()
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_codex_cannot_use_claude_ui_footer(self):
+        self.assert_completion_block_pending('done-claude-footer')
+
+    def test_claude_ui_footer_extra_prose_is_pending(self):
+        self.assert_completion_block_pending('claude-footer-extra-prose')
+
+    def test_claude_ui_footer_same_row_prose_is_pending(self):
+        self.assert_completion_block_pending('claude-footer-same-row-prose')
+
+    def test_claude_ui_footer_partial_tokens_is_pending(self):
+        self.assert_completion_block_pending('claude-footer-token-partial')
+
+    def test_claude_ui_footer_unknown_verb_is_pending(self):
+        self.assert_completion_block_pending('claude-footer-unknown-verb')
+
+    def test_claude_ui_footer_later_assistant_is_pending(self):
+        self.assert_completion_block_pending('claude-footer-later-assistant')
 
     def test_codex_marker_suffix_is_not_completion(self):
         self.assert_completion_block_pending('done-suffix')

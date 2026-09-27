@@ -57,10 +57,12 @@ def main():
         raise RuntimeError('native verification requires Python assertions enabled')
     signal.signal(signal.SIGTERM, interrupted)
     signal.signal(signal.SIGHUP, interrupted)
+    signal.signal(signal.SIGINT, interrupted)
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--worktree', type=Path, required=True)
     parser.add_argument('--evidence', type=Path, required=True)
     parser.add_argument('--shared-skill', type=Path, required=True)
+    parser.add_argument('--preflight-only', action='store_true', help='read-only cwd/containment validation; never launch models or create evidence')
     parser.add_argument('--baseline-script', type=Path)
     parser.add_argument('--stale-offer-draft', action='store_true', help='exercise shared sender stable draft co-submission')
     parser.add_argument('--harness', choices=['both', 'codex', 'claude'], default='both', help='independent native diagnosis; acceptance defaults to both')
@@ -70,7 +72,7 @@ def main():
     worktree = args.worktree.resolve()
     source_root = HERE.parents[3]
     top = Path(require(run(['git', '-C', worktree, 'rev-parse', '--show-toplevel']))).resolve()
-    if top == source_root or top != worktree:
+    if top == source_root or source_root in top.parents or top != worktree:
         parser.error('--worktree must be the top of an exclusively owned disposable Git directory, separate from source')
     def common(directory):
         return Path(require(run(['git', '-C', directory, 'rev-parse', '--path-format=absolute', '--git-common-dir']))).resolve()
@@ -80,12 +82,21 @@ def main():
     if worktree_before['status']:
         parser.error('disposable worktree must start clean')
     directory = args.evidence.resolve()
+    if directory == worktree or worktree in directory.parents or directory == source_root or source_root in directory.parents:
+        parser.error('evidence must be separate from disposable cwd and source')
+    if args.preflight_only:
+        return
+    selected = [name for name in ('codex', 'claude') if args.harness in ('both', name)]
+    binaries = {name: shutil.which(name) for name in selected}
+    if not all(binaries.values()):
+        parser.error('required native binary unavailable: ' + ', '.join(name for name, path in binaries.items() if not path))
     directory.mkdir(mode=0o700, parents=True, exist_ok=False)
-    real_codex = Path(shutil.which('codex')).resolve()
+    real_codex = Path(binaries['codex']).resolve() if 'codex' in binaries else None
     trust_override = 'projects={' + json.dumps(str(worktree)) + '={trust_level="trusted"}}'
     codex_wrapper = directory / 'codex-exact-cwd'
-    codex_wrapper.write_text('#!/bin/sh\nexec ' + shlex.quote(str(real_codex)) + ' -c ' + shlex.quote(trust_override) + ' "$@"\n')
-    codex_wrapper.chmod(0o700)
+    if real_codex:
+        codex_wrapper.write_text('#!/bin/sh\nexec ' + shlex.quote(str(real_codex)) + ' -c ' + shlex.quote(trust_override) + ' "$@"\n')
+        codex_wrapper.chmod(0o700)
     repo = directory / 'repo'
     remote = directory / 'remote.git'
     require(run(['git', 'init', '--bare', remote]))
@@ -114,12 +125,13 @@ def main():
                        RETIRE_PRIVATE_CHECK=str(checker), RETIRE_SPAWN_SKILL=str(args.shared_skill.resolve()))
     environment.pop('TMUX', None)
     environment.pop('SPAWN_TMUX_SOCKET', None)
-    report = {'label': label, 'results': [], 'resources_released': False,
+    report = {'selected_harness': args.harness, 'combined_acceptance': args.harness == 'both',
+              'baseline': 'planned' if args.baseline_script and args.harness != 'claude' else 'skipped', 'label': label, 'results': [], 'resources_released': False,
               'models': {'codex': args.codex_model, 'claude': args.claude_model},
               'worktree_before': worktree_before, 'source_fidelity': fingerprint(source_root),
               'shared_fidelity': fingerprint(args.shared_skill),
               'claude_trust_planned': str(worktree),
-              'codex_per_process_trust': trust_override, 'real_codex': str(real_codex),
+              'codex_per_process_trust': trust_override if real_codex else None, 'real_codex': str(real_codex) if real_codex else None,
               'containment_limit': 'worktree HEAD/status/tracked diff checks do not prove absence of writes elsewhere; agents retain normal host access'}
     server_creation_attempted = False
     failed = False
@@ -130,7 +142,7 @@ def main():
         require(run([*tmux, 'set-option', '-g', 'history-limit', '10000']))
         require(run([*tmux, 'set-option', '-g', 'remain-on-exit', 'on']))
         report['shared_head'] = require(run(['git', '-C', args.shared_skill, 'rev-parse', 'HEAD']))
-        report['versions'] = {name: require(run([name, '--version'])) for name in ('codex', 'claude')}
+        report['versions'] = {name: require(run([name, '--version'])) for name in selected}
         (directory / 'report.json').write_text(json.dumps(report, indent=2) + '\n')
         for harness, model in [('codex', args.codex_model), ('claude', args.claude_model)]:
             if args.harness not in ('both', harness):
@@ -166,7 +178,7 @@ def main():
             else:
                 raise AssertionError('initial real harness task did not finish')
             context = json.loads(native_context.read_text())
-            assert re.fullmatch(r'[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}', context['session_id']) and context['session_id'] != 'unknown'
+            assert re.fullmatch(r'[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}', context['session_id'])
             assert context.get('evidence_source'), 'native session identity has no provenance'
             # Constructor/import are inert; isolate env and pin before read-only identity IO.
             with patch.dict(os.environ, environment, clear=True):
@@ -174,32 +186,36 @@ def main():
                 observer.tmux = tmux
                 identity = observer.identity()
             assert identity['process']['agent'] == harness, 'native harness identity not established'
-            # Read only this owned session's metadata; never retain conversation text.
+            observer.state = {'identity': identity}
+            proof = observer.verify_native_session(context['session_id'])
+            context['controller_identity_proof'] = proof.get('rollout_path') or proof.get('pointer')
+            # Native process binding, not cwd or an inherited UUID, establishes
+            # identity. Transcript crosscheck reads only this exact owned file.
+            pinned = (identity['process'].get('cores') or [identity['process']])[0]
             if harness == 'codex':
-                transcripts = list((Path.home() / '.codex/sessions').glob('*/*/*/rollout-*-' + context['session_id'] + '.jsonl'))
-                assert len(transcripts) == 1, 'owned Codex native transcript missing or nonunique'
-                with transcripts[0].open() as stream:
-                    header = json.loads(stream.readline())
-                assert (header.get('type') == 'session_meta' and header.get('payload', {}).get('id') == context['session_id']
-                        and header['payload'].get('cwd') == str(worktree)), 'owned Codex native transcript ID/cwd differs'
-                context['controller_identity_proof'] = str(transcripts[0])
+                assert proof.get('cwd') == str(worktree), 'owned rollout cwd differs'
             else:
+                env = dict(item.split(b'=', 1) for item in Path(f"/proc/{pinned['pid']}/environ").read_bytes().split(b'\0') if b'=' in item)
+                config = Path(env[b'CLAUDE_CONFIG_DIR'].decode()) if env.get(b'CLAUDE_CONFIG_DIR') else Path(env[b'HOME'].decode()) / '.claude'
                 project_key = re.sub(r'[^a-zA-Z0-9]', '-', str(worktree))
-                transcript = Path.home() / '.claude/projects' / project_key / (context['session_id'] + '.jsonl')
+                transcript = config / 'projects' / project_key / (context['session_id'] + '.jsonl')
                 matching = False
                 with transcript.open() as stream:
                     for line in stream:
+                        if not line.endswith('\n'):
+                            continue  # A concurrent trailing write is not committed metadata.
                         record = json.loads(line)
                         if record.get('sessionId') == context['session_id'] and record.get('cwd') == str(worktree):
                             matching = True
                             break
                 assert matching, 'owned Claude transcript session/cwd metadata differs'
-                context['controller_identity_proof'] = str(transcript)
+                context['controller_transcript_proof'] = str(transcript)
             native_context.write_text(json.dumps(context, indent=2) + '\n')
             (directory / (harness + '-identity.json')).write_text(json.dumps(identity, indent=2))
             if harness == 'codex' and args.baseline_script:
                 red = run([args.baseline_script.resolve(), pane, '--retire', '--wait', '1', '--poll', '.2'], env=environment)
                 (directory / 'baseline-red.json').write_text(json.dumps({'returncode': red.returncode, 'stdout': red.stdout, 'stderr': red.stderr}, indent=2))
+                report['baseline'] = 'verified-original-history-failure'
                 assert red.returncode == 2 and 'malformed retirement state field: id' in red.stderr, red.stderr
                 assert foreign.read_bytes() == foreign_bytes
                 assert not list(records.glob('*-offer.txt')), 'baseline sent an offer before failing'
@@ -209,7 +225,7 @@ def main():
             if args.stale_offer_draft:
                 require(run([*tmux, 'send-keys', '-t', pane, '-l', 'Disposable retirement rehearsal reminder.']))
             notice = ('claude --resume ' if harness == 'claude' else 'codex resume ') + context['session_id']
-            prefix = r'^Resume this session with:\n' if harness == 'claude' else r'^Token usage: [^\n]+\nTo continue this session, run:\n'
+            prefix = r'^Resume this session with:[ \t]*\n' if harness == 'claude' else r'^Token usage: [^\n]+\nTo continue this session, run:[ \t]*\n'
             pattern = prefix + r'[ \t]*' + re.escape(notice) + r'[ \t]*$'
             deadline = time.monotonic() + 1200
             command = [HERE / 'retire.sh', pane, '--retire', '--wait', '60', '--poll', '1']
@@ -228,7 +244,7 @@ def main():
                     pending = json.loads(result.stderr)
                 except ValueError as error:
                     raise RuntimeError('retirement failure lacked structured JSON; inspect retained result') from error
-                if (result.returncode != 2 or not pending.get('reason', '').startswith('DONE not observed;')
+                if (result.returncode != 2 or not pending.get('reason', '').startswith(('DONE not observed;', 'handoff verified; retirement pending original process end and fresh same-session exit notice'))
                         or time.monotonic() >= deadline):
                     require(result)
                 command = [HERE / 'retire.sh', pane, '--retire', '--resume', pending['state'], '--wait', '60', '--poll', '1']
@@ -242,7 +258,7 @@ def main():
             if args.stale_offer_draft:
                 assert state['offer'].get('stale_draft_length') == len('Disposable retirement rehearsal reminder.'), 'ordinary stale draft was not co-submitted'
             assert state.get('handoff_receipt') and state.get('shard_hash')
-            screen = require(run([*tmux, 'capture-pane', '-p', '-S', '-2000', '-t', pane]))
+            screen = require(run([*tmux, 'capture-pane', '-p', '-J', '-S', '-', '-t', pane]))
             baseline = state['exit_notice']
             assert baseline['session_id'] == context['session_id']
             assert type(state['exit'].get('enters')) is int and state['exit']['enters'] >= 1, 'no actual submitted exit request'
@@ -271,6 +287,7 @@ def main():
     finally:
         signal.signal(signal.SIGTERM, signal.SIG_IGN)
         signal.signal(signal.SIGHUP, signal.SIG_IGN)
+        signal.signal(signal.SIGINT, signal.SIG_IGN)
         # Only this uniquely named server, created above, belongs to this test.
         if server_creation_attempted:
             try:

@@ -20,6 +20,14 @@ Codex target may also render one measured UI footer `  Worked for 1m 21s · 12:2
 (the duration and 24-hour time vary). Only that anchored minute/second/time
 layout is recognized; additional prose, duplicate footers, other status text,
 and that footer on a Claude target still keep completion pending.
+A pinned Claude target may render one native duration row followed by one padded
+integer `tokens` status row: `✻ Baked for 19s · done 1:27 PM`. Claude2.1.283's
+local renderer verifies the glyph and verb pool Baked, Brewed, Churned,
+Cogitated, Cooked, Crunched, Sautéed, Worked, and seconds/minutes-plus-seconds
+format. Only the measured default 12-hour AM/PM done time and complete token
+row are accepted; unknown verbs, other time layouts, partial status, extra
+prose or later assistant blocks remain pending. This consumer disposition
+rule uses the public shared response-row API; it does not fork its normalizer.
 The observed terminal
 must render an assistant `●` or `•` row marker. Bare wrapped user text and
 live composer text do not count. Unsupported response layouts stay pending.
@@ -120,8 +128,8 @@ Claude's block is `Resume this session with:` then `claude --resume UUID`.
 `Shutting down...` is optional. Before requesting exit, persist only the count
 of matching native notice blocks, never terminal text. A submitted command
 receipt or an ambiguous attempt with actual input and a positive Enter count
-is required; typed characters and proven no-input deferrals cannot retire. Resume rereads the
-pinned pane and requires a greater count; cached confirmation is not authority.
+is required; typed characters and proven no-input deferrals cannot retire.
+Resume rereads the pinned pane and requires a greater count; cached confirmation is not authority.
 A failed resume of a locally retired state does not republish or downgrade its
 historical remote receipt. Current failure audits remain unconfirmed until the
 current process/notice pair verifies; loaded or forged retired status is never
@@ -131,6 +139,22 @@ An old notice, wrong UUID, bare resume command, absent pane or ended process
 alone cannot establish retirement. Unsupported layouts and unknown caller
 session IDs preserve the handoff pending exit verification. If the original
 ended before any exit request, leave pending without sending into its shell.
+
+Before requesting exit, match the immutable shard UUID to the pinned live
+process using the installed native binding. Codex reuses the canonical pure
+`mcp/claude-introspect/codex_status.py` reader on the pinned native core (or
+original process): a unique writable CLI rollout descriptor, its first native
+session metadata, and descriptor inode/device checks, with pinned `CODEX_HOME`.
+Claude reads only `current.<pid>` from pinned `CLAUDE_CONFIG_DIR/session-state`
+and the installed hook's pinned `HOME/.claude/session-state` contract. Any
+present pointer must contain the same UUID, process start ticks and boot ID;
+missing, stale, malformed or conflicting bindings leave handoff pending before
+exit input. No inherited environment UUID, newest-file search, cwd or timestamp
+inference establishes attribution. The actor is rechecked around lookup and
+again immediately before the sender call. These checks cannot atomically prevent
+a native session switch during the shared sender's readiness interval.
+Exit notice capture joins wrapped rows and reads retained full scrollback;
+history eviction or unsupported native layouts still leave completion pending.
 
 Recognized Node wrappers and native children are one logical harness; both must
 end. A replacement actor blocks completion. Nothing kills a process. Resumes
@@ -155,8 +179,8 @@ budget ends, continue with the same mode and target using
 `--resume PRIVATE_STATE --wait 1200`; a delivered offer is never resent.
 Process exit has a separate fast poll. The shared sender has its own bounded
 waits. Exit may end the harness before a sender receipt; the original process
-end and fresh same-session native notice remain mandatory. Offer acceptance and DONE remain separate. An attempted
-successor launch is never automatically repeated, including after a crash or
+end and fresh same-session native notice remain mandatory. Offer acceptance
+and DONE remain separate. An attempted successor launch is never automatically repeated, including after a crash or
 unconfirmed initial delivery. Inspect the launcher's pane/receipt before any
 deliberate operator recovery. There is no ambiguous-send override or manual
 relay in this script.
@@ -164,8 +188,7 @@ relay in this script.
 Screen markers are heuristics, not atomic human exclusion or cryptographic
 actor attribution. An assistant/user deliberately spoofing another actor's
 terminal framing can be ambiguous. Schema validation checks fields and resource
-receipts, not the truth of claims, PR hashes, model/session identification or
-operational prose; the caller must audit those before requesting retirement.
+receipts, not the truth of claims, PR hashes, model identification or operational prose; the caller must audit those before requesting retirement.
 Observation consumes only spawn-agent's published `read_response_rows(pane,
 socket)` and `DeliveryError` Python contract. It excludes archived redraws and
 the live composer. Keep the final marker visible until the controller records
