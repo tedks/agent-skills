@@ -1,0 +1,150 @@
+#!/usr/bin/env python3
+"""Opt-in real Codex/Claude retirement, using only an owned tmux server/local Git.
+
+Uses model tokens. Pass an already trusted worktree and private evidence directory.
+No live off-duty state is read or written; artifacts are retained for inspection.
+"""
+import argparse
+import json
+import os
+from pathlib import Path
+import re
+import shlex
+import subprocess
+import sys
+import time
+import uuid
+from types import SimpleNamespace
+
+sys.dont_write_bytecode = True
+import retire
+
+HERE = Path(__file__).resolve().parent
+
+
+def run(command, env=None, timeout=120):
+    return subprocess.run([str(item) for item in command], env=env, text=True,
+                          capture_output=True, timeout=timeout)
+
+
+def require(result):
+    if result.returncode:
+        raise RuntimeError(f'command failed ({result.returncode}): {result.stderr}')
+    return result.stdout.strip()
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--worktree', type=Path, required=True)
+    parser.add_argument('--evidence', type=Path, required=True)
+    parser.add_argument('--shared-skill', type=Path, required=True)
+    parser.add_argument('--baseline-script', type=Path)
+    parser.add_argument('--codex-model', default='gpt-6-luna')
+    parser.add_argument('--claude-model', default='haiku')
+    args = parser.parse_args()
+    directory = args.evidence.resolve()
+    directory.mkdir(mode=0o700, parents=True, exist_ok=False)
+    repo = directory / 'repo'
+    remote = directory / 'remote.git'
+    require(run(['git', 'init', '--bare', remote]))
+    require(run(['git', 'init', '-b', 'master', repo]))
+    def git(*command):
+        return require(run(['git', '-C', repo, *command]))
+    git('config', 'user.name', 'Retirement rehearsal')
+    git('config', 'user.email', 'retirement-test@example.invalid')
+    (repo / 'seed').write_text('Disposable private test only.\n')
+    git('add', 'seed')
+    git('commit', '-m', 'Seed disposable retirement test')
+    git('remote', 'add', 'origin', str(remote))
+    git('push', '-u', 'origin', 'master')
+    checker = directory / 'private-check'
+    checker.write_text('#!/bin/sh\n[ "$#" = 1 ] && [ "$1" = ' + shlex.quote(str(remote)) +
+                       ' ] && [ "$(git --git-dir="$1" rev-parse --is-bare-repository)" = true ]\n')
+    checker.chmod(0o700)
+    records = repo / '.git' / 'retirements'
+    records.mkdir(mode=0o700)
+    foreign = records / 'lane-v-private-publication.json'
+    foreign_bytes = b'{"blob":"foreign","private_remote":true,"session_id":"unrelated"}\n'
+    foreign.write_bytes(foreign_bytes)
+    label = 'retire-native-' + uuid.uuid4().hex
+    tmux = ['tmux', '-L', label]
+    environment = dict(os.environ, SPAWN_TMUX_LABEL=label, RETIRE_REPO=str(repo),
+                       RETIRE_PRIVATE_CHECK=str(checker), RETIRE_SPAWN_SKILL=str(args.shared_skill.resolve()))
+    environment.pop('TMUX', None)
+    environment.pop('SPAWN_TMUX_SOCKET', None)
+    require(run([*tmux, 'new-session', '-d', '-s', 'retire-native', '-x', '240', '-y', '60'], env=environment))
+    require(run([*tmux, 'set-option', '-g', 'history-limit', '10000']))
+    report = {'label': label, 'results': [], 'resources_released': False,
+              'shared_head': require(run(['git', '-C', args.shared_skill, 'rev-parse', 'HEAD'])),
+              'versions': {name: require(run([name, '--version'])) for name in ('codex', 'claude')},
+              'models': {'codex': args.codex_model, 'claude': args.claude_model}}
+    try:
+        for harness, model in [('codex', args.codex_model), ('claude', args.claude_model)]:
+            launcher = args.shared_skill / 'scripts' / 'agent-spawn.sh'
+            prompt = ('This is an authorized disposable retirement rehearsal. You own no product work or processes. '
+                      'On the next retirement offer, write only its assigned private shard with truthful test context; '
+                      'do not change or commit this working tree. The controller alone commits and pushes the shard '
+                      'to its isolated local bare remote. Your next final reply must be RETIRE-NATIVE-READY.')
+            launched = run([launcher, 'retire-native:' + harness, harness, args.worktree.resolve(),
+                            '--model', model, prompt], env=environment)
+            (directory / (harness + '-launch.txt')).write_text(launched.stdout + launched.stderr)
+            require(launched)
+            rows = require(run([*tmux, 'list-panes', '-t', 'retire-native:' + harness, '-F', '#{pane_id}'])).splitlines()
+            assert len(rows) == 1, rows
+            pane = rows[0]
+            # Initial assignment must finish before the marker-only retirement response.
+            deadline = time.monotonic() + 120
+            while time.monotonic() < deadline:
+                screen = require(run([*tmux, 'capture-pane', '-p', '-t', pane]))
+                if re.search(r'[●•] RETIRE-NATIVE-READY', screen):
+                    break
+                time.sleep(1)
+            else:
+                raise AssertionError('initial real harness task did not finish')
+            observer = retire.Retirement(SimpleNamespace(pane=pane))
+            observer.tmux = tmux
+            identity = observer.identity()
+            assert identity['process']['agent'] == harness, 'native harness identity not established'
+            (directory / (harness + '-identity.json')).write_text(json.dumps(identity, indent=2))
+            if harness == 'codex' and args.baseline_script:
+                red = run([args.baseline_script.resolve(), pane, '--retire', '--wait', '1', '--poll', '.2'], env=environment)
+                (directory / 'baseline-red.json').write_text(json.dumps({'returncode': red.returncode, 'stdout': red.stdout, 'stderr': red.stderr}, indent=2))
+                assert red.returncode == 2 and 'malformed retirement state field: id' in red.stderr, red.stderr
+                assert foreign.read_bytes() == foreign_bytes
+                assert not list(records.glob('*-offer.txt')), 'baseline sent an offer before failing'
+            # Deliberately leave this owned ordinary draft unsent. The published
+            # sender must preserve and co-submit it with the retirement offer.
+            require(run([*tmux, 'send-keys', '-t', pane, '-l', 'Disposable retirement rehearsal reminder.']))
+            result = run([HERE / 'retire.sh', pane, '--retire', '--wait', '1200', '--poll', '1'], env=environment, timeout=1320)
+            (directory / (harness + '-retire.json')).write_text(json.dumps({'returncode': result.returncode, 'stdout': result.stdout, 'stderr': result.stderr}, indent=2))
+            require(result)
+            states = [json.loads(path.read_text()) for path in records.glob('*.json') if re.fullmatch(r'[0-9a-f]{32}', path.stem)]
+            state = next(item for item in states if item['pane'] == pane)
+            assert state['status'] == 'retired', state['status']
+            assert state['offer']['status'] == 'delivered'
+            assert state['offer'].get('stale_draft_length') == len('Disposable retirement rehearsal reminder.'), 'ordinary stale draft was not co-submitted'
+            assert state.get('handoff_receipt') and state.get('shard_hash')
+            screen = require(run([*tmux, 'capture-pane', '-p', '-S', '-2000', '-t', pane]))
+            notice = 'Resume this session with' if harness == 'claude' else 'Shutting down'
+            assert notice in screen, f'fresh {harness} exit receipt missing'
+            actors = [state['identity']['process'], *state['identity']['process'].get('cores', [])]
+            for actor in actors:
+                stat = Path('/proc') / str(actor['pid']) / 'stat'
+                assert not stat.exists() or stat.read_text().rsplit(')', 1)[1].split()[0] == 'Z', 'original actor remains live'
+            assert foreign.read_bytes() == foreign_bytes
+            shard = state['shard']
+            assert git('rev-parse', 'origin/master:' + shard) == state['shard_hash']
+            report['results'].append({'harness': harness, 'pane': pane, 'event': state['id'],
+                                      'handoff': 'remote-blob-verified', 'exit_receipt': notice, 'processes_ended': True})
+            print(harness + ': real handoff, exit receipt, and process end verified', flush=True)
+    finally:
+        # Only this uniquely named server, created above, belongs to this test.
+        require(run([*tmux, 'kill-server']))
+        absent = run([*tmux, 'list-sessions'])
+        report['resources_released'] = absent.returncode != 0
+        (directory / 'report.json').write_text(json.dumps(report, indent=2) + '\n')
+        assert report['resources_released'], 'owned tmux server still exists'
+
+
+if __name__ == '__main__':
+    main()

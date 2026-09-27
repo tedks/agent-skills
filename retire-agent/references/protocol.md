@@ -110,8 +110,10 @@ retirement waits for both processes to end. A replacement harness blocks complet
 kills a process. Resumes reverify the preserved blob and receipt before exit
 or successor. If the original ended independently after that verified handoff,
 record `exit-not-needed` and continue without sending into its shell. A
-replacement actor still blocks succession. Malformed private records stop
-with their bytes preserved for operator reconciliation.
+replacement actor still blocks succession. History discovery owns only `<32-lowercase-hex-event>.json` state filenames
+in the private retirement directory. Other JSON names, including independent
+publication receipts, are left untouched and do not block a new offer.
+Malformed event state records stop with their bytes preserved for operator reconciliation.
 After a failed immutable-shard or receipt revalidation, failure handling only
 records the private attempt audit; it does not publish a handoff-authorizing
 receipt from cached state. Repeated resumes preserve the rejected evidence
@@ -121,8 +123,11 @@ its index preserves all steward-owned legacy metadata outside the bounded
 generated section. A legacy filename matching the same session ID prefix
 (eight characters or more) blocks another shard until deliberate reconciliation.
 
-Waits are bounded: `--wait` defaults to 300 seconds (maximum 600), model-result
+Waits are bounded: `--wait` defaults to 300 seconds (maximum 1800), model-result
 polling `--poll` defaults to 60 seconds (maximum 90); tests may shorten polling.
+Use `--wait 1200` for a handoff that needs 10–20 minutes. If the observation
+budget ends, continue with the same mode and target using
+`--resume PRIVATE_STATE --wait 1200`; a delivered offer is never resent.
 Process exit has a separate fast poll. The shared sender has its own bounded
 waits. Exit may end the harness before a sender receipt; original process end
 is the exit evidence. Offer acceptance and DONE remain separate. An attempted

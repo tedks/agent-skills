@@ -340,6 +340,40 @@ class Tests(unittest.TestCase):
         entry.chmod(0o700)
         return entry
 
+    def test_foreign_private_json_does_not_block_new_retirement(self):
+        self.actor()
+        directory = self.repo / '.git' / 'retirements'
+        directory.mkdir(mode=0o700)
+        foreign = {
+            'lane-v-private-publication.json': '{"blob":"foreign","private_remote":true}',
+            'lane-w-receipt.json': '{"status":"verified","path":"waiting/other.md"}',
+            'unknown.json': '{not even valid JSON',
+        }
+        for name, content in foreign.items():
+            (directory / name).write_text(content)
+        result = self.invoke()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.observed()['exit_enters'], 1)
+        for name, content in foreign.items():
+            self.assertEqual((directory / name).read_text(), content)
+        self.assertEqual(len(list(directory.glob('*-offer.txt'))), 1)
+
+    def test_wrapper_preserves_pending_and_usage_failure_status(self):
+        self.actor('modal')
+        pending = self.invoke()
+        self.assertEqual(pending.returncode, 2, pending.stderr)
+        self.assertEqual(json.loads(pending.stderr)['status'], 'pending')
+        usage = self.invoke('--wait', '1801')
+        self.assertEqual(usage.returncode, 2, usage.stderr)
+        self.assertIn('wait in (0,1800]', usage.stderr)
+        self.assertNotIn('Traceback', usage.stderr)
+
+    def test_twenty_minute_wait_is_accepted(self):
+        self.actor()
+        result = self.invoke('--wait', '1200')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.observed()['exit_enters'], 1)
+
     def test_retire_exit_to_shell_and_path_only_commit(self):
         self.actor()
         (self.repo / 'unrelated').write_text('preserve staged content')

@@ -9,6 +9,8 @@ import tempfile
 HERE = Path(__file__).resolve().parent
 source = (HERE / 'retire.py').read_text()
 mutations = [
+    ('foreign private state namespace', "                           if re.fullmatch(r'[0-9a-f]{32}\\.json', path.name)", '', 'test_foreign_private_json_does_not_block_new_retirement'),
+    ('long handoff observation', 'not 0 < args.wait <= 1800', 'not 0 < args.wait <= 600', 'test_twenty_minute_wait_is_accepted'),
     ('remote host', "'https://github.com/' + match[1]", 'match[1]', 'test_gh_privacy_pins_remote_host'),
     ('session transaction', "with locked(self.common / 'retirement.lock'):  # Unique session publication.", "with locked(self.common / (self.state['id'] + '.transaction.lock')):", 'test_duplicate_session_transaction_race'),
     ('independent exit', "self.state['exit'] = {'status': 'not-needed', 'reason': 'original-already-ended'}", "raise Stop('already ended')", 'test_independent_exit_after_handoff_allows_successor'),

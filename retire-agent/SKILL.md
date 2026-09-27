@@ -38,7 +38,10 @@ task delivery is unsupported; do not improvise a second spawn mechanism.
 
 Pin the explicit pane and verify its identity before each send. Use the shared
 `tmux-message` sender for composer protection and new application receipts.
-An ambiguous send never authorizes another paste. Unknown input, a modal,
+An ambiguous send never authorizes another paste. The sender observes input
+twice eight seconds apart and co-submits ordinary stable drafts with the offer;
+a stable command-shaped draft follows its published clear-and-verify exception.
+The typed Claude exit requires an empty composer and defers for ordinary drafts. Changing input, a modal,
 missing evidence, or changed process identity defers retirement.
 
 Shards belong only in a private repository. Preserve one file per session,
@@ -52,6 +55,10 @@ text. Verify the agent process ended; an exit transport result alone is
 insufficient. Never kill a session. Do not stop unrelated services or delete
 worktrees, branches, transcripts, or another actor's files.
 
+The wrapper directly `exec`s Python: pending or usage failure exits nonzero
+(2), and only completed retirement exits zero. If piping output through `tail`
+or another command, enable shell `pipefail` so the caller retains that status.
+Use `--wait 1200` for a 10–20 minute shard; the maximum is 1800 seconds.
 The script emits a private state path on failure. `--resume PATH` continues
 observation after a delivered offer, without resending it. After an observed
 decline, author the assigned shard then use `--resume PATH --caller-shard`.
@@ -64,3 +71,15 @@ repository's Git common directory, not public session records. Do not copy
 them into public issues or PRs. Screens are heuristic: this cannot atomically
 exclude human typing, audit the truth of recovery prose, or independently
 prove a resource owner's release claim.
+
+## Repair verification
+
+Run `scripts/test-retire.py` and `scripts/test-mutations.py` for isolated
+behavior and guard-removal tests. `scripts/test-retire-native.py` is an opt-in
+model-token test: pass `--worktree` naming a trusted directory, `--evidence`
+naming a new private directory, and `--shared-skill` naming the published
+spawn-agent installation. It launches real Codex and Claude on its own tmux
+server and verifies remote shard blobs, fresh harness exit notices and original
+process end. It retains private artifacts and releases only its owned server.
+An optional `--baseline-script` runs the original history-discovery failure
+against the real Codex pane before checking the repaired flow.

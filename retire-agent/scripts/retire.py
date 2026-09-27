@@ -540,7 +540,10 @@ class Retirement:
             with locked(self.common / 'retirement.lock'):
                 identity = self.identity()
                 socket = checked(self.tmux + ['display-message', '-p', '#{socket_path}'])
-                history = [(path, state_record(path.read_text())) for path in directory.glob('*.json')]
+                # The private directory also holds foreign publication receipts.
+                # Only generated event filenames belong to this state protocol.
+                history = [(path, state_record(path.read_text())) for path in directory.glob('*.json')
+                           if re.fullmatch(r'[0-9a-f]{32}\.json', path.name)]
                 for existing, previous in history:
                     if existing.stem != previous['id']:
                         raise Stop('malformed historical retirement event identity')
@@ -724,8 +727,8 @@ def main():
     args = parser.parse_args()
     if (args.retry_deferred or args.caller_shard) and not args.resume:
         parser.error('caller shard and deferred retry require --resume')
-    if not re.fullmatch(r'%[0-9]+', args.pane) or not 0 < args.wait <= 600 or not 0 < args.poll <= 90:
-        parser.error('stable %pane and wait in (0,600] required')
+    if not re.fullmatch(r'%[0-9]+', args.pane) or not 0 < args.wait <= 1800 or not 0 < args.poll <= 90:
+        parser.error('stable %pane and wait in (0,1800] required')
     if args.handoff and args.handoff[0] not in ('codex', 'claude'):
         parser.error('published launcher supports explicit model selection for codex/claude only')
     if args.handoff and (not args.handoff[1].strip() or not Path(args.roles).expanduser().is_file()):
