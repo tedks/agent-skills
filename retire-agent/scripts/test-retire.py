@@ -90,7 +90,7 @@ def terminal(directory, mode):
             if mode == 'draft' and not (directory / 'human-cleared-draft').exists():
                 # Active human input changes faster than the sender stability window.
                 typing_tick += 1
-                draft = b'human unfinished draft ' + str(typing_tick % 2).encode()
+                draft = b'human unfinished draft ' + str(typing_tick).encode()
                 draw()
             if due is not None and time.monotonic() >= due:
                 history += '● RETIRE-DONE-' + event + '\r\n'
