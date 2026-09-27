@@ -103,7 +103,7 @@ case "$cmd" in
       elif [[ "$(<"$FAKE_STATE/mode")" == busyqueue ]]; then cursor='2:27'
       elif [[ "$(<"$FAKE_STATE/mode")" == persistent-empty-after-paste && -s "$FAKE_STATE/pasted" ]]; then cursor='2:1'
       elif [[ "$(<"$FAKE_STATE/mode")" == render-stale-empty && -s "$FAKE_STATE/pasted" && $(<"$FAKE_STATE/captures") -eq 4 ]]; then cursor='2:1'
-      elif [[ "$(<"$FAKE_STATE/mode")" == home-* && ( ! -s "$FAKE_STATE/end-moved" || "$(<"$FAKE_STATE/mode")" == *-noend ) ]]; then cursor='2:1'
+      elif [[ "$(<"$FAKE_STATE/mode")" == home-* && ( ! -s "$FAKE_STATE/end-moved" || "$(<"$FAKE_STATE/mode")" == *-noend || "$(<"$FAKE_STATE/mode")" == *-delay && $(<"$FAKE_STATE/captures") -le $(($(<"$FAKE_STATE/end-capture") + 2)) ) ]]; then cursor='2:1'
       elif [[ "$(<"$FAKE_STATE/mode")" == human || "$(<"$FAKE_STATE/mode")" == slash ]]; then cursor='4:1'
       elif [[ -s "$FAKE_STATE/composer" ]]; then
         cursor=$(python3 - "$FAKE_STATE/composer" <<'PY'
@@ -151,6 +151,8 @@ PY
       else
         cat "$FIXTURES/codex-fork-empty.ansi" > "$FAKE_STATE/last-screen"
       fi
+    elif [[ "$mode" == home-*-unknown* && -s "$FAKE_STATE/end-moved" && ( "$mode" == *-timeout || $n -le $(($(<"$FAKE_STATE/end-capture") + 2)) ) ]]; then
+      printf 'Starting Claude Code\n' > "$FAKE_STATE/last-screen"
     elif [[ "$mode" == stable-claude && ! -s "$FAKE_STATE/pasted" ]]; then
       cat "$FIXTURES/claude-stable-draft.ansi" > "$FAKE_STATE/last-screen"
     elif [[ "$mode" == stable-codex && ! -s "$FAKE_STATE/pasted" ]]; then
@@ -224,6 +226,7 @@ PY
   send-keys)
     if [[ "${!#}" == End ]]; then
       printf 'end\n' >> "$FAKE_LOG"
+      cp "$FAKE_STATE/captures" "$FAKE_STATE/end-capture"
       if [[ "$(<"$FAKE_STATE/mode")" != *-noend ]]; then printf moved > "$FAKE_STATE/end-moved"; fi
       exit 0
     fi
@@ -264,6 +267,7 @@ reset_case() {
   : > "$FAKE_STATE/composer"
   : > "$FAKE_STATE/mutated"
   : > "$FAKE_STATE/end-moved"
+  printf 0 > "$FAKE_STATE/end-capture"
   : > "$FAKE_STATE/pasted"
   : > "$FAKE_STATE/captures"
   : > "$FAKE_STATE/sleeps"
@@ -322,6 +326,24 @@ printf 'alpha\nbeta' > "$prompt_file"
       echo "FAIL: $mode ineffective End was not verified"; failures=$((failures + 1))
     fi
   done
+  for mode in home-claude-delay home-codex-delay home-claude-unknown home-codex-unknown; do
+    reset_case "$mode"
+    if out=$(run_sender %7 --submit-delay 0 --max-wait 3 --prompt-file "$prompt_file" 2>"$TEST_DIR/home-delay.err") &&
+       [[ "$(<"$FAKE_STATE/submitted")" == $'stale TICK\nalpha\nbeta' ]] &&
+       [[ "$(<"$FAKE_LOG")" == $'end\npaste-start\npaste-end\nenter' ]]; then
+      echo "PASS: $mode unchanged repaint waited before append"
+    else
+      echo "FAIL: $mode unchanged repaint stranded"; failures=$((failures + 1))
+    fi
+  done
+  reset_case home-claude-unknown-timeout
+  if run_sender %7 --submit-delay 0 --max-wait 1 --prompt-file "$prompt_file" >"$TEST_DIR/home-timeout.out" 2>"$TEST_DIR/home-timeout.err"; then
+    echo 'FAIL: persistent navigation repaint authorized append'; failures=$((failures + 1))
+  elif [[ "$(<"$FAKE_LOG")" == end ]] && grep -q 'status=deferred' "$TEST_DIR/home-timeout.err"; then
+    echo 'PASS: persistent navigation repaint defers without outgoing input'
+  else
+    echo 'FAIL: persistent navigation repaint changed outgoing input'; failures=$((failures + 1))
+  fi
   ((failures == 0))
   if [[ "${HOME_INPUT_ONLY:-0}" == 1 ]]; then exit; fi
 }

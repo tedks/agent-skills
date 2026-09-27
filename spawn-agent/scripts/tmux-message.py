@@ -319,6 +319,7 @@ class Sender:
 
     def ready(self):
         deadline = self.clock() + self.o.max_wait
+        self.readiness_deadline = deadline
         previous = None
         stable_since = self.clock()
         probed = False
@@ -389,10 +390,21 @@ class Sender:
         if check.kind == "text" and not self.at_end(check):
             home = check
             self.tmux.keys("End")
-            before, check = self.sample()
-            if (check.kind != "text" or check.text != home.text
-                    or check.harness != home.harness or not self.at_end(check)):
-                raise DeliveryError("cursor-navigation-unverified")
+            while True:
+                before, check = self.sample()
+                remaining = self.readiness_deadline - self.clock()
+                if remaining <= 0:
+                    raise DeliveryError("cursor-navigation-unverified")
+                if check.kind == "text" and check.text == home.text and check.harness == home.harness:
+                    if self.at_end(check):
+                        break
+                    if check.cursor != (2, 0):
+                        raise DeliveryError("cursor-navigation-unverified")
+                elif check.kind != "unknown":
+                    raise DeliveryError("cursor-navigation-unverified")
+                # End can repaint through an unreadable frame or unchanged Home.
+                # Neither grants input authority; no more keys until exact end.
+                self.sleep(min(self.o.poll_interval, remaining))
         baseline = records(before, check)
         literal = getattr(self.o, "literal_exit", False)
         if literal and (self.payload != "/exit" or check.harness != "claude"):

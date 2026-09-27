@@ -23,7 +23,10 @@ explicitly for single-line slash commands; ordinary messages retain bracketed pa
    draft length (`stale_draft_length`). Modals and unsupported layouts defer.
    A draft must have a visibly verified end cursor. A stable single-line draft
    at its canonical Home cursor may receive End, followed by verification that
-   its text is unchanged and its cursor is at the known end. Other non-end
+   its text is unchanged and its cursor is at the known end. Repaint polling
+   stays within the original readiness budget. Unchanged Home drafts or
+   incomplete repaint frames receive no further keys while waiting; known
+   changed text, harness, modal or another cursor position stops the attempt. Other non-end
    positions defer. Collapsed markers and
    recognizable full outgoing content already in the draft remain ambiguous
    and defer. This prevents a retained combined input from receiving the same

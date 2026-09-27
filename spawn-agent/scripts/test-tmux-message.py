@@ -45,11 +45,20 @@ class Terminal:
         self.harness = 'codex'
         self.home = False
         self.end_moves = True
+        self.end_paint_delay = 0
+        self.end_requested_at = None
+        self.end_unknown_frames = 0
 
     def sleep(self, n): self.now += n
     def clock(self): return self.now
 
     def frame(self):
+        if self.end_requested_at is not None and self.end_unknown_frames:
+            self.end_unknown_frames -= 1
+            self.frames += 1
+            return m.Frame("", -1, -1)
+        if self.end_moves and self.end_requested_at is not None and self.now >= self.end_requested_at + self.end_paint_delay:
+            self.home = False
         self.frames += 1
         history = self.history
         if self.accepted_at is not None and self.now >= self.accepted_at + self.delayed:
@@ -64,6 +73,7 @@ class Terminal:
 
     def paste(self, path):
         self.actions.append('paste')
+        self.paste_at = self.now
         self.pastes += 1
         content = path.read_text()
         self.draft += (('\n' if self.draft and content.startswith('\n') else '') + '[Pasted text #1 +20 lines]') if self.collapsed else content
@@ -75,7 +85,9 @@ class Terminal:
     def keys(self, *keys):
         self.actions.extend(keys)
         if keys == ('End',) and self.end_moves:
-            self.home = False
+            self.end_requested_at = self.now
+            if not self.end_paint_delay:
+                self.home = False
         if keys == ('Enter',):
             self.enters += 1
             if self.enters > self.dropped:
@@ -375,6 +387,73 @@ class DeliveryTests(unittest.TestCase):
                 self.assertEqual(result['status'], 'delivered')
                 self.assertEqual(t.actions, ['End', 'paste', 'Enter'])
                 self.assertEqual(t.submitted, 'stale TICK\nhello')
+
+    def test_home_end_delayed_repaint_waits_without_more_keys(self):
+        for harness in ('codex', 'claude'):
+            with self.subTest(harness=harness):
+                t = Terminal(draft='stale TICK')
+                t.home, t.harness, t.end_paint_delay = True, harness, .5
+                try:
+                    result = deliver(t, stable_wait=0, max_wait=1)
+                except m.DeliveryError as error:
+                    self.fail('unchanged Home repaint deferred: ' + error.reason)
+                self.assertEqual(result['status'], 'delivered')
+                self.assertEqual(t.actions, ['End', 'paste', 'Enter'])
+                self.assertGreaterEqual(t.paste_at, t.end_requested_at + .5)
+                self.assertEqual(t.submitted, 'stale TICK\nhello')
+
+    def test_home_end_unknown_repaint_then_known_end(self):
+        for harness in ('codex', 'claude'):
+            with self.subTest(harness=harness):
+                t = Terminal(draft='stale TICK')
+                t.home, t.harness, t.end_unknown_frames = True, harness, 2
+                try:
+                    result = deliver(t, stable_wait=0, max_wait=1)
+                except m.DeliveryError as error:
+                    self.fail('unknown repaint deferred before budget: ' + error.reason)
+                self.assertEqual(result['status'], 'delivered')
+                self.assertEqual(t.actions, ['End', 'paste', 'Enter'])
+                self.assertEqual(t.submitted, 'stale TICK\nhello')
+
+    def test_home_end_persistent_unknown_times_out_without_input(self):
+        t = Terminal(draft='stale TICK')
+        t.home, t.end_unknown_frames = True, 99
+        o = SimpleNamespace(max_wait=1, stable_wait=0, poll_interval=.25, backoff=False)
+        sender = m.Sender(t, o, t.payload, Path('/unused'), t.clock, t.sleep)
+        with self.assertRaisesRegex(m.DeliveryError, 'cursor-navigation-unverified'):
+            sender.deliver()
+        self.assertEqual(t.now, 1)
+        self.assertFalse(sender.pasted)
+        self.assertEqual(t.actions, ['End'])
+
+    def test_home_end_known_changed_frames_fail_without_wait_or_input(self):
+        for kind in ('text', 'harness', 'modal', 'middle', 'empty'):
+            with self.subTest(kind=kind):
+                t = Terminal(draft='stale TICK')
+                t.home = True
+                original = t.frame
+                def changed_frame():
+                    if t.end_requested_at is not None:
+                        if kind == 'modal':
+                            return m.Frame('Would you like to proceed?\n› yes\n', 2, 1)
+                        if kind == 'text':
+                            t.draft = 'human changed text'
+                        if kind == 'harness':
+                            t.harness = 'claude'
+                        if kind == 'empty':
+                            t.draft = ''
+                    frame = original()
+                    if t.end_requested_at is not None and kind == 'middle':
+                        frame.x = 4
+                    return frame
+                t.frame = changed_frame
+                o = SimpleNamespace(max_wait=1, stable_wait=0, poll_interval=.25, backoff=False)
+                sender = m.Sender(t, o, t.payload, Path('/unused'), t.clock, t.sleep)
+                with self.assertRaisesRegex(m.DeliveryError, 'cursor-navigation-unverified'):
+                    sender.deliver()
+                self.assertEqual(t.now, t.end_requested_at)
+                self.assertFalse(sender.pasted)
+                self.assertEqual(t.actions, ['End'])
 
     def test_home_end_not_moving_or_text_changes_defers_without_paste(self):
         for harness in ('codex', 'claude'):

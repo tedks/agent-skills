@@ -258,13 +258,25 @@ if [[ "$state" != "$previous_state" ]] || ! cmp -s "$observe_file" "$stable_file
 if [[ "$state" == draft-home ]]; then
     stable_harness=$(<"$harness_file")
     "${TMUX_CMD[@]}" send-keys -t "$pane_id" End
-    state=$(screen_state 2>/dev/null || printf unknown)
-    elapsed=$(python3 -c 'import time,sys; print((time.monotonic_ns()-int(sys.argv[1]))/1e9)' "$wait_start_ns")
-    awk -v e="$elapsed" -v d="$max_wait" 'BEGIN { exit !(e < d) }' || { preserve_pending deferred final-pre-paste-timeout; exit 2; }
-    if [[ "$state" != draft || "$(<"$harness_file")" != "$stable_harness" ]] || ! cmp -s "$observe_file" "$stable_file"; then
-        preserve_pending deferred cursor-navigation-unverified
-        exit 2
-    fi
+    while :; do
+        state=$(screen_state 2>/dev/null || printf unknown)
+        elapsed=$(python3 -c 'import time,sys; print((time.monotonic_ns()-int(sys.argv[1]))/1e9)' "$wait_start_ns")
+        remaining=$(awk -v d="$max_wait" -v e="$elapsed" 'BEGIN { printf "%.3f",d-e }')
+        awk -v r="$remaining" 'BEGIN { exit !(r > 0) }' || { preserve_pending deferred cursor-navigation-unverified; exit 2; }
+        if [[ "$state" == draft || "$state" == draft-home ]]; then
+            if [[ "$(<"$harness_file")" != "$stable_harness" ]] || ! cmp -s "$observe_file" "$stable_file"; then
+                preserve_pending deferred cursor-navigation-unverified
+                exit 2
+            fi
+            [[ "$state" != draft ]] || break
+        elif [[ "$state" != unknown ]]; then
+            preserve_pending deferred cursor-navigation-unverified
+            exit 2
+        fi
+        # Unchanged Home/unknown repaint receives no further keys.
+        sleep_for=$(awk -v d="$poll_interval" -v r="$remaining" 'BEGIN { if (d>r) d=r; printf "%.3f",d }')
+        sleep "$sleep_for"
+    done
 fi
 if [[ "$state" == draft ]]; then
     stale_draft_length=$(python3 -c 'import pathlib,sys; print(len(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8")))' "$stable_file")
