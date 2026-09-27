@@ -14,10 +14,14 @@ for compatibility, with its original transport-only semantics.
 ## Flow
 
 1. Resolve the target to a stable pane and acquire one per-pane sender lock.
-2. Compare the input text and relative cursor over a three-second stable period.
-   Output moving above the input does not count as typing. A stable draft is
-   still a draft; do not submit it. A stable Claude `Try …` suggestion gets one
-   Space/Backspace probe. If it remains, defer.
+2. Compare the input text and relative cursor twice, one `--stable-window`
+   apart (default: submit-delay, normally eight seconds). Output moving above
+   the input does not count as typing. Changing input defers with bounded
+   backoff. Preserve an unchanged draft and append a newline plus the outgoing
+   payload; submit both only after verifying the combined input. Record only
+   draft length. Modals and unsupported layouts defer. A Claude `Try …`
+   suggestion retains the conservative Space/Backspace probe; suggestions are
+   disabled fleet-wide, so normal idle Claude input is empty.
 3. Snapshot receipt history, recheck input, and paste actual text once through
    tmux bracketed paste. Compare the resulting input with the expected text,
    tolerating wrapping/whitespace layout, or recognize a newly introduced
@@ -46,7 +50,8 @@ Options precede actual message text or `--prompt-file FILE`:
 
 | Option | Default seconds | Purpose |
 | --- | ---: | --- |
-| `--stable-wait` | 3 | Unchanging input before paste |
+| `--stable-window` | submit-delay (8) | Interval between composer observations |
+| `--stable-wait` | same | Compatibility alias for stable-window |
 | `--max-wait` | 10 | Input readiness budget (launcher uses 30) |
 | `--submit-delay` | 8 | Earliest first Enter after paste |
 | `--render-wait` | 3 | Wait for initial paste evidence |
@@ -54,8 +59,10 @@ Options precede actual message text or `--prompt-file FILE`:
 | `--retry-wait` | 3 | Minimum interval before the second Enter |
 | `--poll-interval` | 0.25 | Screen sampling cadence |
 
-`--backoff` waits within `--max-wait` for a draft/typing to clear, rather than
-returning immediately when detected. Stability resets when input changes.
+`--backoff` waits within `--max-wait` for changing input to settle, rather than
+returning immediately when typing is detected. Stable drafts no longer block
+ordinary messages. Stability resets when input changes; choose a readiness
+budget longer than the settle window.
 The 8/3/10 submit/render/readiness defaults preserve the operational baseline;
 receipt confirmation and recovery do not depend on shortening that delay.
 The lock wait has a separate `--max-wait` budget. Confirmation is bounded by
@@ -65,13 +72,14 @@ budget, because some layouts show only completion rather than an initial user
 row. Receipt waits may exceed 600 seconds when explicitly configured.
 For slash commands such as `/compact` and `/exit`, use `--typed-command`: the sender inserts
 literal characters with `tmux send-keys -l` rather than bracketed paste. The
-same lock, empty-composer checks, input verification, settling delay, and NEW
+same lock, input verification, settling delay, and NEW
 receipt requirements apply. A command has an ASCII letter name (letters, digits, `_`
 and `-`), optionally followed by a space and arguments. Controls, newlines,
 leading whitespace, trailing Unicode whitespace or semicolons, commands over 200 UTF-8 bytes,
 and ordinary prose are rejected. These limits avoid tmux argument loss and
 ambiguous wrapped or trimmed composer evidence. Ordinary messages retain
-bracketed paste. Typed
+bracketed paste. Typed commands require an empty composer: joining a draft
+would change command semantics, so stable drafts defer in this mode. Typed
 input requires exact visible command text; a collapsed paste marker cannot
 authorize its Enter. Failure JSON distinguishes `input_attempted` from
 `paste_attempted` and labels `input_method`; an ambiguous typed attempt must
@@ -97,7 +105,8 @@ an unsupported layout, modal or ambiguous attempt. The result also carries a
 reason, paste-attempted flag and Enter count. An orchestrator may delegate this
 inspection to an agent; there is no compulsory model call or model dependency
 inside the sender. The inspecting agent must check for receipt before taking
-any further action. Existing drafts and human typing normally need only backoff.
+any further action. Changing input normally needs only bounded backoff; an unchanged draft is
+co-submitted with ordinary messages. Typed commands still require empty input.
 
 Screen interpretation uses semantic prompt/frame/footer and queue markers,
 relative cursor position, and before/after receipt counts, not model identity
