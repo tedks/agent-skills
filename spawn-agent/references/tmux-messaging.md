@@ -150,7 +150,8 @@ bytes, including trailing whitespace/newlines, are preserved in the paste.
 Exit 0 emits delivered JSON on stdout. Failures emit JSON on stderr. Exit 2
 means deferred before composer mutation. Exit 3 means ambiguous after a clear
 or outgoing input attempt.
-Use `input_attempted` to determine whether any input may have occurred;
+Use `input_attempted` to determine whether outgoing input may have occurred.
+Either `clear_attempted` or `input_attempted` indicates possible composer mutation;
 `paste_attempted` applies to bracketed paste, except that the legacy
 `--literal-exit` mode retains its compatibility meaning of any input attempt.
 Both literal modes report `input_method: "typed"`. Signals retain conventional 128+signal exit

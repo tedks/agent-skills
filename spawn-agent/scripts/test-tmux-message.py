@@ -353,6 +353,25 @@ class DeliveryTests(unittest.TestCase):
             self.assertNotIn('SPAWN_TMUX_LABEL', run.call_args.kwargs['env'])
         self.assertEqual(dict(os.environ), before)
 
+    def test_success_input_method_matches_actual_transport(self):
+        for t, options, method in ((Terminal(), {}, 'paste'),
+                                   (Terminal(payload='/status'), {'typed_command': True}, 'typed'),
+                                   (ClaudeExitTerminal(), {'literal_exit': True}, 'typed')):
+            with self.subTest(method=method, options=options):
+                result = deliver(t, **options)
+                self.assertEqual(result['status'], 'delivered')
+                self.assertEqual(result['input_method'], method)
+                if options.get('literal_exit'):
+                    self.assertEqual(result['transport'], 'literal')
+                    self.assertEqual(result['receipt'], 'command')
+                    self.assertEqual(t.typed, 1)
+                elif method == 'typed':
+                    self.assertIn('typed:/status', t.actions)
+                    self.assertEqual(t.pastes, 0)
+                else:
+                    self.assertEqual(t.pastes, 1)
+                self.assertEqual(t.enters, 1)
+
     def test_literal_claude_exit_fresh_resume_receipt(self):
         t = ClaudeExitTerminal(delayed=2)
         t.history = 'Resume this session with:\nclaude --resume ' + t.session + '\n'

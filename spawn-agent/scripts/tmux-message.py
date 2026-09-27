@@ -396,6 +396,7 @@ class Sender:
 
     def deliver(self):
         result = self._deliver()
+        result["input_method"] = "typed" if self.typed or getattr(self.o, "literal_exit", False) else "paste"
         if self.stale_draft_length:
             result["stale_draft_length"] = self.stale_draft_length
         if self.clear_attempted:
