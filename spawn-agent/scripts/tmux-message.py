@@ -307,7 +307,7 @@ class Sender:
         if self.typed and not styles.slash_command_syntax(payload):
             raise DeliveryError("unsupported-typed-command")
 
-    def input_evidence(self, inp):
+    def input_evidence(self, inp, frame=None):
         if self.typed:
             return inp.kind == "text" and inp.text == self.payload
         if self.stale_draft_length:
@@ -315,6 +315,18 @@ class Sender:
                 return False
             if inp.text == self.expected:
                 return True
+            # Claude 2.1.283 replaces a long bracketed paste with this exact
+            # visible shape. The known draft prefix, one current paste marker,
+            # adjacent expansion hint, harness and end cursor bind it to the
+            # one append operation above; the hidden bytes remain opaque.
+            if (frame is not None and inp.harness == self.draft_harness == "claude"
+                    and self.at_end(inp) and inp.text.startswith(self.original_draft)):
+                suffix = inp.text[len(self.original_draft):]
+                marker = re.fullmatch(r"\[Pasted text #[1-9][0-9]*\]", suffix)
+                rows = styles.strip_ansi(frame.raw).splitlines()
+                hint = rows[inp.end + 1] if inp.end + 1 < len(rows) else ""
+                if marker and hint.strip() == "paste again to expand":
+                    return True
             # Codex compresses the appended newline+payload inline after the
             # untouched draft. Readiness excluded all old paste markers.
             if (inp.harness == self.draft_harness == "codex" and self.at_end(inp)
@@ -488,6 +500,7 @@ class Sender:
         evidence_since = None
         last_enter = None
         input_disappeared = False
+        max_enters = 1 if literal or (self.stale_draft_length and self.draft_harness == "claude") else 2
         accepted_forms = {normalized(self.expected)}
         while self.clock() < deadline:
             frame, current = self.sample()
@@ -513,7 +526,7 @@ class Sender:
                 raise DeliveryError("modal-after-paste", 3)
             if owned is not None and current.kind == "empty":
                 input_disappeared = True
-            evidence = self.input_evidence(current)
+            evidence = self.input_evidence(current, frame)
             if evidence:
                 fp = current.fingerprint()
                 if owned is not None and fp != owned and self.enters:
@@ -524,14 +537,14 @@ class Sender:
                 accepted_forms.add(normalized(current.text))
                 due = start + self.o.submit_delay if last_enter is None else last_enter + self.o.retry_wait
                 if (now >= due and now - evidence_since >= self.o.poll_interval
-                        and self.enters < (1 if literal else 2) and not input_disappeared):
+                        and self.enters < max_enters and not input_disappeared):
                     # Refresh receipt AND input immediately before each Enter.
                     confirm, live = self.sample()
                     fresh = records(confirm, live)
                     for kind in ("submitted", "queued"):
                         if not literal and self.enters and any(fresh[(kind, form)] > baseline[(kind, form)] for form in accepted_forms):
                             return {"status": "delivered", "receipt": kind, "enters": self.enters}
-                    if live.fingerprint() != owned or not self.input_evidence(live):
+                    if live.fingerprint() != owned or not self.input_evidence(live, confirm):
                         raise DeliveryError("input-changed-before-enter", 3)
                     self.tmux.keys("Enter")
                     self.enters += 1

@@ -42,10 +42,12 @@ explicitly for single-line slash commands; ordinary messages retain bracketed pa
    tmux bracketed paste. For new input, compare the result with the expected
    text, tolerating wrapping/whitespace layout, or recognize a newly introduced
    collapsed paste marker. For co-submission, require the exact combined input
-   or the measured Codex append marker described below.
+   or a measured harness-specific append marker described below.
 4. Send Enter after paste evidence and the settling delay. Wait for a new
-   submitted user row or pending queue entry. If the same input remains after
-   the retry interval, recheck and send Enter once more. Never paste again.
+   submitted user row or pending queue entry. For other ordinary deliveries, if
+   the same input remains after the retry interval, recheck and send Enter once
+   more. A co-submitted Claude draft gets one Enter; an unclear result is
+   ambiguous. Never paste again.
 5. Once the input empties, only wait for confirmation. Disappearance alone is
    not confirmation, and cannot authorize Enter into the next empty input.
 
@@ -73,6 +75,20 @@ prefixes, extra text, wrong counts and unsupported markers cannot authorize
 Enter. A new matching submitted or queued receipt is still required; no replay
 is introduced. Other wrapped/collapsed co-submission shapes remain unsupported.
 The compatibility sender retains its exact visible-input limits.
+
+Claude Code 2.1.283 can replace a long bracketed paste appended to a stable
+ordinary draft with `[Pasted text #N]` while leaving the exact original draft
+prefix visible; its composer also shows `paste again to expand` immediately
+below the input. The sender accepts only this measured co-submit shape when the
+prefix is exact, the marker is the only suffix, the expansion hint is in that
+adjacent visible row, the current and original harness are Claude, and the
+cursor is at the verified end. The current paste operation itself appends one
+newline and the outgoing payload, so this marker binds to that one fresh paste;
+the hidden bytes cannot be inspected, and this evidence does not prove their
+contents. Other Claude markers, extra text, changed prefixes, wrapped prefixes,
+missing hints, and cursor or harness changes defer. The combined Claude path
+sends Enter at most once and requires a new submitted or queued receipt; it
+never retries Enter or re-pastes after ambiguity.
 
 ## Stable command drafts
 
