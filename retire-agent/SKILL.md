@@ -81,5 +81,6 @@ naming a new private directory, and `--shared-skill` naming the published
 spawn-agent installation. It launches real Codex and Claude on its own tmux
 server and verifies remote shard blobs, fresh harness exit notices and original
 process end. It retains private artifacts and releases only its owned server.
-An optional `--baseline-script` runs the original history-discovery failure
+`--stale-offer-draft` also exercises ordinary draft co-submission through the
+published sender. An optional `--baseline-script` runs the original history-discovery failure
 against the real Codex pane before checking the repaired flow.

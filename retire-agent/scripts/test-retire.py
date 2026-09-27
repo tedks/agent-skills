@@ -22,7 +22,7 @@ import uuid
 sys.dont_write_bytecode = True
 
 HERE = Path(__file__).resolve().parent
-SHARED = HERE.parents[1] / 'spawn-agent' / 'scripts'
+SHARED = Path(os.environ.get('RETIRE_TEST_SHARED_SCRIPTS', str(HERE.parents[1] / 'spawn-agent' / 'scripts')))
 
 
 def shard_data(event, identity):
@@ -50,6 +50,7 @@ def terminal(directory, mode):
     event = None
     due = None
     children = []
+    typing_tick = 0
     if mode in ('node-core', 'extra-core', 'linger-core'):
         core = str(directory / '@openai/codex/node_modules/@openai/codex-linux-x64/vendor/test/bin/codex')
         names = (core,) if mode == 'linger-core' else (core, core if mode == 'extra-core' else 'node')
@@ -86,6 +87,11 @@ def terminal(directory, mode):
     try:
         draw()
         while True:
+            if mode == 'draft' and not (directory / 'human-cleared-draft').exists():
+                # Active human input changes faster than the sender stability window.
+                typing_tick += 1
+                draft = b'human unfinished draft ' + str(typing_tick % 2).encode()
+                draw()
             if due is not None and time.monotonic() >= due:
                 history += '● RETIRE-DONE-' + event + '\r\n'
                 due = None
@@ -106,7 +112,7 @@ def terminal(directory, mode):
                 draft = b''
                 mode = 'done'
                 draw()
-            if not select.select([0], [], [], .1)[0]:
+            if not select.select([0], [], [], .01 if mode == 'draft' else .1)[0]:
                 continue
             pending += os.read(0, 65536)
             while pending:
@@ -396,7 +402,7 @@ class Tests(unittest.TestCase):
         self.assertIn('Session | Provider | Role | State | Last verified', index)
         self.assertIn('test-session-id | OpenAI | Utility | retired', index)
 
-    def test_draft_preserved_without_paste(self):
+    def test_changing_draft_preserved_without_paste(self):
         self.actor('draft')
         result = self.invoke()
         self.assertEqual(result.returncode, 2)

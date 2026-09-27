@@ -39,6 +39,7 @@ def main():
     parser.add_argument('--evidence', type=Path, required=True)
     parser.add_argument('--shared-skill', type=Path, required=True)
     parser.add_argument('--baseline-script', type=Path)
+    parser.add_argument('--stale-offer-draft', action='store_true', help='exercise shared sender stable draft co-submission')
     parser.add_argument('--codex-model', default='gpt-6-luna')
     parser.add_argument('--claude-model', default='haiku')
     args = parser.parse_args()
@@ -72,13 +73,16 @@ def main():
                        RETIRE_PRIVATE_CHECK=str(checker), RETIRE_SPAWN_SKILL=str(args.shared_skill.resolve()))
     environment.pop('TMUX', None)
     environment.pop('SPAWN_TMUX_SOCKET', None)
-    require(run([*tmux, 'new-session', '-d', '-s', 'retire-native', '-x', '240', '-y', '60'], env=environment))
-    require(run([*tmux, 'set-option', '-g', 'history-limit', '10000']))
     report = {'label': label, 'results': [], 'resources_released': False,
-              'shared_head': require(run(['git', '-C', args.shared_skill, 'rev-parse', 'HEAD'])),
-              'versions': {name: require(run([name, '--version'])) for name in ('codex', 'claude')},
               'models': {'codex': args.codex_model, 'claude': args.claude_model}}
+    server_started = False
     try:
+        require(run([*tmux, 'new-session', '-d', '-s', 'retire-native', '-x', '240', '-y', '60'], env=environment))
+        server_started = True
+        require(run([*tmux, 'set-option', '-g', 'history-limit', '10000']))
+        report['shared_head'] = require(run(['git', '-C', args.shared_skill, 'rev-parse', 'HEAD']))
+        report['versions'] = {name: require(run([name, '--version'])) for name in ('codex', 'claude')}
+        (directory / 'report.json').write_text(json.dumps(report, indent=2) + '\n')
         for harness, model in [('codex', args.codex_model), ('claude', args.claude_model)]:
             launcher = args.shared_skill / 'scripts' / 'agent-spawn.sh'
             prompt = ('This is an authorized disposable retirement rehearsal. You own no product work or processes. '
@@ -114,7 +118,8 @@ def main():
                 assert not list(records.glob('*-offer.txt')), 'baseline sent an offer before failing'
             # Deliberately leave this owned ordinary draft unsent. The published
             # sender must preserve and co-submit it with the retirement offer.
-            require(run([*tmux, 'send-keys', '-t', pane, '-l', 'Disposable retirement rehearsal reminder.']))
+            if args.stale_offer_draft:
+                require(run([*tmux, 'send-keys', '-t', pane, '-l', 'Disposable retirement rehearsal reminder.']))
             result = run([HERE / 'retire.sh', pane, '--retire', '--wait', '1200', '--poll', '1'], env=environment, timeout=1320)
             (directory / (harness + '-retire.json')).write_text(json.dumps({'returncode': result.returncode, 'stdout': result.stdout, 'stderr': result.stderr}, indent=2))
             require(result)
@@ -122,7 +127,8 @@ def main():
             state = next(item for item in states if item['pane'] == pane)
             assert state['status'] == 'retired', state['status']
             assert state['offer']['status'] == 'delivered'
-            assert state['offer'].get('stale_draft_length') == len('Disposable retirement rehearsal reminder.'), 'ordinary stale draft was not co-submitted'
+            if args.stale_offer_draft:
+                assert state['offer'].get('stale_draft_length') == len('Disposable retirement rehearsal reminder.'), 'ordinary stale draft was not co-submitted'
             assert state.get('handoff_receipt') and state.get('shard_hash')
             screen = require(run([*tmux, 'capture-pane', '-p', '-S', '-2000', '-t', pane]))
             notice = 'Resume this session with' if harness == 'claude' else 'Shutting down'
@@ -137,13 +143,19 @@ def main():
             report['results'].append({'harness': harness, 'pane': pane, 'event': state['id'],
                                       'handoff': 'remote-blob-verified', 'exit_receipt': notice, 'processes_ended': True})
             print(harness + ': real handoff, exit receipt, and process end verified', flush=True)
+    except BaseException as error:
+        report['failure'] = str(error)
+        raise
     finally:
         # Only this uniquely named server, created above, belongs to this test.
-        require(run([*tmux, 'kill-server']))
+        if server_started:
+            cleanup = run([*tmux, 'kill-server'])
+            report['cleanup_exit'] = cleanup.returncode
         absent = run([*tmux, 'list-sessions'])
         report['resources_released'] = absent.returncode != 0
         (directory / 'report.json').write_text(json.dumps(report, indent=2) + '\n')
-        assert report['resources_released'], 'owned tmux server still exists'
+        if not report['resources_released'] and sys.exc_info()[0] is None:
+            raise AssertionError('owned tmux server still exists')
 
 
 if __name__ == '__main__':
