@@ -346,7 +346,10 @@ class DeliveryTests(unittest.TestCase):
                         return m.Frame((fixtures / (harness + '-stable-draft.ansi')).read_text(), x, y)
                     return original()
                 t.frame = initial
-                result = deliver(t)
+                try:
+                    result = deliver(t)
+                except m.DeliveryError as error:
+                    self.fail("stable draft deferred: " + error.reason)
                 self.assertEqual(t.submitted, 'stale TICK\nhello')
                 self.assertEqual((t.pastes, t.enters), (1, 1))
                 self.assertEqual(result['stale_draft_length'], len('stale TICK'))
@@ -386,6 +389,21 @@ class DeliveryTests(unittest.TestCase):
         t = Terminal(draft='stale TICK', dropped=1)
         self.assertEqual(deliver(t)['enters'], 2)
         self.assertEqual((t.pastes, t.submitted), (1, 'stale TICK\nhello'))
+
+    def test_stale_draft_failure_keeps_only_outgoing_pending(self):
+        t = Terminal(draft='stale TICK', mutate=True)
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / 'message'
+            path.write_text(t.payload)
+            o = SimpleNamespace(max_wait=8, stable_wait=3, poll_interval=.25,
+                                backoff=False, submit_delay=1, render_wait=3,
+                                receipt_wait=8, retry_wait=3)
+            sender = m.Sender(t, o, t.payload, path, t.clock, t.sleep)
+            with self.assertRaisesRegex(m.DeliveryError, 'mixed-input'):
+                sender.deliver()
+            self.assertEqual(path.read_text(), 'hello')
+            self.assertEqual(list(Path(tmp).iterdir()), [path])
+            self.assertEqual(t.enters, 0)
 
     def test_existing_ambiguous_payload_never_reappended(self):
         for draft in ('hello', '[Pasted text #1 +20 lines]', '[Pasted Content 5 chars]'):
