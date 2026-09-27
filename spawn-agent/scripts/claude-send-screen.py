@@ -220,8 +220,6 @@ def codex_state(lines: list[str], raw_lines: list[str], payload: str, cx: int, c
                         and not lines[idx - 1].strip() and lines[idx] == "› /compact")
         if not shortcuts and not compact_menu:
             return "unknown"
-    if footer - idx > 2:
-        return "unknown"
     if any(line.strip() and not ("? for shortcuts" in line or "warning" in line.lower() or "agents" in line.lower()) for line in lines[footer + 1 :]):
         return "unknown"
     fragment = lines[idx].split("›", 1)[1]
@@ -251,10 +249,85 @@ def codex_state(lines: list[str], raw_lines: list[str], payload: str, cx: int, c
     return "busy"
 
 
+def slash_command_syntax(text: str) -> bool:
+    return bool(re.fullmatch(r"/[A-Za-z][A-Za-z0-9_-]*(?: [^\r\n\x00-\x1f\x7f]*)?", text))
+
+
+def command_like(text: str) -> bool:
+    return text.lstrip().startswith(("/", "!"))
+
+
+def command_draft(text: str) -> bool:
+    """Only a short exact single-line command in an ordinary composer can clear."""
+    if (len(text.encode("utf-8")) > 200 or text != text.rstrip() or text.endswith(";")
+            or any(unicodedata.category(ch) == "Cc" for ch in text)):
+        return False
+    return slash_command_syntax(text) or (text.startswith("!") and bool(text[1:].strip()))
+
+
+def command_rows(screen: str, glyph: str, start: int, end: int) -> bool:
+    """Reject extra command rows, including trimmed blank continuations."""
+    rows = strip_ansi(screen).splitlines()
+    if glyph == "❯":
+        return end == start + 1
+    return end - start == 2 and all(not row.strip() for row in rows[start + 1:end])
+
+
+def contains_payload(text: str, payload: str) -> bool:
+    """Conservative replay guard: a full payload survives wrapping/spacing."""
+    wanted = "".join(payload.split())
+    return bool(wanted) and wanted in "".join(text.split())
+
+
+def observe(screen: str, payload: str, cx: int, cy: int, path: pathlib.Path) -> str:
+    """Write only a validated exact draft to a caller-owned private scratch file."""
+    path.write_text("", encoding="utf-8")
+    result = state(screen, payload, cx, cy)
+    if result != "busy":
+        return result
+    lines = strip_ansi(screen).splitlines()
+    glyph = "›" if codex_surface(screen) else "❯"
+    prompts = [i for i, row in enumerate(lines) if glyph in row]
+    if not prompts:
+        return result
+    idx = prompts[-1]
+    if glyph == "❯":
+        ends = [i for i in range(idx + 1, len(lines)) if lines[i].strip() and set(lines[i].strip()) == {"─"}]
+    else:
+        ends = [i for i in range(idx + 1, len(lines)) if "Context " in lines[i] or "tab to queue message" in lines[i] or re.match(r"  GPT-6-Sol · ", lines[i])]
+    if not ends:
+        return result
+    fragment = lines[idx].split(glyph, 1)[1]
+    if fragment.startswith((" ", "\u00a0")):
+        fragment = fragment[1:]
+    parts = [fragment.rstrip()] + [row[2:].rstrip() if row.startswith("  ") else row.rstrip() for row in lines[idx + 1:ends[0]]]
+    draft = "\n".join(parts).rstrip("\n")
+    command = command_draft(draft) and command_rows(screen, glyph, idx, ends[0])
+    if command_like(draft) and not command:
+        return result
+    # These measured busy queues cannot verify multiline appended input.
+    if not command and glyph == "›" and any(re.fullmatch(r"  tab to queue message(?: {2,}\d+% context left)?", row) for row in lines[idx + 1:]):
+        return result
+    home = ("\n" not in draft and (cx, cy) == (2, idx)
+            and state(screen, draft, 2 + cell_width(draft), idx) == "own")
+    if (draft and not contains_payload(draft, payload)
+            and (state(screen, draft, cx, cy) == "own" or home)
+            and not re.search(r"\[Pasted (?:text|Content)", draft, re.I)):
+        path.write_text(draft, encoding="utf-8")
+        if command:
+            return "command-home" if home else "command"
+        return "draft-home" if home else "draft"
+    return result
+
+
 def main() -> int:
     if len(sys.argv) == 2 and sys.argv[1] == "--strip-ansi":
         sys.stdout.write(strip_ansi(sys.stdin.read()))
         return 0
+    observe_path = None
+    if len(sys.argv) == 6 and sys.argv[1] == "--observe-file":
+        observe_path = pathlib.Path(sys.argv[2])
+        sys.argv[1:3] = []
     if len(sys.argv) != 4:
         return 64
     try:
@@ -268,7 +341,7 @@ def main() -> int:
     except (IndexError, ValueError):
         print("unknown")
         return 0
-    print(state(screen, payload, cx, cy))
+    print(observe(screen, payload, cx, cy, observe_path) if observe_path else state(screen, payload, cx, cy))
     return 0
 
 

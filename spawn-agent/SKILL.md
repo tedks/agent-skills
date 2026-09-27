@@ -65,18 +65,33 @@ It compares the input before and after one paste, allows wrapped text and
 collapsed paste markers, and makes at most one Enter-only recovery. Receipt is
 acceptance, not completion of the task. Busy agent output can continue.
 
-The input must remain stable for three seconds before paste. Changing input
-returns `human-typing`; a stable existing draft returns `existing-input`.
-Use `--backoff --max-wait 60` to wait for the human to finish instead. A stable
-Claude suggestion may be probed once with Space/Backspace; if actual text
-remains, it is preserved. One pane lock prevents cooperating senders from
-pasting into the same input concurrently. It cannot lock out human typing.
+Observe the composer twice, one `--stable-window` apart (default: the
+`--submit-delay`, normally eight seconds). Changing text or cursor returns
+`human-typing`; use `--backoff --max-wait 60` for bounded waiting. An unchanged
+draft is preserved: append a newline and the outgoing message, verify the
+combined input, then submit both. Results record only the co-submitted draft
+length, never its contents. Exception: a verified stable command-shaped draft
+is cleared without execution, then the outgoing message is sent only after
+empty input is verified. Its context may pre-empt the command. Results include
+`cleared_command_draft_length` after empty input is verified, and
+`clear_attempted` whenever clearing was attempted, never draft contents.
+Changing input, replay residue, modals and unsupported layouts still defer.
+For ordinary co-submission, the public sender also supports the measured Codex
+inline append marker: unchanged draft prefix plus one fresh Content marker
+whose count covers the appended newline and payload, with a verified end
+cursor. Other unsupported combined layouts remain closed.
+Claude prompt suggestions are disabled fleet-wide; an ambiguous suggestion
+frame retains the conservative probe. One pane lock serializes cooperating
+senders; it cannot lock out human typing.
 
 Use `--typed-command` for slash commands such as `/compact`, `/exit`, and
 `/status`: these are literal keys,
 with the same draft preservation and receipt checks. Claude may treat a pasted
 slash command as ordinary text. This option accepts one single-line slash command and optional arguments; it
 rejects control characters, newlines, leading whitespace, and ordinary prose.
+Typed commands require an empty composer: appending them to a draft would
+turn the command into ordinary message text. Ordinary stable drafts therefore defer
+for command delivery; eligible command drafts are cleared first.
 
 Results are JSON: exit 0 is `status=delivered` with a `submitted`, `queued`, or
 `command` receipt. Exit 2 is deferred before paste; exit 3 is ambiguous after

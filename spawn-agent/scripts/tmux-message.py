@@ -294,24 +294,51 @@ class Sender:
         self.pasted = False
         self.enters = 0
         self.typed = getattr(options, "typed_command", False)
+        self.expected = payload
+        self.stale_draft_length = 0
+        self.original_draft = ""
+        self.draft_harness = ""
+        self.clear_attempted = False
+        self.cleared_command_draft_length = 0
         if self.typed and getattr(options, "literal_exit", False):
             raise DeliveryError("conflicting-input-modes")
         if self.typed and (len(payload.encode("utf-8")) > 200 or payload != payload.rstrip() or payload.endswith(";")):
             raise DeliveryError("unsupported-typed-command")
-        if self.typed and not re.fullmatch(r"/[A-Za-z][A-Za-z0-9_-]*(?: [^\r\n\x00-\x1f\x7f]*)?", payload):
+        if self.typed and not styles.slash_command_syntax(payload):
             raise DeliveryError("unsupported-typed-command")
 
     def input_evidence(self, inp):
         if self.typed:
             return inp.kind == "text" and inp.text == self.payload
+        if self.stale_draft_length:
+            if inp.kind != "text":
+                return False
+            if inp.text == self.expected:
+                return True
+            # Codex compresses the appended newline+payload inline after the
+            # untouched draft. Readiness excluded all old paste markers.
+            if (inp.harness == self.draft_harness == "codex" and self.at_end(inp)
+                    and inp.text.startswith(self.original_draft)):
+                marker = re.fullmatch(r"\[Pasted Content ([0-9]+) chars\]", inp.text[len(self.original_draft):])
+                appended = "\n" + self.payload
+                counts = {str(len(appended)), str(len(appended.encode("utf-16-le")) // 2)}
+                return bool(marker and marker.group(1) in counts)
+            return False
         return paste_evidence(inp, self.payload)
 
     def sample(self):
         frame = self.tmux.frame()
         return frame, composer(frame)
 
+    def at_end(self, inp):
+        return inp.cursor == (2 + styles.cell_width(inp.text.rsplit("\n", 1)[-1]), inp.text.count("\n"))
+
+    def command_shape(self, frame, inp):
+        return styles.command_rows(frame.raw, "❯" if inp.harness == "claude" else "›", inp.start, inp.end)
+
     def ready(self):
         deadline = self.clock() + self.o.max_wait
+        self.readiness_deadline = deadline
         previous = None
         stable_since = self.clock()
         probed = False
@@ -332,11 +359,20 @@ class Sender:
                         raise DeliveryError("human-typing")
                     last_reason = "human-typing"
                 stable_since = now
+            twice = previous is not None and fp == previous
             previous = fp
             if inp.kind == "modal":
                 raise DeliveryError("modal")
-            if now - stable_since >= self.o.stable_wait:
+            if twice and now - stable_since >= getattr(self.o, "stable_window", self.o.stable_wait):
                 if inp.kind == "empty":
+                    return frame, inp
+                if (inp.kind == "text" and (not self.typed or styles.command_draft(inp.text))
+                        and not getattr(self.o, "literal_exit", False)
+                        and not re.search(r"\[Pasted (?:text|Content)", inp.text, re.I)
+                        and not styles.contains_payload(inp.text, self.payload)
+                        and (not styles.command_like(inp.text)
+                             or (styles.command_draft(inp.text) and self.command_shape(frame, inp)))
+                        and (self.at_end(inp) or ("\n" not in inp.text and inp.cursor == (2, 0)))):
                     return frame, inp
                 # Retirement's literal exit permits only Claude's canonical
                 # idle suggestion at the input-start cursor, never draft text.
@@ -359,32 +395,100 @@ class Sender:
         raise DeliveryError(last_reason)
 
     def deliver(self):
+        result = self._deliver()
+        result["input_method"] = "typed" if self.typed or getattr(self.o, "literal_exit", False) else "paste"
+        if self.stale_draft_length:
+            result["stale_draft_length"] = self.stale_draft_length
+        if self.clear_attempted:
+            result["clear_attempted"] = True
+        if self.cleared_command_draft_length:
+            result["cleared_command_draft_length"] = self.cleared_command_draft_length
+        return result
+
+    def _deliver(self):
         before, inp = self.ready()
         baseline = records(before, inp)
         # One final sample catches input beginning just after the stable period.
         before, check = self.sample()
         if check.fingerprint() != inp.fingerprint():
             raise DeliveryError("input-changed-before-paste")
+        if check.kind == "text" and styles.command_like(check.text) and not self.command_shape(before, check):
+            raise DeliveryError("input-changed-before-clear")
+        if check.kind == "text" and not self.at_end(check):
+            home = check
+            self.tmux.keys("End")
+            while True:
+                before, check = self.sample()
+                remaining = self.readiness_deadline - self.clock()
+                if remaining <= 0:
+                    raise DeliveryError("cursor-navigation-unverified")
+                if check.kind == "text" and check.text == home.text and check.harness == home.harness:
+                    if self.at_end(check):
+                        break
+                    if check.cursor != (2, 0):
+                        raise DeliveryError("cursor-navigation-unverified")
+                elif check.kind != "unknown":
+                    raise DeliveryError("cursor-navigation-unverified")
+                # End can repaint through an unreadable frame or unchanged Home.
+                # Neither grants input authority; no more keys until exact end.
+                self.sleep(min(self.o.poll_interval, remaining))
+        if check.kind == "text" and styles.command_draft(check.text):
+            if not self.command_shape(before, check):
+                raise DeliveryError("input-changed-before-clear")
+            command = check
+            self.clear_attempted = True  # C-u may mutate even if tmux reports failure.
+            self.tmux.keys("C-u")
+            while True:
+                before, check = self.sample()
+                remaining = self.readiness_deadline - self.clock()
+                if remaining <= 0:
+                    raise DeliveryError("command-clear-unverified", 3)
+                if check.kind == "empty" and check.harness == command.harness and self.at_end(check):
+                    self.cleared_command_draft_length = len(command.text)
+                    break
+                if check.kind != "unknown" and check.fingerprint() != command.fingerprint():
+                    raise DeliveryError("command-clear-unverified", 3)
+                # Repaint may retain the command or be unreadable; never clear twice.
+                self.sleep(min(self.o.poll_interval, remaining))
+            before, check = self.sample()
+            if (self.clock() >= self.readiness_deadline or check.kind != "empty"
+                    or check.harness != command.harness or not self.at_end(check)):
+                raise DeliveryError("input-changed-after-clear", 3)
         baseline = records(before, check)
         literal = getattr(self.o, "literal_exit", False)
         if literal and (self.payload != "/exit" or check.harness != "claude"):
             raise DeliveryError("literal-exit-requires-claude-exit")
         resume_before = resume_records(before) if literal else Counter()
         compact_before = styles.strip_ansi(before.history or before.raw).count("• Context compacted")
-        self.pasted = True  # A failed paste command can still have changed input.
+        if check.kind == "text":
+            self.stale_draft_length = len(check.text)
+            self.original_draft = check.text
+            self.draft_harness = check.harness
+            self.expected = check.text + "\n" + self.payload
         if literal:
+            self.pasted = True  # A failed input command can still change the composer.
             self.tmux.keys("-l", self.payload)
         elif self.typed:
+            self.pasted = True
             self.tmux.type_command(self.payload)
         else:
-            self.tmux.paste(self.path)
+            if self.stale_draft_length:
+                # Private ephemeral append bytes; retained pending stays outgoing-only.
+                with tempfile.NamedTemporaryFile(dir=self.path.parent, prefix="append-") as append:
+                    append.write(("\n" + self.payload).encode("utf-8"))
+                    append.flush()
+                    self.pasted = True
+                    self.tmux.paste(Path(append.name))
+            else:
+                self.pasted = True
+                self.tmux.paste(self.path)
         start = self.clock()
         deadline = start + self.o.render_wait + self.o.submit_delay + self.o.receipt_wait
         owned = None
         evidence_since = None
         last_enter = None
         input_disappeared = False
-        accepted_forms = {normalized(self.payload)}
+        accepted_forms = {normalized(self.expected)}
         while self.clock() < deadline:
             frame, current = self.sample()
             now = self.clock()
@@ -447,19 +551,23 @@ def options(argv=None):
     p.add_argument("target")
     p.add_argument("--prompt-file", "-f", type=Path)
     p.add_argument("--typed-command", action="store_true", help="type one single-line slash command with literal keys; retain all composer/receipt guards")
-    for name, default in (("stable-wait", 3), ("max-wait", 10), ("submit-delay", 8),
+    p.add_argument("--stable-window", "--stable-wait", dest="stable_wait", type=float, default=None, help="composer settle window; default: submit-delay")
+    for name, default in (("max-wait", 10), ("submit-delay", 8),
                           ("render-wait", 3), ("receipt-wait", 15), ("retry-wait", 3),
                           ("poll-interval", 0.25)):
         p.add_argument("--" + name, type=float, default=default)
     p.add_argument("--literal-exit", action="store_true", help="type a bare Claude /exit literally, send at most one Enter, and verify a fresh resume notice")
-    p.add_argument("--backoff", action="store_true", help="wait for stable empty input within --max-wait instead of exiting on typing/drafts")
+    p.add_argument("--backoff", action="store_true", help="wait for stable input within --max-wait instead of exiting on typing")
     p.add_argument("message", nargs="?")
     o = p.parse_intermixed_args(argv)
+    if o.stable_wait is None:
+        o.stable_wait = o.submit_delay
+    o.stable_window = o.stable_wait
     for name in ("stable_wait", "max_wait", "submit_delay", "render_wait", "receipt_wait", "retry_wait", "poll_interval"):
         value = getattr(o, name)
         maximum = math.inf if name == "receipt_wait" else 600
-        if not math.isfinite(value) or (not 0 < value <= maximum and not (name == "submit_delay" and value == 0)):
-            p.error(name.replace("_", "-") + " must be finite and positive (submit-delay may be zero); options except receipt-wait are capped at 600 seconds")
+        if not math.isfinite(value) or (not 0 < value <= maximum and not (name in {"submit_delay", "stable_wait"} and value == 0)):
+            p.error(name.replace("_", "-") + " must be finite and positive (submit-delay and stable-window may be zero); options except receipt-wait are capped at 600 seconds")
     if bool(o.prompt_file) == (o.message is not None):
         p.error("provide exactly one message or --prompt-file")
     if not o.target or o.target.startswith("-"):
@@ -499,14 +607,23 @@ def main():
         return 0
     except (DeliveryError, OSError, subprocess.SubprocessError) as error:
         pasted = sender is not None and sender.pasted
-        code = error.code if isinstance(error, DeliveryError) else (3 if pasted else 2)
+        changed = pasted or (sender is not None and sender.clear_attempted)
+        code = error.code if isinstance(error, DeliveryError) else (3 if changed else 2)
+        if changed and code == 2:
+            code = 3
         reason = error.reason if isinstance(error, DeliveryError) else "tmux-operation-failed"
-        result = {"status": "ambiguous" if pasted else "deferred", "reason": reason,
-                  "pending_file": str(path), "needs_review": pasted or reason in {"unsupported-layout", "modal"},
+        result = {"status": "ambiguous" if changed else "deferred", "reason": reason,
+                  "pending_file": str(path), "needs_review": changed or reason in {"unsupported-layout", "modal"},
                   "paste_attempted": pasted and not sender.typed,
                   "input_attempted": pasted, "input_method": "typed" if o.typed_command or o.literal_exit else "paste",
                   "enters": sender.enters if sender else 0}
         if sender:
+            if sender.clear_attempted:
+                result["clear_attempted"] = True
+            if sender.cleared_command_draft_length:
+                result["cleared_command_draft_length"] = sender.cleared_command_draft_length
+            if sender.stale_draft_length:
+                result["stale_draft_length"] = sender.stale_draft_length
             result["pane"] = sender.tmux.pane
         print(json.dumps(result), file=sys.stderr)
         return code

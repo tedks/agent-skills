@@ -9,19 +9,40 @@ the resolved pane ID; deletion afterward causes failure rather than retargeting.
 
 The public sender uses `tmux-message.py`. It returns success only after observing
 new application receipt evidence. The older `claude-send.sh` remains available
-for compatibility, with its original transport-only semantics.
+for compatibility, with transport-only semantics. Its measured busy Codex queue
+layouts verify only single-line input, so ordinary drafts there defer before
+input. Eligible command drafts can be cleared first; empty composers permit
+supported short messages. Both entry points use `--typed-command`
+explicitly for single-line slash commands; ordinary messages retain bracketed paste.
 
 ## Flow
 
 1. Resolve the target to a stable pane and acquire one per-pane sender lock.
-2. Compare the input text and relative cursor over a three-second stable period.
-   Output moving above the input does not count as typing. A stable draft is
-   still a draft; do not submit it. A stable Claude `Try …` suggestion gets one
-   Space/Backspace probe. If it remains, defer.
+2. Compare the input text and relative cursor twice, one `--stable-window`
+   apart (default: submit-delay, normally eight seconds). Output moving above
+   the input does not count as typing. Changing input defers with bounded
+   backoff. Preserve an unchanged draft and append a newline plus the outgoing
+   payload; submit both only after verifying the combined input. Record only
+   draft length (`stale_draft_length`). Modals and unsupported layouts defer.
+   A draft must have a visibly verified end cursor. A stable single-line draft
+   at its canonical Home cursor may receive End, followed by verification that
+   its text is unchanged and its cursor is at the known end. Repaint polling
+   stays within the original readiness budget. Unchanged Home drafts or
+   incomplete repaint frames receive no further keys while waiting; known
+   changed text, harness, modal or another cursor position stops the attempt. Other non-end
+   positions defer. Collapsed markers and
+   recognizable full outgoing content already in the draft remain ambiguous
+   and defer. This prevents a retained combined input from receiving the same
+   payload twice after a failed attempt. The replay guard compares full payload
+   content ignoring whitespace; independently authored text containing the
+   same content also conservatively defers. A Claude `Try …`
+   suggestion retains the conservative Space/Backspace probe; suggestions are
+   disabled fleet-wide, so normal idle Claude input is empty.
 3. Snapshot receipt history, recheck input, and paste actual text once through
-   tmux bracketed paste. Compare the resulting input with the expected text,
-   tolerating wrapping/whitespace layout, or recognize a newly introduced
-   collapsed paste marker with surrounding text consistent with the payload.
+   tmux bracketed paste. For new input, compare the result with the expected
+   text, tolerating wrapping/whitespace layout, or recognize a newly introduced
+   collapsed paste marker. For co-submission, require the exact combined input
+   or the measured Codex append marker described below.
 4. Send Enter after paste evidence and the settling delay. Wait for a new
    submitted user row or pending queue entry. If the same input remains after
    the retry interval, recheck and send Enter once more. Never paste again.
@@ -40,13 +61,57 @@ length. Visible text outside this whole-paste marker is mixed input and stops
 submission. Existing `[Pasted text …]` markers retain their surrounding-text
 checks. A retained file alone never establishes which paste is on screen.
 
+For ordinary co-submission, Codex 0.157.1 can display the unchanged draft
+immediately followed by `[Pasted Content N chars]`, with the appended newline
+inside that collapsed block. The public sender accepts this measured shape
+only when the original draft prefix is exact, the marker is the entire remaining
+input, the original and current harness are Codex, and the cursor is at the
+verified end. N must equal the newline plus outgoing payload's Unicode
+code-point or UTF-16-unit count. Readiness rejects pre-existing paste markers
+case-insensitively, so this evidence belongs to the current paste. Changed
+prefixes, extra text, wrong counts and unsupported markers cannot authorize
+Enter. A new matching submitted or queued receipt is still required; no replay
+is introduced. Other wrapped/collapsed co-submission shapes remain unsupported.
+The compatibility sender retains its exact visible-input limits.
+
+## Stable command drafts
+
+A stable command-shaped draft is cleared without executing it before the
+outgoing message is sent. The message supplies context that may pre-empt the
+command. This is the explicit exception to ordinary draft preservation.
+Only an exact visible single-line command in a recognized composer is eligible:
+slash command syntax follows the validated `--typed-command` grammar and
+200-byte limit; a supported single-line `!` shortcut follows the same visible
+shape limits. Real command-clear smokes cover slash drafts; `!` eligibility
+is tested only in synthetic recognized prompt frames. A bash-mode prompt with
+a different glyph remains unknown and defers; real `!` clearing is unverified.
+Command names are recognized syntactically, so an existing draft
+such as `/tmp is full again` is command-shaped. Outgoing slash-looking prose
+still uses ordinary paste unless `--typed-command` is explicit.
+
+Recheck the stable draft, verify its end cursor, send Ctrl-U once, and wait
+within the original readiness budget for an empty composer of the same
+harness. Incomplete repaint and unchanged command frames receive no further
+keys. Known new text, modal, harness or cursor changes stop the attempt. Recheck
+empty input before dispatching the outgoing payload. Never execute the discarded
+command or retry clearing blindly. Long, malformed, multiline or unsupported
+command-like drafts defer; replay residue and collapsed markers take precedence
+and cannot authorize clearing.
+
+Results include `cleared_command_draft_length` only after empty input is
+verified, and `clear_attempted` whenever clearing was attempted, never the
+command's contents. A failure after a clear attempt is ambiguous even if
+`input_attempted` and `paste_attempted` are false: those fields describe outgoing
+input only. The retained pending file still contains only the outgoing payload.
+
 ## Options
 
 Options precede actual message text or `--prompt-file FILE`:
 
 | Option | Default seconds | Purpose |
 | --- | ---: | --- |
-| `--stable-wait` | 3 | Unchanging input before paste |
+| `--stable-window` | submit-delay (8) | Interval between composer observations |
+| `--stable-wait` | same | Compatibility alias for stable-window |
 | `--max-wait` | 10 | Input readiness budget (launcher uses 30) |
 | `--submit-delay` | 8 | Earliest first Enter after paste |
 | `--render-wait` | 3 | Wait for initial paste evidence |
@@ -54,9 +119,12 @@ Options precede actual message text or `--prompt-file FILE`:
 | `--retry-wait` | 3 | Minimum interval before the second Enter |
 | `--poll-interval` | 0.25 | Screen sampling cadence |
 
-`--backoff` waits within `--max-wait` for a draft/typing to clear, rather than
-returning immediately when detected. Stability resets when input changes.
-The 8/3/10 submit/render/readiness defaults preserve the operational baseline;
+`--backoff` waits within `--max-wait` for changing input to settle, rather than
+returning immediately when typing is detected. Stable drafts no longer block
+ordinary messages. Stability resets when input changes; choose a readiness
+budget longer than the settle window.
+The 8/3/10 submit/render/readiness defaults remain; input readiness now uses
+the submit-delay as its default settle window, rather than three seconds;
 receipt confirmation and recovery do not depend on shortening that delay.
 The lock wait has a separate `--max-wait` budget. Confirmation is bounded by
 render + submit-delay + receipt-wait; operations also have subprocess timeouts.
@@ -65,13 +133,15 @@ budget, because some layouts show only completion rather than an initial user
 row. Receipt waits may exceed 600 seconds when explicitly configured.
 For slash commands such as `/compact` and `/exit`, use `--typed-command`: the sender inserts
 literal characters with `tmux send-keys -l` rather than bracketed paste. The
-same lock, empty-composer checks, input verification, settling delay, and NEW
+same lock, input verification, settling delay, and NEW
 receipt requirements apply. A command has an ASCII letter name (letters, digits, `_`
 and `-`), optionally followed by a space and arguments. Controls, newlines,
 leading whitespace, trailing Unicode whitespace or semicolons, commands over 200 UTF-8 bytes,
 and ordinary prose are rejected. These limits avoid tmux argument loss and
 ambiguous wrapped or trimmed composer evidence. Ordinary messages retain
-bracketed paste. Typed
+bracketed paste. Typed commands require an empty composer: joining a draft
+would change command semantics, so ordinary stable drafts defer in this mode.
+Eligible command drafts are cleared and verified empty first. Typed
 input requires exact visible command text; a collapsed paste marker cannot
 authorize its Enter. Failure JSON distinguishes `input_attempted` from
 `paste_attempted` and labels `input_method`; an ambiguous typed attempt must
@@ -81,8 +151,11 @@ Payloads are nonblank UTF-8 with no control characters except newlines. Message
 bytes, including trailing whitespace/newlines, are preserved in the paste.
 
 Exit 0 emits delivered JSON on stdout. Failures emit JSON on stderr. Exit 2
-means deferred before input. Exit 3 means ambiguous after an input attempt.
-Use `input_attempted` to determine whether any input may have occurred;
+means deferred before a clear or outgoing input attempt. Cursor navigation and
+the suggestion probe may still have occurred. Exit 3 means ambiguous after a clear
+or outgoing input attempt.
+Use `input_attempted` to determine whether outgoing input may have occurred.
+Either `clear_attempted` or `input_attempted` indicates possible composer mutation;
 `paste_attempted` applies to bracketed paste, except that the legacy
 `--literal-exit` mode retains its compatibility meaning of any input attempt.
 Both literal modes report `input_method: "typed"`. Signals retain conventional 128+signal exit
@@ -97,7 +170,8 @@ an unsupported layout, modal or ambiguous attempt. The result also carries a
 reason, paste-attempted flag and Enter count. An orchestrator may delegate this
 inspection to an agent; there is no compulsory model call or model dependency
 inside the sender. The inspecting agent must check for receipt before taking
-any further action. Existing drafts and human typing normally need only backoff.
+any further action. Changing input normally needs only bounded backoff; an unchanged draft is
+co-submitted with ordinary messages. Typed commands still require empty input.
 
 Screen interpretation uses semantic prompt/frame/footer and queue markers,
 relative cursor position, and before/after receipt counts, not model identity
