@@ -278,11 +278,13 @@ def observe(screen: str, payload: str, cx: int, cy: int, path: pathlib.Path) -> 
         fragment = fragment[1:]
     parts = [fragment.rstrip()] + [row[2:].rstrip() if row.startswith("  ") else row.rstrip() for row in lines[idx + 1:ends[0]]]
     draft = "\n".join(parts).rstrip("\n")
+    home = ("\n" not in draft and (cx, cy) == (2, idx)
+            and state(screen, draft, 2 + cell_width(draft), idx) == "own")
     if (draft and not contains_payload(draft, payload)
-            and state(screen, draft, cx, cy) == "own"
+            and (state(screen, draft, cx, cy) == "own" or home)
             and not re.search(r"\[Pasted (?:text|Content)", draft, re.I)):
         path.write_text(draft, encoding="utf-8")
-        return "draft"
+        return "draft-home" if home else "draft"
     return result
 
 

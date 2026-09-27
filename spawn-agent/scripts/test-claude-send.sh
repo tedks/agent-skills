@@ -48,6 +48,9 @@ export PATH="$TEST_DIR/bin:$PATH"
 
 cat > "$TEST_DIR/bin/python3" <<'STUB'
 #!/bin/bash
+if [[ "${FAKE_VIRTUAL_CLOCK:-0}" == 1 && "${1:-}" == -c && "${2:-}" == *monotonic_ns* ]]; then
+  exec "$TEST_REAL_PYTHON3" -c 'import pathlib,sys,time; clockpath=pathlib.Path(sys.argv[1]); time.monotonic_ns=lambda: int(clockpath.read_text()); program=sys.argv[2]; sys.argv=["-c"]+sys.argv[3:]; exec(program)' "$FAKE_STATE/clock" "$2" "${@:3}"
+fi
 if [[ "${FAKE_FAIL_CLOCK_BEFORE_PASTE:-0}" == 1 && "$*" == *monotonic_ns* && ! -s "$FAKE_STATE/pasted" ]]; then
   printf 'injected monotonic clock subprocess failure\n' >&2
   exit 1
@@ -100,6 +103,8 @@ case "$cmd" in
       elif [[ "$(<"$FAKE_STATE/mode")" == busyqueue ]]; then cursor='2:27'
       elif [[ "$(<"$FAKE_STATE/mode")" == persistent-empty-after-paste && -s "$FAKE_STATE/pasted" ]]; then cursor='2:1'
       elif [[ "$(<"$FAKE_STATE/mode")" == render-stale-empty && -s "$FAKE_STATE/pasted" && $(<"$FAKE_STATE/captures") -eq 4 ]]; then cursor='2:1'
+      elif [[ "$(<"$FAKE_STATE/mode")" == home-* && ( ! -s "$FAKE_STATE/end-moved" || "$(<"$FAKE_STATE/mode")" == *-noend ) ]]; then cursor='2:1'
+      elif [[ "$(<"$FAKE_STATE/mode")" == human || "$(<"$FAKE_STATE/mode")" == slash ]]; then cursor='4:1'
       elif [[ -s "$FAKE_STATE/composer" ]]; then
         cursor=$(python3 - "$FAKE_STATE/composer" <<'PY'
 from pathlib import Path
@@ -179,7 +184,8 @@ from pathlib import Path
 import sys
 rows = Path(sys.argv[1]).read_text().splitlines()
 import os
-codex = Path(os.environ['FAKE_STATE'], 'mode').read_text().strip() == 'stable-codex'
+mode = Path(os.environ['FAKE_STATE'], 'mode').read_text().strip()
+codex = mode == 'stable-codex' or mode.startswith('home-codex')
 if not codex: print('─' * 40)
 else: print('')
 print(('› ' if codex else '❯\u00a0') + (rows[0] if rows else ''))
@@ -216,6 +222,11 @@ PY
     rm -f "$FAKE_BUFFER_DIR/$b" ;;
   delete-buffer) printf 'delete-buffer\n' >> "$FAKE_LOG" ;;
   send-keys)
+    if [[ "${!#}" == End ]]; then
+      printf 'end\n' >> "$FAKE_LOG"
+      if [[ "$(<"$FAKE_STATE/mode")" != *-noend ]]; then printf moved > "$FAKE_STATE/end-moved"; fi
+      exit 0
+    fi
     if [[ "$*" == *' -l '* ]]; then
       printf '%s' "${!#}" >> "$FAKE_STATE/composer"
       printf 'pasted\n' > "$FAKE_STATE/pasted"
@@ -232,6 +243,10 @@ esac
 STUB
 cat > "$TEST_DIR/bin/sleep" <<'STUB'
 #!/bin/bash
+if [[ "${FAKE_VIRTUAL_CLOCK:-0}" == 1 ]]; then
+  "$TEST_REAL_PYTHON3" -c 'import pathlib,sys; p=pathlib.Path(sys.argv[1]); p.write_text(str(int(p.read_text())+round(float(sys.argv[2])*1e9)))' "$FAKE_STATE/clock" "$1"
+  exit
+fi
 printf '%s\n' "$1" >> "$FAKE_STATE/sleeps"
 if [[ "${FAKE_REAL_SLEEP:-0}" == 1 ]]; then exec /usr/bin/sleep "$1"; fi
 exec /usr/bin/sleep 0.01
@@ -244,9 +259,11 @@ STUB
 chmod +x "$TEST_DIR/bin/python3" "$TEST_DIR/bin/tmux" "$TEST_DIR/bin/sleep" "$TEST_DIR/bin/flock"
 
 reset_case() {
+  printf 0 > "$FAKE_STATE/clock"
   : > "$FAKE_LOG"
   : > "$FAKE_STATE/composer"
   : > "$FAKE_STATE/mutated"
+  : > "$FAKE_STATE/end-moved"
   : > "$FAKE_STATE/pasted"
   : > "$FAKE_STATE/captures"
   : > "$FAKE_STATE/sleeps"
@@ -256,7 +273,7 @@ reset_case() {
   : > "$FAKE_STATE/parser-trace"
   : > "$FAKE_STATE/sender-pid"
   printf '%s\n' "${1:-empty}" > "$FAKE_STATE/mode"
-  if [[ "${1:-}" == stable-* || "${1:-}" == changing-draft || "${1:-}" == second-change ]]; then printf 'stale TICK' > "$FAKE_STATE/composer"; fi
+  if [[ "${1:-}" == home-* || "${1:-}" == stable-* || "${1:-}" == changing-draft || "${1:-}" == second-change ]]; then printf 'stale TICK' > "$FAKE_STATE/composer"; fi
   cp "$FIXTURES/claude-blank.ansi" "$FAKE_STATE/empty"
   cp "$FIXTURES/modal.txt" "$FAKE_STATE/modal"
   cp "$FIXTURES/codex-generating-queue.ansi" "$FAKE_STATE/busyqueue"
@@ -284,6 +301,31 @@ assert_pending() {
 prompt_file="$TEST_DIR/payload"
 printf 'alpha\nbeta' > "$prompt_file"
 
+# Stable single-line drafts at Home navigate once, preserving text before append.
+{
+  failures=0
+  for mode in home-claude home-codex; do
+    reset_case "$mode"
+    if out=$(run_sender %7 --submit-delay 0 --max-wait 3 --prompt-file "$prompt_file" 2>"$TEST_DIR/home.err") &&
+       [[ "$(<"$FAKE_STATE/submitted")" == $'stale TICK\nalpha\nbeta' ]] &&
+       [[ "$(<"$FAKE_LOG")" == $'end\npaste-start\npaste-end\nenter' ]]; then
+      echo "PASS: $mode End then one append and Enter"
+    else
+      echo "FAIL: $mode stable Home draft stranded or changed"; failures=$((failures + 1))
+    fi
+    reset_case "$mode-noend"
+    if run_sender %7 --submit-delay 0 --max-wait 3 --prompt-file "$prompt_file" >"$TEST_DIR/home-noend.out" 2>"$TEST_DIR/home-noend.err"; then
+      echo "FAIL: $mode ineffective End authorized append"; failures=$((failures + 1))
+    elif [[ "$(<"$FAKE_LOG")" == end ]] && grep -q 'reason=cursor-navigation-unverified' "$TEST_DIR/home-noend.err"; then
+      echo "PASS: $mode ineffective End defers without append"
+    else
+      echo "FAIL: $mode ineffective End was not verified"; failures=$((failures + 1))
+    fi
+  done
+  ((failures == 0))
+  if [[ "${HOME_INPUT_ONLY:-0}" == 1 ]]; then exit; fi
+}
+
 # Ruling regression group can run alone against the unmodified sender.
 {
   failures=0
@@ -298,9 +340,9 @@ printf 'alpha\nbeta' > "$prompt_file"
       failures=$((failures + 1))
     fi
   done
-  for mode in changing-draft second-change modal; do
+  for mode in changing-draft modal; do
     reset_case "$mode"
-    if run_sender %7 --submit-delay 1 --max-wait 1 --poll-interval 0.1 --prompt-file "$prompt_file" >"$TEST_DIR/$mode.out" 2>"$TEST_DIR/$mode.err"; then
+    if run_sender %7 --submit-delay 0 --max-wait 1 --poll-interval 0.1 --prompt-file "$prompt_file" >"$TEST_DIR/$mode.out" 2>"$TEST_DIR/$mode.err"; then
       echo "FAIL: $mode submitted"; failures=$((failures + 1))
     elif [[ ! -s "$FAKE_LOG" ]]; then
       echo "PASS: $mode deferred without input"
@@ -311,6 +353,44 @@ printf 'alpha\nbeta' > "$prompt_file"
   ((failures == 0))
   if [[ "${STABLE_INPUT_ONLY:-0}" == 1 ]]; then exit; fi
 }
+
+# A change on exactly sample2 resets a full window; the unchanged twin succeeds.
+reset_case stable-claude
+out=$(FAKE_VIRTUAL_CLOCK=1 run_sender %7 --submit-delay 1 --max-wait 2 --poll-interval 1 --prompt-file "$prompt_file")
+[[ "$out" == 'status=sent receipt=unverified stale_draft_length=10' ]]
+reset_case second-change
+if FAKE_VIRTUAL_CLOCK=1 run_sender %7 --submit-delay 1 --max-wait 2 --poll-interval 1 --prompt-file "$prompt_file" >"$TEST_DIR/second-change.out" 2>"$TEST_DIR/second-change.err"; then
+  echo 'FAIL: sample2 change reused initial settle window' >&2; exit 1
+else rc=$?; [[ $rc -eq 2 ]]; fi
+[[ ! -s "$FAKE_LOG" ]]
+echo 'PASS: identical timing unchanged twin submits and sample2 change defers'
+
+if [[ "${TIMING_SKIP_PROSE:-0}" != 1 ]]; then
+# Ordinary slash-prefixed prose is a bracketed paste, not a typed command.
+reset_case empty
+out=$(run_sender %7 --submit-delay 0 --max-wait 3 '/tmp is full again')
+[[ "$out" == 'status=sent receipt=unverified' ]]
+[[ $(grep -c '^paste-start$' "$FAKE_LOG" || true) -eq 1 ]] || { echo 'FAIL: slash-prefixed prose was auto-typed' >&2; exit 1; }
+[[ $(grep -c '^send-keys$' "$FAKE_STATE/tmux-calls") -eq 1 ]]
+echo 'PASS: slash-prefixed prose remains a paste'
+
+fi
+
+# Default8 settle samples at8 rather than backoff overshooting to15.5.
+reset_case empty
+if out=$(FAKE_VIRTUAL_CLOCK=1 run_sender %7 --max-wait 12 --prompt-file "$prompt_file"); then
+  [[ "$out" == 'status=sent receipt=unverified' ]]
+  python3 - "$FAKE_STATE/times" <<'PYTIME'
+from pathlib import Path
+import sys
+values = [int(n) for n in Path(sys.argv[1]).read_text().splitlines()]
+assert 8_000_000_000 <= values[0] <= 8_010_000_000, values
+PYTIME
+else
+  echo 'FAIL: default8 window overshot12-second readiness budget' >&2; exit 1
+fi
+echo 'PASS: default8 settles before12-second readiness deadline'
+if [[ "${TIMING_INPUT_ONLY:-0}" == 1 ]]; then exit; fi
 
 # Identifiable retained combined or mixed payload must not be appended again.
 {
@@ -333,6 +413,43 @@ printf 'alpha\nbeta' > "$prompt_file"
   ((failures == 0))
   if [[ "${REPLAY_INPUT_ONLY:-0}" == 1 ]]; then exit; fi
 }
+
+# Explicit command mode validates like the public sender and protects drafts.
+python3 - "$TEST_DIR" <<'PYCOMMAND'
+from pathlib import Path
+import sys
+root = Path(sys.argv[1])
+for index, value in enumerate(('hello', '/x\n/exit', '/model x;', '/model x\u3000', '/model ' + 'x' * 194)):
+    (root / ('invalid-command-' + str(index))).write_text(value, encoding='utf-8')
+PYCOMMAND
+for index in 0 1 2 3 4; do
+  reset_case empty
+  if run_sender %7 --typed-command --submit-delay 0 --max-wait 1 --prompt-file "$TEST_DIR/invalid-command-$index" >"$TEST_DIR/typed-invalid.out" 2>"$TEST_DIR/typed-invalid.err"; then
+    echo 'FAIL: invalid typed command accepted' >&2; exit 1
+  fi
+  [[ ! -s "$FAKE_STATE/tmux-calls" ]]
+done
+reset_case empty
+out=$(run_sender %7 --typed-command --submit-delay 0 --max-wait 3 '/model example')
+[[ "$out" == 'status=sent receipt=unverified' ]]
+[[ $(grep -c '^paste-start$' "$FAKE_LOG" || true) -eq 0 ]]
+[[ $(grep -c '^send-keys$' "$FAKE_STATE/tmux-calls") -eq 2 ]]
+reset_case stable-claude
+if run_sender %7 --typed-command --submit-delay 0 --max-wait 1 '/compact' >"$TEST_DIR/typed-draft.out" 2>"$TEST_DIR/typed-draft.err"; then
+  echo 'FAIL: typed command combined with stable draft' >&2; exit 1
+else rc=$?; [[ $rc -eq 2 ]]; fi
+[[ ! -s "$FAKE_LOG" ]]
+
+# Once a draft append is prepared, failures report only its length and keep outgoing bytes.
+reset_case stable-claude
+if FAKE_FAIL_PASTE=1 run_sender %7 --submit-delay 0 --max-wait 3 --prompt-file "$prompt_file" >"$TEST_DIR/stale-failure.out" 2>"$TEST_DIR/stale-failure.err"; then
+  echo 'FAIL: stale append paste failure ignored' >&2; exit 1
+else rc=$?; [[ $rc -eq 3 ]]; fi
+grep -q 'stale_draft_length=10' "$TEST_DIR/stale-failure.err"
+if grep -q 'stale TICK' "$TEST_DIR/stale-failure.err"; then echo 'FAIL: failure metadata leaked stale text' >&2; exit 1; fi
+pending=$(assert_pending ambiguous "$TEST_DIR/stale-failure.err")
+cmp "$pending" "$prompt_file"
+rm -rf "$(dirname "$pending")"
 
 # Invalid byte sequences, control characters, blank content, and trailing
 # whitespace are rejected before any tmux operation, so they cannot be pasted.
@@ -518,7 +635,7 @@ PYTEST
 
 # Fresh fork command/menu shape runs through the real sender once.
 reset_case forkcompact
-out=$(run_sender %7 --submit-delay 0 --render-wait 3 --max-wait 3 '/compact')
+out=$(run_sender %7 --submit-delay 0 --render-wait 3 --max-wait 3 --typed-command '/compact')
 [[ "$out" == 'status=sent receipt=unverified' ]]
 [[ $(grep -c '^paste-buffer$' "$FAKE_STATE/tmux-calls" || true) -eq 0 ]]
 [[ $(grep -c '^send-keys$' "$FAKE_STATE/tmux-calls") -eq 2 ]]
@@ -660,10 +777,10 @@ pending=$(assert_pending ambiguous "$TEST_DIR/unknown-after-paste.err")
 [[ $(grep -c '^enter$' "$FAKE_LOG" || true) -eq 0 ]]
 rm -rf "$(dirname "$pending")"
 
-# Existing human text, slash commands, and modal screens time out without paste/Enter.
+# Static draft fixtures with a middle cursor are not provable append targets; modals also defer.
 for mode in human slash modal; do
   reset_case "$mode"
-  if run_sender %7 --stable-window 8 --submit-delay 0 --max-wait 1 --poll-interval 0.1 --prompt-file "$prompt_file" 2>"$TEST_DIR/$mode.err"; then
+  if run_sender %7 --submit-delay 0 --max-wait 1 --poll-interval 0.1 --prompt-file "$prompt_file" 2>"$TEST_DIR/$mode.err"; then
     echo "FAIL: $mode composer was sent" >&2; exit 1
   else rc=$?; [[ $rc -eq 2 ]]; fi
   pending=$(assert_pending deferred "$TEST_DIR/$mode.err")

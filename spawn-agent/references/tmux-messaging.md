@@ -9,8 +9,8 @@ the resolved pane ID; deletion afterward causes failure rather than retargeting.
 
 The public sender uses `tmux-message.py`. It returns success only after observing
 new application receipt evidence. The older `claude-send.sh` remains available
-for compatibility, with transport-only semantics. It recognizes single-line slash commands
-and types them literally; public callers use `--typed-command` explicitly.
+for compatibility, with transport-only semantics. Both entry points use `--typed-command`
+explicitly for single-line slash commands; ordinary messages retain bracketed paste.
 
 ## Flow
 
@@ -21,7 +21,10 @@ and types them literally; public callers use `--typed-command` explicitly.
    backoff. Preserve an unchanged draft and append a newline plus the outgoing
    payload; submit both only after verifying the combined input. Record only
    draft length (`stale_draft_length`). Modals and unsupported layouts defer.
-   A draft must have a visibly verified end cursor; collapsed markers and
+   A draft must have a visibly verified end cursor. A stable single-line draft
+   at its canonical Home cursor may receive End, followed by verification that
+   its text is unchanged and its cursor is at the known end. Other non-end
+   positions defer. Collapsed markers and
    recognizable full outgoing content already in the draft remain ambiguous
    and defer. This prevents a retained combined input from receiving the same
    payload twice after a failed attempt. The replay guard compares full payload

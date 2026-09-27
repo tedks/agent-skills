@@ -314,6 +314,9 @@ class Sender:
         frame = self.tmux.frame()
         return frame, composer(frame)
 
+    def at_end(self, inp):
+        return inp.cursor == (2 + styles.cell_width(inp.text.rsplit("\n", 1)[-1]), inp.text.count("\n"))
+
     def ready(self):
         deadline = self.clock() + self.o.max_wait
         previous = None
@@ -336,7 +339,7 @@ class Sender:
                         raise DeliveryError("human-typing")
                     last_reason = "human-typing"
                 stable_since = now
-            twice = previous is not None
+            twice = previous is not None and fp == previous
             previous = fp
             if inp.kind == "modal":
                 raise DeliveryError("modal")
@@ -348,7 +351,7 @@ class Sender:
                         and not PASTE.search(inp.text)
                         and "[Pasted Content " not in inp.text
                         and not styles.contains_payload(inp.text, self.payload)
-                        and inp.cursor == (2 + styles.cell_width(inp.text.rsplit("\n", 1)[-1]), inp.text.count("\n"))):
+                        and (self.at_end(inp) or ("\n" not in inp.text and inp.cursor == (2, 0)))):
                     return frame, inp
                 # Retirement's literal exit permits only Claude's canonical
                 # idle suggestion at the input-start cursor, never draft text.
@@ -383,6 +386,13 @@ class Sender:
         before, check = self.sample()
         if check.fingerprint() != inp.fingerprint():
             raise DeliveryError("input-changed-before-paste")
+        if check.kind == "text" and not self.at_end(check):
+            home = check
+            self.tmux.keys("End")
+            before, check = self.sample()
+            if (check.kind != "text" or check.text != home.text
+                    or check.harness != home.harness or not self.at_end(check)):
+                raise DeliveryError("cursor-navigation-unverified")
         baseline = records(before, check)
         literal = getattr(self.o, "literal_exit", False)
         if literal and (self.payload != "/exit" or check.harness != "claude"):
@@ -392,10 +402,11 @@ class Sender:
         if check.kind == "text":
             self.stale_draft_length = len(check.text)
             self.expected = check.text + "\n" + self.payload
-        self.pasted = True  # A failed paste command can still have changed input.
         if literal:
+            self.pasted = True  # A failed input command can still change the composer.
             self.tmux.keys("-l", self.payload)
         elif self.typed:
+            self.pasted = True
             self.tmux.type_command(self.payload)
         else:
             if self.stale_draft_length:
@@ -403,8 +414,10 @@ class Sender:
                 with tempfile.NamedTemporaryFile(dir=self.path.parent, prefix="append-") as append:
                     append.write(("\n" + self.payload).encode("utf-8"))
                     append.flush()
+                    self.pasted = True
                     self.tmux.paste(Path(append.name))
             else:
+                self.pasted = True
                 self.tmux.paste(self.path)
         start = self.clock()
         deadline = start + self.o.render_wait + self.o.submit_delay + self.o.receipt_wait
@@ -539,6 +552,8 @@ def main():
                   "input_attempted": pasted, "input_method": "typed" if o.typed_command or o.literal_exit else "paste",
                   "enters": sender.enters if sender else 0}
         if sender:
+            if sender.stale_draft_length:
+                result["stale_draft_length"] = sender.stale_draft_length
             result["pane"] = sender.tmux.pane
         print(json.dumps(result), file=sys.stderr)
         return code

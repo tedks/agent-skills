@@ -43,6 +43,8 @@ class Terminal:
         self.frames = 0
         self.submitted = None
         self.harness = 'codex'
+        self.home = False
+        self.end_moves = True
 
     def sleep(self, n): self.now += n
     def clock(self): return self.now
@@ -55,12 +57,16 @@ class Terminal:
         text = self.draft
         if self.mutate and self.pastes:
             text += ' human'
-        return screen(text, history, harness=self.harness, prefix='• output ' + str(self.frames) + '\n\n')
+        frame = screen(text, history, harness=self.harness, prefix='• output ' + str(self.frames) + '\n\n')
+        if self.home:
+            frame.x = 2
+        return frame
 
     def paste(self, path):
         self.actions.append('paste')
         self.pastes += 1
-        self.draft += '[Pasted text #1 +20 lines]' if self.collapsed else path.read_text()
+        content = path.read_text()
+        self.draft += (('\n' if self.draft and content.startswith('\n') else '') + '[Pasted text #1 +20 lines]') if self.collapsed else content
 
     def type_command(self, text):
         self.actions.append("typed:" + text)
@@ -68,6 +74,8 @@ class Terminal:
 
     def keys(self, *keys):
         self.actions.extend(keys)
+        if keys == ('End',) and self.end_moves:
+            self.home = False
         if keys == ('Enter',):
             self.enters += 1
             if self.enters > self.dropped:
@@ -355,6 +363,36 @@ class DeliveryTests(unittest.TestCase):
                 self.assertEqual(result['stale_draft_length'], len('stale TICK'))
                 self.assertNotIn('stale TICK', json.dumps(result))
 
+    def test_stable_home_draft_navigates_then_appends_both_harnesses(self):
+        for harness in ('codex', 'claude'):
+            with self.subTest(harness=harness):
+                t = Terminal(draft='stale TICK')
+                t.home, t.harness = True, harness
+                try:
+                    result = deliver(t)
+                except m.DeliveryError as error:
+                    self.fail('Home draft deferred: ' + error.reason)
+                self.assertEqual(result['status'], 'delivered')
+                self.assertEqual(t.actions, ['End', 'paste', 'Enter'])
+                self.assertEqual(t.submitted, 'stale TICK\nhello')
+
+    def test_home_end_not_moving_or_text_changes_defers_without_paste(self):
+        for harness in ('codex', 'claude'):
+            for change in (False, True):
+                with self.subTest(harness=harness, change=change):
+                    t = Terminal(draft='stale TICK')
+                    t.home, t.harness, t.end_moves = True, harness, change
+                    original = t.keys
+                    def keys(*keys):
+                        original(*keys)
+                        if change and keys == ('End',):
+                            t.draft = 'human changed text'
+                    t.keys = keys
+                    with self.assertRaisesRegex(m.DeliveryError, 'cursor-navigation-unverified'):
+                        deliver(t)
+                    self.assertEqual(t.actions, ['End'])
+                    self.assertEqual((t.pastes, t.enters), (0, 0))
+
     def test_stable_draft_requires_cursor_at_end(self):
         t = Terminal(draft='stale TICK')
         original = t.frame
@@ -384,6 +422,65 @@ class DeliveryTests(unittest.TestCase):
             self.assertEqual(m.options(['%1', '--submit-delay', delay, 'hello']).stable_window, float(delay))
         for flag in ('--stable-window', '--stable-wait'):
             self.assertEqual(m.options(['%1', flag, '2', 'hello']).stable_window, 2)
+
+    def test_zero_window_backoff_requires_unchanged_pair(self):
+        t = Terminal(draft='typing')
+        original = t.frame
+        def changing():
+            t.draft = 'typing ' + str(t.frames)
+            return original()
+        t.frame = changing
+        o = SimpleNamespace(max_wait=1, stable_wait=0, poll_interval=.25, backoff=True)
+        sender = m.Sender(t, o, t.payload, Path('/unused'), t.clock, t.sleep)
+        with self.assertRaisesRegex(m.DeliveryError, 'human-typing'):
+            sender.ready()
+        self.assertEqual(t.now, 1)
+        self.assertEqual(t.actions, [])
+
+    def test_zero_window_one_change_waits_for_repeated_sample(self):
+        t = Terminal(draft='first')
+        original = t.frame
+        def changing_once():
+            if t.frames == 1:
+                t.draft = 'second'
+            return original()
+        t.frame = changing_once
+        o = SimpleNamespace(max_wait=1, stable_wait=0, poll_interval=.25, backoff=True)
+        sender = m.Sender(t, o, t.payload, Path('/unused'), t.clock, t.sleep)
+        self.assertEqual(sender.ready()[1].text, 'second')
+        self.assertGreaterEqual(t.frames, 3)
+        self.assertEqual(t.actions, [])
+
+    def test_append_failure_metadata_and_allocation_not_attempted(self):
+        for allocation_failure in (True, False):
+            with self.subTest(allocation_failure=allocation_failure), tempfile.TemporaryDirectory() as tmp:
+                pending = Path(tmp) / 'pending'
+                pending.mkdir()
+                t = Terminal(draft='stale TICK', mutate=not allocation_failure)
+                t.identity = '0:%1'
+                o = m.options(['%1', '--stable-window', '0', '--submit-delay', '0', '--poll-interval', '.01', 'hello'])
+                err = io.StringIO()
+                allocation = patch.object(m.tempfile, 'NamedTemporaryFile', side_effect=OSError('private detail')) if allocation_failure else nullcontext()
+                with patch.object(m, 'options', return_value=o), patch.object(m, 'Tmux', return_value=t), patch.object(m, 'pane_lock', return_value=nullcontext()), patch.object(m.tempfile, 'mkdtemp', return_value=str(pending)), allocation, redirect_stderr(err):
+                    self.assertEqual(m.main(), 2 if allocation_failure else 3)
+                result = json.loads(err.getvalue())
+                self.assertEqual(result['stale_draft_length'], 10)
+                self.assertEqual(result['input_attempted'], not allocation_failure)
+                self.assertEqual(result['paste_attempted'], not allocation_failure)
+                self.assertNotIn('stale TICK', err.getvalue())
+                self.assertEqual((pending / 'message').read_bytes(), b'hello')
+
+    def test_collapsed_append_stops_and_cannot_replay(self):
+        for harness in ('codex', 'claude'):
+            t = Terminal(draft='stale TICK', collapsed=True)
+            t.harness = harness
+            with self.assertRaisesRegex(m.DeliveryError, 'mixed-input'):
+                deliver(t)
+            self.assertEqual((t.pastes, t.enters), (1, 0))
+            first_actions = list(t.actions)
+            with self.assertRaisesRegex(m.DeliveryError, 'existing-input'):
+                deliver(t)
+            self.assertEqual(t.actions, first_actions)
 
     def test_stale_draft_combined_enter_recovery(self):
         t = Terminal(draft='stale TICK', dropped=1)

@@ -17,20 +17,23 @@ usage() {
     echo "       claude-send.sh <window> [options] --prompt-file FILE" >&2
     echo "  --submit-delay SEC  seconds after paste before submit (integer 0-30; default 8)" >&2
     echo "  --stable-window SEC seconds of unchanged composer (integer 0-30; default submit-delay)" >&2
+    echo "  --typed-command    type one validated single-line slash command into an empty composer" >&2
     echo "  --render-wait SEC   initial post-paste render budget (integer 1-30; default 1)" >&2
-    echo "  --max-wait SEC      maximum wait for an empty composer (integer 1-600; default 30)" >&2
+    echo "  --max-wait SEC      maximum wait for a stable composer (integer 1-600; default 30)" >&2
     echo "  --poll-interval SEC base poll interval (decimal 0.1-2; default 0.5); backoff caps at 8s" >&2
 }
 if (($# < 2)); then usage; exit 1; fi
 
 window=$1; shift
 submit_delay=8
+typed_command=0
 stable_window=
 render_wait=1
 max_wait=30
 poll_interval=0.5
 while (($#)); do
     case "$1" in
+        --typed-command) typed_command=1; shift;;
         --stable-window|--submit-delay|--render-wait|--max-wait|--poll-interval)
             (($# >= 2)) || { echo "Error: $1 requires a value" >&2; exit 1; }
             option=$1; value=$2; shift 2
@@ -65,11 +68,11 @@ if (($# < 1)); then echo 'Error: message or --prompt-file is required' >&2; exit
 
 stable_window=${stable_window:-$submit_delay}
 observe_file=
+harness_file=
 stable_file=
 expected_file=
 append_file=
 stale_draft_length=0
-typed_command=0
 prompt_file=''
 cleanup_prompt=0
 pending_dir=''
@@ -81,7 +84,7 @@ cleanup() {
     if ((buffer_loaded)); then
         "${TMUX_CMD[@]}" delete-buffer -b "$buf_name" 2>/dev/null || true
     fi
-    for scratch in "$observe_file" "$stable_file" "$expected_file" "$append_file"; do
+    for scratch in "$harness_file" "$observe_file" "$stable_file" "$expected_file" "$append_file"; do
         [[ -z "$scratch" ]] || rm -f -- "$scratch"
     done
     ((cleanup_prompt)) && rm -f -- "$prompt_file"
@@ -104,8 +107,8 @@ else
     cleanup_prompt=1
     printf '%s' "$message" > "$prompt_file"
 fi
-python3 - "$prompt_file" <<'PY'
-import pathlib, sys, unicodedata
+python3 - "$prompt_file" "$typed_command" <<'PY'
+import pathlib, re, sys, unicodedata
 try:
     text = pathlib.Path(sys.argv[1]).read_bytes().decode("utf-8")
 except (OSError, UnicodeError):
@@ -114,34 +117,40 @@ if not text.strip() or any(unicodedata.category(ch) == "Cc" and ch != "\n" for c
     raise SystemExit("Error: prompt must be nonblank text without control characters")
 if any(line != line.rstrip(" \t") for line in text.splitlines()):
     raise SystemExit("Error: prompt lines may not end in spaces or tabs")
+if sys.argv[2] == "1" and (
+    len(text.encode("utf-8")) > 200 or text != text.rstrip() or text.endswith(";")
+    or not re.fullmatch(r"/[A-Za-z][A-Za-z0-9_-]*(?: [^\r\n\x00-\x1f\x7f]*)?", text)
+):
+    raise SystemExit("Error: unsupported typed command")
 PY
 
 # Preserve the exact outgoing payload privately if delivery is deferred or its
 # state becomes ambiguous. The path is reported; the payload is never printed.
 preserve_pending() {
-    local status=$1 reason=$2
+    local status=$1 reason=$2 stale_meta=''
+    ((stale_draft_length == 0)) || stale_meta=" stale_draft_length=$stale_draft_length"
     pending_reported=1
     if [[ -z "$pending_dir" ]]; then
         state_dir="${XDG_STATE_HOME:-$HOME/.local/state}"
         if ! mkdir -p -- "$state_dir"; then
             cleanup_prompt=0
-            printf 'status=%s reason=%s pending_file=%s retention=state-directory-failed\n' "$status" "$reason" "$prompt_file" >&2
+            printf 'status=%s reason=%s%s pending_file=%s retention=state-directory-failed\n' "$status" "$reason" "$stale_meta" "$prompt_file" >&2
             return 0
         fi
         pending_dir=$(mktemp -d "$state_dir/claude-send-pending.XXXXXX") || {
             cleanup_prompt=0
-            printf 'status=%s reason=%s pending_file=%s retention=directory-create-failed\n' "$status" "$reason" "$prompt_file" >&2
+            printf 'status=%s reason=%s%s pending_file=%s retention=directory-create-failed\n' "$status" "$reason" "$stale_meta" "$prompt_file" >&2
             return 0
         }
         if ! chmod 700 "$pending_dir" || ! cp -- "$prompt_file" "$pending_dir/message" || ! chmod 600 "$pending_dir/message"; then
             rmdir -- "$pending_dir" 2>/dev/null || true
             pending_dir=''
             cleanup_prompt=0
-            printf 'status=%s reason=%s pending_file=%s retention=copy-failed\n' "$status" "$reason" "$prompt_file" >&2
+            printf 'status=%s reason=%s%s pending_file=%s retention=copy-failed\n' "$status" "$reason" "$stale_meta" "$prompt_file" >&2
             return 0
         fi
     fi
-    printf 'status=%s reason=%s pending_file=%s\n' "$status" "$reason" "$pending_dir/message" >&2
+    printf 'status=%s reason=%s%s pending_file=%s\n' "$status" "$reason" "$stale_meta" "$pending_dir/message" >&2
 }
 handle_signal() {
     local name=$1 code=$2 status=deferred
@@ -163,11 +172,11 @@ trap 'handle_signal HUP 129' HUP
 trap 'handle_signal INT 130' INT
 trap 'handle_signal TERM 143' TERM
 observe_file=$(mktemp /tmp/claude-send-observe.XXXXXX)
+harness_file=$(mktemp /tmp/claude-send-harness.XXXXXX)
 stable_file=$(mktemp /tmp/claude-send-stable.XXXXXX)
 expected_file=$(mktemp /tmp/claude-send-expected.XXXXXX)
 append_file=$(mktemp /tmp/claude-send-append.XXXXXX)
 cp -- "$prompt_file" "$expected_file"
-if [[ "$(<"$prompt_file")" =~ ^/[A-Za-z][A-Za-z0-9_-]*(\ [^$'\r\n']*)?$ ]]; then typed_command=1; fi
 identity=$("$SCRIPT_DIR/tmux-resolve.sh" "$window") || { echo 'Error: failed to resolve tmux target' >&2; exit 1; }
 [[ "$identity" =~ ^[0-9]+:%[0-9]+$ ]] || { echo 'Error: tmux returned an invalid target identity' >&2; exit 1; }
 pane_id=${identity#*:}
@@ -200,11 +209,13 @@ screen_state() {
         printf modal; return
     fi
     if [[ ( "$screen" == *'Context '* || "$screen" == *'tab to queue message'* || "$screen" == *'  GPT-6-Sol · '* ) && "$screen" == *'› '* ]]; then
+        printf codex > "$harness_file"
         printf '%s' "$screen_raw" | python3 "$SCRIPT_DIR/claude-send-screen.py" --observe-file "$observe_file" "$expected_file" "$cursor_x" "$cursor_y"
         return
     fi
     if claude_trust_modal_active "$screen"; then printf modal; return; fi
     claude_composer_ready "$screen" || { printf unknown; return; }
+    printf claude > "$harness_file"
     printf '%s' "$screen_raw" | python3 "$SCRIPT_DIR/claude-send-screen.py" --observe-file "$observe_file" "$expected_file" "$cursor_x" "$cursor_y"
 }
 
@@ -217,7 +228,7 @@ while :; do
     state=$(screen_state 2>/dev/null || printf unknown)
     now_ns=$(python3 -c 'import time; print(time.monotonic_ns())')
     eligible=0
-    [[ "$state" == empty || ( "$state" == draft && $typed_command == 0 ) ]] && eligible=1
+    [[ "$state" == empty || ( ( "$state" == draft || "$state" == draft-home ) && $typed_command == 0 ) ]] && eligible=1
     if ((eligible)) && [[ "$state" == "$previous_state" ]] && cmp -s "$observe_file" "$stable_file"; then
         stable_ns=$((now_ns - stable_start_ns))
     else
@@ -231,6 +242,9 @@ while :; do
     previous_state=$state
     cp -- "$observe_file" "$stable_file"
     sleep_for=$(awk -v d="$delay" -v r="$remaining" 'BEGIN { if (d>r) d=r; printf "%.3f",d }')
+    if ((eligible && stable_window > 0)); then
+        sleep_for=$(awk -v d="$sleep_for" -v ns="$stable_ns" -v w="$stable_window" 'BEGIN { r=w-ns/1000000000; if (d>r) d=r; printf "%.3f",d }')
+    fi
     sleep "$sleep_for"
     delay=$(awk -v d="$delay" 'BEGIN { n=d*2; if (n>8) n=8; printf "%.3f",n }')
 done
@@ -241,6 +255,17 @@ elapsed=$(python3 -c 'import time,sys; print((time.monotonic_ns()-int(sys.argv[1
 remaining=$(awk -v d="$max_wait" -v e="$elapsed" 'BEGIN { printf "%.3f",d-e }')
 awk -v r="$remaining" 'BEGIN { exit !(r > 0) }' || { preserve_pending deferred final-pre-paste-timeout; exit 2; }
 if [[ "$state" != "$previous_state" ]] || ! cmp -s "$observe_file" "$stable_file"; then preserve_pending deferred "pre-paste-$state"; exit 2; fi
+if [[ "$state" == draft-home ]]; then
+    stable_harness=$(<"$harness_file")
+    "${TMUX_CMD[@]}" send-keys -t "$pane_id" End
+    state=$(screen_state 2>/dev/null || printf unknown)
+    elapsed=$(python3 -c 'import time,sys; print((time.monotonic_ns()-int(sys.argv[1]))/1e9)' "$wait_start_ns")
+    awk -v e="$elapsed" -v d="$max_wait" 'BEGIN { exit !(e < d) }' || { preserve_pending deferred final-pre-paste-timeout; exit 2; }
+    if [[ "$state" != draft || "$(<"$harness_file")" != "$stable_harness" ]] || ! cmp -s "$observe_file" "$stable_file"; then
+        preserve_pending deferred cursor-navigation-unverified
+        exit 2
+    fi
+fi
 if [[ "$state" == draft ]]; then
     stale_draft_length=$(python3 -c 'import pathlib,sys; print(len(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8")))' "$stable_file")
     { printf '\n'; cat "$prompt_file"; } > "$append_file"
