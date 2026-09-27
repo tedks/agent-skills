@@ -79,9 +79,10 @@ Changing input, replay residue, modals and unsupported layouts still defer.
 For ordinary co-submission, the public sender supports measured Codex and
 Claude append shapes: Codex's unchanged draft prefix plus one fresh Content
 marker whose count covers the appended newline and payload; Claude's exact
-draft prefix plus one fresh `[Pasted text #N]` marker and adjacent `paste again
-to expand` hint. Both require the same harness and verified end cursor. Claude's
-combined delivery sends Enter once and requires a new receipt. Other unsupported
+draft prefix plus one fresh `[Pasted text #N +K lines]` marker whose K equals
+one plus the payload newline count, and adjacent `paste again to expand` hint.
+Both require the same harness and verified end cursor. Claude's combined
+delivery sends Enter once and requires a new receipt. Other unsupported
 combined layouts remain closed.
 Claude prompt suggestions are disabled fleet-wide; an ambiguous suggestion
 frame retains the conservative probe. One pane lock serializes cooperating

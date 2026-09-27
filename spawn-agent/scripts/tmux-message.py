@@ -314,18 +314,21 @@ class Sender:
             if inp.kind != "text":
                 return False
             if inp.text == self.expected:
-                return True
+                return inp.harness == self.draft_harness and self.at_end(inp)
             # Claude 2.1.283 replaces a long bracketed paste with this exact
             # visible shape. The known draft prefix, one current paste marker,
-            # adjacent expansion hint, harness and end cursor bind it to the
-            # one append operation above; the hidden bytes remain opaque.
+            # its appended-line count, adjacent expansion hint, harness and end
+            # cursor bind it to the one append operation above; hidden bytes
+            # remain opaque.
             if (frame is not None and inp.harness == self.draft_harness == "claude"
                     and self.at_end(inp) and inp.text.startswith(self.original_draft)):
                 suffix = inp.text[len(self.original_draft):]
-                marker = re.fullmatch(r"\[Pasted text #[1-9][0-9]*\]", suffix)
+                marker = re.fullmatch(r"\[Pasted text #[1-9][0-9]* \+([1-9][0-9]*) lines\]", suffix)
                 rows = styles.strip_ansi(frame.raw).splitlines()
                 hint = rows[inp.end + 1] if inp.end + 1 < len(rows) else ""
-                if marker and hint.strip() == "paste again to expand":
+                expected_lines = str(self.payload.count("\n") + 1)
+                if (marker and marker.group(1) == expected_lines
+                        and hint.strip() == "paste again to expand"):
                     return True
             # Codex compresses the appended newline+payload inline after the
             # untouched draft. Readiness excluded all old paste markers.

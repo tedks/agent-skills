@@ -966,7 +966,7 @@ assert screen.observe(frame, 'outgoing', 6, 1, pathlib.Path(sys.argv[2])) == 'dr
         def paste(path):
             original_paste(path)
             self.assertEqual(path.read_text(), '\n' + t.payload)
-            t.draft = draft + '[Pasted text #1]'
+            t.draft = draft + '[Pasted text #1 +1 lines]'
         def frame():
             if t.pastes and t.accepted_at is None:
                 return m.Frame(raw, x, y, raw)
@@ -995,13 +995,41 @@ assert screen.observe(frame, 'outgoing', 6, 1, pathlib.Path(sys.argv[2])) == 'dr
         self.assertEqual(t.submitted, draft + '\n' + payload)
         self.assertEqual((t.pastes, t.enters), (1, 1))
 
+    def test_exact_claude_append_requires_same_harness_and_end_cursor(self):
+        for failure in ('harness', 'cursor'):
+            with self.subTest(failure=failure):
+                t = Terminal(payload='a short payload', draft='stable draft')
+                t.harness = 'claude'
+                original_frame = t.frame
+                def frame():
+                    if t.pastes and t.accepted_at is None:
+                        f = screen(t.draft, t.history, harness='codex' if failure == 'harness' else 'claude')
+                        if failure == 'cursor':
+                            f.x -= 1
+                        return f
+                    return original_frame()
+                t.frame = frame
+                with self.assertRaisesRegex(m.DeliveryError, 'mixed-input-after-paste'):
+                    deliver(t)
+                self.assertEqual((t.pastes, t.enters), (1, 0))
+
+    def test_exact_claude_append_is_single_enter(self):
+        t = Terminal(payload='a short payload', draft='stable draft')
+        t.harness = 'claude'
+        result = deliver(t)
+        self.assertEqual(result['receipt'], 'submitted')
+        self.assertEqual((t.pastes, t.enters), (1, 1))
+
     def test_measured_claude_marker_rejects_unowned_shapes(self):
         draft = 'Disposable retirement rehearsal reminder.'
-        marker = '[Pasted text #1]'
+        marker = '[Pasted text #1 +1 lines]'
         cases = (
             ('Other stable draft.' + marker, 'paste again to expand', 'claude', 0),
+            (draft + '[Pasted text #1 +2 lines]', 'paste again to expand', 'claude', 0),
             (draft + '[Pasted text #1 +20 lines]', 'paste again to expand', 'claude', 0),
+            (draft + '[Pasted text #1]', 'paste again to expand', 'claude', 0),
             (draft + marker, '', 'claude', 0),
+            (draft + marker, 'unrelated prompt: paste again to expand', 'claude', 0),
             (draft + marker, 'paste again to expand', 'claude', -1),
             (draft + marker, 'paste again to expand', 'codex', 0),
             ('Disposable retirement rehearsal\nreminder.' + marker, 'paste again to expand', 'claude', 0),
@@ -1041,10 +1069,29 @@ assert screen.observe(frame, 'outgoing', 6, 1, pathlib.Path(sys.argv[2])) == 'dr
         original_frame, original_paste = t.frame, t.paste
         def paste(path):
             original_paste(path)
-            t.draft = draft + '[Pasted text #2]'
+            t.draft = draft + '[Pasted text #2 +1 lines]'
         def frame():
             if t.pastes and t.accepted_at is None:
-                text = draft + '[Pasted text #2]'
+                text = draft + '[Pasted text #2 +1 lines]'
+                raw = '──────────────\n❯\u00a0' + text + '\n──────────────\n  paste again to expand\n'
+                return m.Frame(raw, 2 + m.styles.cell_width(text), 1, raw)
+            return original_frame()
+        t.paste, t.frame = paste, frame
+        self.assertEqual(deliver(t)['receipt'], 'submitted')
+        self.assertEqual((t.pastes, t.enters), (1, 1))
+
+    def test_claude_collapsed_append_line_count_includes_separator(self):
+        draft = 'stale 世界'
+        payload = 'x' * 683 + '\n' + 'y' * 684
+        t = Terminal(payload=payload, draft=draft)
+        t.harness = 'claude'
+        original_frame, original_paste = t.frame, t.paste
+        def paste(path):
+            original_paste(path)
+            t.draft = draft + '[Pasted text #2 +2 lines]'
+        def frame():
+            if t.pastes and t.accepted_at is None:
+                text = draft + '[Pasted text #2 +2 lines]'
                 raw = '──────────────\n❯\u00a0' + text + '\n──────────────\n  paste again to expand\n'
                 return m.Frame(raw, 2 + m.styles.cell_width(text), 1, raw)
             return original_frame()
@@ -1059,10 +1106,10 @@ assert screen.observe(frame, 'outgoing', 6, 1, pathlib.Path(sys.argv[2])) == 'dr
         original_frame, original_paste = t.frame, t.paste
         def paste(path):
             original_paste(path)
-            t.draft = draft + '[Pasted text #3]'
+            t.draft = draft + '[Pasted text #3 +1 lines]'
         def frame():
             if t.pastes and t.accepted_at is None:
-                text = draft + '[Pasted text #3]'
+                text = draft + '[Pasted text #3 +1 lines]'
                 raw = '──────────────\n❯\u00a0' + text + '\n──────────────\n  paste again to expand\n'
                 return m.Frame(raw, 2 + m.styles.cell_width(text), 1, raw)
             return original_frame()
@@ -1080,7 +1127,7 @@ assert screen.observe(frame, 'outgoing', 6, 1, pathlib.Path(sys.argv[2])) == 'dr
                 original_frame, original_paste = t.frame, t.paste
                 def paste(path):
                     original_paste(path)
-                    t.draft = draft + '[Pasted text #4]'
+                    t.draft = draft + '[Pasted text #4 +1 lines]'
                 def frame():
                     if t.pastes and t.accepted_at is None:
                         if kind == 'modal':
@@ -1100,12 +1147,12 @@ assert screen.observe(frame, 'outgoing', 6, 1, pathlib.Path(sys.argv[2])) == 'dr
         samples = 0
         def paste(path):
             original_paste(path)
-            t.draft = draft + '[Pasted text #5]'
+            t.draft = draft + '[Pasted text #5 +1 lines]'
         def frame():
             nonlocal samples
             if t.pastes and t.accepted_at is None:
                 samples += 1
-                text = draft + ('[Pasted text #5]' if samples <= 1 else '[Pasted text #5] changed')
+                text = draft + ('[Pasted text #5 +1 lines]' if samples <= 1 else '[Pasted text #5 +1 lines] changed')
                 raw = '──────────────\n❯\u00a0' + text + '\n──────────────\n  paste again to expand\n'
                 return m.Frame(raw, 2 + m.styles.cell_width(text), 1, raw)
             return original_frame()
