@@ -126,6 +126,9 @@ PY
     if [[ "$mode" == slow-first-own && $n -eq 4 ]]; then /usr/bin/sleep 1.2; fi
     if [[ "$mode" == slow-third-empty && $n -eq 3 ]]; then /usr/bin/sleep 1.2; fi
     if [[ "$mode" == slow-second-empty && $n -eq 2 ]]; then /usr/bin/sleep 1.2; fi
+    if [[ "$mode" == changing-draft || "$mode" == second-change && $n -eq 2 ]]; then
+      printf 'changing draft %s' "$n" > "$FAKE_STATE/composer"
+    fi
     if [[ "$mode" == human-before-paste && $n -ge 3 ]]; then
       printf 'human text before paste\n' > "$FAKE_STATE/composer"
     fi
@@ -142,6 +145,10 @@ PY
       else
         cat "$FIXTURES/codex-fork-empty.ansi" > "$FAKE_STATE/last-screen"
       fi
+    elif [[ "$mode" == stable-claude && ! -s "$FAKE_STATE/pasted" ]]; then
+      cat "$FIXTURES/claude-stable-draft.ansi" > "$FAKE_STATE/last-screen"
+    elif [[ "$mode" == stable-codex && ! -s "$FAKE_STATE/pasted" ]]; then
+      cat "$FIXTURES/codex-stable-draft.ansi" > "$FAKE_STATE/last-screen"
     elif [[ "$mode" == busycontext ]]; then
       if [[ -s "$FAKE_STATE/pasted" ]]; then
         cat "$FIXTURE_CURRENT" > "$FAKE_STATE/last-screen"
@@ -170,10 +177,13 @@ PY
 from pathlib import Path
 import sys
 rows = Path(sys.argv[1]).read_text().splitlines()
-print('─' * 40)
-print('❯\u00a0' + (rows[0] if rows else ''))
+import os
+codex = Path(os.environ['FAKE_STATE'], 'mode').read_text().strip() == 'stable-codex'
+if not codex: print('─' * 40)
+else: print('')
+print(('› ' if codex else '❯\u00a0') + (rows[0] if rows else ''))
 for row in rows[1:]: print('  ' + row)
-print('─' * 40)
+print('  Any model · Context 50% left' if codex else '─' * 40)
 PY
         elif [[ "$mode" == human || "$mode" == slash ]]; then
           if [[ "$mode" == slash ]]; then printf '────────────────────────────────────────\n❯ /compact\n────────────────────────────────────────\n'
@@ -194,7 +204,7 @@ PY
     printf 'paste-start\n' >> "$FAKE_LOG"
     python3 -c 'import time; print(time.monotonic_ns())' >> "$FAKE_STATE/times"
     if [[ "${FAKE_FAIL_PASTE:-0}" == 1 ]]; then exit 1; fi
-    cp "$FAKE_BUFFER_DIR/$b" "$FAKE_STATE/composer"
+    cat "$FAKE_BUFFER_DIR/$b" >> "$FAKE_STATE/composer"
     printf 'pasted\n' > "$FAKE_STATE/pasted"
     if [[ "${FAKE_INTERRUPT_AFTER_PASTE:-0}" == 1 ]]; then
       kill -TERM "$PPID"
@@ -205,6 +215,11 @@ PY
     rm -f "$FAKE_BUFFER_DIR/$b" ;;
   delete-buffer) printf 'delete-buffer\n' >> "$FAKE_LOG" ;;
   send-keys)
+    if [[ "$*" == *' -l '* ]]; then
+      printf '%s' "${!#}" >> "$FAKE_STATE/composer"
+      printf 'pasted\n' > "$FAKE_STATE/pasted"
+      exit 0
+    fi
     [[ "${!#}" == Enter ]]
     printf 'enter\n' >> "$FAKE_LOG"
     python3 -c 'import time; print(time.monotonic_ns())' >> "$FAKE_STATE/times"
@@ -239,21 +254,22 @@ reset_case() {
   : > "$FAKE_STATE/parser-trace"
   : > "$FAKE_STATE/sender-pid"
   printf '%s\n' "${1:-empty}" > "$FAKE_STATE/mode"
+  if [[ "${1:-}" == stable-* || "${1:-}" == changing-draft || "${1:-}" == second-change ]]; then printf 'stale TICK' > "$FAKE_STATE/composer"; fi
   cp "$FIXTURES/claude-blank.ansi" "$FAKE_STATE/empty"
   cp "$FIXTURES/modal.txt" "$FAKE_STATE/modal"
   cp "$FIXTURES/codex-generating-queue.ansi" "$FAKE_STATE/busyqueue"
 }
 run_sender() {
   if [[ "$(<"$FAKE_STATE/mode")" == interrupt-before-paste ]]; then
-    bash "$SCRIPT_DIR/claude-send.sh" "$@" &
+    bash "${SENDER_SCRIPT:-$SCRIPT_DIR/claude-send.sh}" "$@" &
     local sender_pid=$!
     printf '%s' "$sender_pid" > "$FAKE_STATE/sender-pid"
     wait "$sender_pid"
   else
-    bash "$SCRIPT_DIR/claude-send.sh" "$@"
+    bash "${SENDER_SCRIPT:-$SCRIPT_DIR/claude-send.sh}" "$@"
   fi
 }
-run_sender_without_xdg_runtime() { env -u XDG_RUNTIME_DIR bash "$SCRIPT_DIR/claude-send.sh" "$@"; }
+run_sender_without_xdg_runtime() { env -u XDG_RUNTIME_DIR bash "${SENDER_SCRIPT:-$SCRIPT_DIR/claude-send.sh}" "$@"; }
 assert_pending() {
   local status=$1 output=$2 path
   grep -q "status=$status" "$output"
@@ -265,6 +281,34 @@ assert_pending() {
 # The live Claude frame has a suggestion in an otherwise empty composer.
 prompt_file="$TEST_DIR/payload"
 printf 'alpha\nbeta' > "$prompt_file"
+
+# Ruling regression group can run alone against the unmodified sender.
+{
+  failures=0
+  for mode in stable-claude stable-codex; do
+    reset_case "$mode"
+    if out=$(run_sender %7 --submit-delay 0 --max-wait 1 --poll-interval 0.1 --prompt-file "$prompt_file" 2>"$TEST_DIR/$mode.err") &&
+       [[ "$(<"$FAKE_STATE/submitted")" == $'stale TICK\nalpha\nbeta' ]] &&
+       [[ "$out" == 'status=sent receipt=unverified stale_draft_length=10' ]]; then
+      echo "PASS: $mode co-submitted"
+    else
+      echo "FAIL: $mode co-submitted"
+      failures=$((failures + 1))
+    fi
+  done
+  for mode in changing-draft second-change modal; do
+    reset_case "$mode"
+    if run_sender %7 --submit-delay 1 --max-wait 1 --poll-interval 0.1 --prompt-file "$prompt_file" >"$TEST_DIR/$mode.out" 2>"$TEST_DIR/$mode.err"; then
+      echo "FAIL: $mode submitted"; failures=$((failures + 1))
+    elif [[ ! -s "$FAKE_LOG" ]]; then
+      echo "PASS: $mode deferred without input"
+    else
+      echo "FAIL: $mode attempted input"; failures=$((failures + 1))
+    fi
+  done
+  ((failures == 0))
+  if [[ "${STABLE_INPUT_ONLY:-0}" == 1 ]]; then exit; fi
+}
 
 # Invalid byte sequences, control characters, blank content, and trailing
 # whitespace are rejected before any tmux operation, so they cannot be pasted.
@@ -452,8 +496,8 @@ PYTEST
 reset_case forkcompact
 out=$(run_sender %7 --submit-delay 0 --render-wait 3 --max-wait 3 '/compact')
 [[ "$out" == 'status=sent receipt=unverified' ]]
-[[ $(grep -c '^paste-buffer$' "$FAKE_STATE/tmux-calls") -eq 1 ]]
-[[ $(grep -c '^send-keys$' "$FAKE_STATE/tmux-calls") -eq 1 ]]
+[[ $(grep -c '^paste-buffer$' "$FAKE_STATE/tmux-calls" || true) -eq 0 ]]
+[[ $(grep -c '^send-keys$' "$FAKE_STATE/tmux-calls") -eq 2 ]]
 [[ $(cat "$FAKE_STATE/submitted") == '/compact' ]]
 
 # A measured Codex busy-queue composer accepts one exact short payload once.
@@ -478,7 +522,7 @@ cmp "$queue_prompt" "$FAKE_STATE/submitted"
 
 # Once ownership was visible, an unknown frame stops even with a large budget.
 reset_case unknown-after-own
-if run_sender %7 --submit-delay 8 --render-wait 30 --max-wait 3 --poll-interval 0.1 --prompt-file "$prompt_file" 2>"$TEST_DIR/ownership-loss.err"; then
+if run_sender %7 --stable-window 0 --submit-delay 8 --render-wait 30 --max-wait 3 --poll-interval 0.1 --prompt-file "$prompt_file" 2>"$TEST_DIR/ownership-loss.err"; then
   echo 'FAIL: unknown frame after ownership was submitted' >&2; exit 1
 else rc=$?; [[ $rc -eq 3 ]]; fi
 grep -q 'reason=post-paste-unknown' "$TEST_DIR/ownership-loss.err"
@@ -595,7 +639,7 @@ rm -rf "$(dirname "$pending")"
 # Existing human text, slash commands, and modal screens time out without paste/Enter.
 for mode in human slash modal; do
   reset_case "$mode"
-  if run_sender %7 --submit-delay 0 --max-wait 1 --poll-interval 0.1 --prompt-file "$prompt_file" 2>"$TEST_DIR/$mode.err"; then
+  if run_sender %7 --stable-window 8 --submit-delay 0 --max-wait 1 --poll-interval 0.1 --prompt-file "$prompt_file" 2>"$TEST_DIR/$mode.err"; then
     echo "FAIL: $mode composer was sent" >&2; exit 1
   else rc=$?; [[ $rc -eq 2 ]]; fi
   pending=$(assert_pending deferred "$TEST_DIR/$mode.err")
@@ -625,7 +669,7 @@ pending=$(assert_pending ambiguous "$TEST_DIR/midflight.err")
 [[ $(grep -c '^enter$' "$FAKE_LOG" || true) -eq 0 ]]
 [[ $(<"$FAKE_STATE/composer") == 'a human began typing' ]]
 # A second attempt while the ambiguous composer is occupied must defer, never duplicate.
-if run_sender %7 --submit-delay 0 --max-wait 1 --poll-interval 0.1 --prompt-file "$pending" 2>"$TEST_DIR/retry-occupied.err"; then
+if run_sender %7 --stable-window 8 --submit-delay 0 --max-wait 1 --poll-interval 0.1 --prompt-file "$pending" 2>"$TEST_DIR/retry-occupied.err"; then
   echo 'FAIL: retry was pasted over occupied composer' >&2; exit 1
 else rc=$?; [[ $rc -eq 2 ]]; fi
 [[ $(grep -c '^paste-start$' "$FAKE_LOG") -eq 1 ]]
@@ -677,7 +721,7 @@ rm -rf "$(dirname "$pending")"
 
 # The default submit delay remains eight seconds, measured from paste to Enter.
 reset_case empty
-if out=$(FAKE_REAL_SLEEP=1 run_sender %7 --max-wait 3 --poll-interval 0.1 --prompt-file "$prompt_file"); then
+if out=$(FAKE_REAL_SLEEP=1 run_sender %7 --stable-window 0 --max-wait 3 --poll-interval 0.1 --prompt-file "$prompt_file"); then
   [[ "$out" == 'status=sent receipt=unverified' ]]
 else
   echo 'FAIL: successful prompt-file delivery returned nonzero' >&2

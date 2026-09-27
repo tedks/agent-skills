@@ -294,6 +294,8 @@ class Sender:
         self.pasted = False
         self.enters = 0
         self.typed = getattr(options, "typed_command", False)
+        self.expected = payload
+        self.stale_draft_length = 0
         if self.typed and getattr(options, "literal_exit", False):
             raise DeliveryError("conflicting-input-modes")
         if self.typed and (len(payload.encode("utf-8")) > 200 or payload != payload.rstrip() or payload.endswith(";")):
@@ -304,6 +306,8 @@ class Sender:
     def input_evidence(self, inp):
         if self.typed:
             return inp.kind == "text" and inp.text == self.payload
+        if self.stale_draft_length:
+            return inp.kind == "text" and inp.text == self.expected
         return paste_evidence(inp, self.payload)
 
     def sample(self):
@@ -332,11 +336,19 @@ class Sender:
                         raise DeliveryError("human-typing")
                     last_reason = "human-typing"
                 stable_since = now
+            twice = previous is not None
             previous = fp
             if inp.kind == "modal":
                 raise DeliveryError("modal")
-            if now - stable_since >= self.o.stable_wait:
+            if twice and now - stable_since >= getattr(self.o, "stable_window", self.o.stable_wait):
                 if inp.kind == "empty":
+                    return frame, inp
+                if (inp.kind == "text" and not self.typed
+                        and not getattr(self.o, "literal_exit", False)
+                        and not PASTE.search(inp.text)
+                        and "[Pasted Content " not in inp.text
+                        and inp.text != self.payload
+                        and inp.cursor == (2 + styles.cell_width(inp.text.rsplit("\n", 1)[-1]), inp.text.count("\n"))):
                     return frame, inp
                 # Retirement's literal exit permits only Claude's canonical
                 # idle suggestion at the input-start cursor, never draft text.
@@ -359,6 +371,12 @@ class Sender:
         raise DeliveryError(last_reason)
 
     def deliver(self):
+        result = self._deliver()
+        if self.stale_draft_length:
+            result["stale_draft_length"] = self.stale_draft_length
+        return result
+
+    def _deliver(self):
         before, inp = self.ready()
         baseline = records(before, inp)
         # One final sample catches input beginning just after the stable period.
@@ -371,20 +389,30 @@ class Sender:
             raise DeliveryError("literal-exit-requires-claude-exit")
         resume_before = resume_records(before) if literal else Counter()
         compact_before = styles.strip_ansi(before.history or before.raw).count("• Context compacted")
+        if check.kind == "text":
+            self.stale_draft_length = len(check.text)
+            self.expected = check.text + "\n" + self.payload
         self.pasted = True  # A failed paste command can still have changed input.
         if literal:
             self.tmux.keys("-l", self.payload)
         elif self.typed:
             self.tmux.type_command(self.payload)
         else:
-            self.tmux.paste(self.path)
+            if self.stale_draft_length:
+                # Private ephemeral append bytes; retained pending stays outgoing-only.
+                with tempfile.NamedTemporaryFile(dir=self.path.parent, prefix="append-") as append:
+                    append.write(("\n" + self.payload).encode("utf-8"))
+                    append.flush()
+                    self.tmux.paste(Path(append.name))
+            else:
+                self.tmux.paste(self.path)
         start = self.clock()
         deadline = start + self.o.render_wait + self.o.submit_delay + self.o.receipt_wait
         owned = None
         evidence_since = None
         last_enter = None
         input_disappeared = False
-        accepted_forms = {normalized(self.payload)}
+        accepted_forms = {normalized(self.expected)}
         while self.clock() < deadline:
             frame, current = self.sample()
             now = self.clock()
@@ -447,19 +475,23 @@ def options(argv=None):
     p.add_argument("target")
     p.add_argument("--prompt-file", "-f", type=Path)
     p.add_argument("--typed-command", action="store_true", help="type one single-line slash command with literal keys; retain all composer/receipt guards")
-    for name, default in (("stable-wait", 3), ("max-wait", 10), ("submit-delay", 8),
+    p.add_argument("--stable-window", "--stable-wait", dest="stable_wait", type=float, default=None, help="composer settle window; default: submit-delay")
+    for name, default in (("max-wait", 10), ("submit-delay", 8),
                           ("render-wait", 3), ("receipt-wait", 15), ("retry-wait", 3),
                           ("poll-interval", 0.25)):
         p.add_argument("--" + name, type=float, default=default)
     p.add_argument("--literal-exit", action="store_true", help="type a bare Claude /exit literally, send at most one Enter, and verify a fresh resume notice")
-    p.add_argument("--backoff", action="store_true", help="wait for stable empty input within --max-wait instead of exiting on typing/drafts")
+    p.add_argument("--backoff", action="store_true", help="wait for stable input within --max-wait instead of exiting on typing")
     p.add_argument("message", nargs="?")
     o = p.parse_intermixed_args(argv)
+    if o.stable_wait is None:
+        o.stable_wait = o.submit_delay
+    o.stable_window = o.stable_wait
     for name in ("stable_wait", "max_wait", "submit_delay", "render_wait", "receipt_wait", "retry_wait", "poll_interval"):
         value = getattr(o, name)
         maximum = math.inf if name == "receipt_wait" else 600
-        if not math.isfinite(value) or (not 0 < value <= maximum and not (name == "submit_delay" and value == 0)):
-            p.error(name.replace("_", "-") + " must be finite and positive (submit-delay may be zero); options except receipt-wait are capped at 600 seconds")
+        if not math.isfinite(value) or (not 0 < value <= maximum and not (name in {"submit_delay", "stable_wait"} and value == 0)):
+            p.error(name.replace("_", "-") + " must be finite and positive (submit-delay and stable-window may be zero); options except receipt-wait are capped at 600 seconds")
     if bool(o.prompt_file) == (o.message is not None):
         p.error("provide exactly one message or --prompt-file")
     if not o.target or o.target.startswith("-"):

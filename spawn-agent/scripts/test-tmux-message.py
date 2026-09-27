@@ -41,6 +41,8 @@ class Terminal:
         self.actions = []
         self.pane = '%1'
         self.frames = 0
+        self.submitted = None
+        self.harness = 'codex'
 
     def sleep(self, n): self.now += n
     def clock(self): return self.now
@@ -49,16 +51,16 @@ class Terminal:
         self.frames += 1
         history = self.history
         if self.accepted_at is not None and self.now >= self.accepted_at + self.delayed:
-            history += ('• Messages to be submitted after next tool call\n  ↳ ' if self.queued else '› ') + self.payload.replace('\n', '\n  ') + '\n\n'
+            history += ('• Messages to be submitted after next tool call\n  ↳ ' if self.queued else '› ') + (self.submitted or self.payload).replace('\n', '\n  ') + '\n\n'
         text = self.draft
         if self.mutate and self.pastes:
             text += ' human'
-        return screen(text, history, prefix='• output ' + str(self.frames) + '\n\n')
+        return screen(text, history, harness=self.harness, prefix='• output ' + str(self.frames) + '\n\n')
 
     def paste(self, path):
         self.actions.append('paste')
         self.pastes += 1
-        self.draft += '[Pasted text #1 +20 lines]' if self.collapsed else self.payload
+        self.draft += '[Pasted text #1 +20 lines]' if self.collapsed else path.read_text()
 
     def type_command(self, text):
         self.actions.append("typed:" + text)
@@ -70,6 +72,7 @@ class Terminal:
             self.enters += 1
             if self.enters > self.dropped:
                 self.accepted_at = self.now
+                self.submitted = self.draft
                 self.draft = ''
 
 
@@ -101,7 +104,10 @@ def deliver(t, **kw):
     o = dict(max_wait=8, stable_wait=3, poll_interval=.25, backoff=False,
              submit_delay=1, render_wait=3, receipt_wait=8, retry_wait=3)
     o.update(kw)
-    return m.Sender(t, SimpleNamespace(**o), t.payload, Path('/unused'), t.clock, t.sleep).deliver()
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / 'message'
+        path.write_text(t.payload)
+        return m.Sender(t, SimpleNamespace(**o), t.payload, path, t.clock, t.sleep).deliver()
 
 
 class DeliveryTests(unittest.TestCase):
@@ -327,11 +333,78 @@ class DeliveryTests(unittest.TestCase):
             deliver(t)
         self.assertEqual(t.enters, 0)
 
-    def test_paused_draft_not_submitted(self):
-        t = Terminal(draft='my unfinished message')
+    def test_stable_draft_cosubmitted_codex_and_claude(self):
+        for harness in ('codex', 'claude'):
+            with self.subTest(harness=harness):
+                t = Terminal(draft='stale TICK')
+                t.harness = harness
+                original = t.frame
+                fixtures = Path(__file__).with_name('fixtures') / 'claude-send'
+                def initial():
+                    if not t.pastes:
+                        x, y = map(int, (fixtures / (harness + '-stable-draft.cursor')).read_text().split(':'))
+                        return m.Frame((fixtures / (harness + '-stable-draft.ansi')).read_text(), x, y)
+                    return original()
+                t.frame = initial
+                result = deliver(t)
+                self.assertEqual(t.submitted, 'stale TICK\nhello')
+                self.assertEqual((t.pastes, t.enters), (1, 1))
+                self.assertEqual(result['stale_draft_length'], len('stale TICK'))
+                self.assertNotIn('stale TICK', json.dumps(result))
+
+    def test_stable_draft_requires_cursor_at_end(self):
+        t = Terminal(draft='stale TICK')
+        original = t.frame
+        def midtext():
+            frame = original()
+            frame.x = 4
+            return frame
+        t.frame = midtext
         with self.assertRaisesRegex(m.DeliveryError, 'existing-input'):
             deliver(t)
-        self.assertEqual(t.pastes, 0)
+        self.assertEqual(t.actions, [])
+
+    def test_zero_window_still_observes_twice(self):
+        t = Terminal(draft='stale TICK')
+        original = t.frame
+        def second():
+            if t.frames == 1:
+                t.draft = 'human changed this'
+            return original()
+        t.frame = second
+        with self.assertRaisesRegex(m.DeliveryError, 'human-typing'):
+            deliver(t, stable_wait=0)
+        self.assertEqual(t.actions, [])
+
+    def test_stable_window_defaults_and_alias(self):
+        for delay in ('0', '8', '12'):
+            self.assertEqual(m.options(['%1', '--submit-delay', delay, 'hello']).stable_window, float(delay))
+        for flag in ('--stable-window', '--stable-wait'):
+            self.assertEqual(m.options(['%1', flag, '2', 'hello']).stable_window, 2)
+
+    def test_stale_draft_combined_enter_recovery(self):
+        t = Terminal(draft='stale TICK', dropped=1)
+        self.assertEqual(deliver(t)['enters'], 2)
+        self.assertEqual((t.pastes, t.submitted), (1, 'stale TICK\nhello'))
+
+    def test_existing_ambiguous_payload_never_reappended(self):
+        for draft in ('hello', '[Pasted text #1 +20 lines]', '[Pasted Content 5 chars]'):
+            t = Terminal(draft=draft)
+            with self.assertRaisesRegex(m.DeliveryError, 'existing-input'):
+                deliver(t)
+            self.assertEqual(t.actions, [])
+
+    def test_change_only_at_second_observation_defers(self):
+        t = Terminal(draft='stale TICK')
+        original = t.frame
+        def second():
+            if t.now >= 3:
+                t.draft = 'new human text'
+            return original()
+        t.frame = second
+        with self.assertRaisesRegex(m.DeliveryError, 'human-typing'):
+            deliver(t)
+        self.assertEqual(t.actions, [])
 
     def test_typing_exits_without_paste(self):
         t = Terminal(draft='draft')

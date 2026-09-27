@@ -220,8 +220,6 @@ def codex_state(lines: list[str], raw_lines: list[str], payload: str, cx: int, c
                         and not lines[idx - 1].strip() and lines[idx] == "› /compact")
         if not shortcuts and not compact_menu:
             return "unknown"
-    if footer - idx > 2:
-        return "unknown"
     if any(line.strip() and not ("? for shortcuts" in line or "warning" in line.lower() or "agents" in line.lower()) for line in lines[footer + 1 :]):
         return "unknown"
     fragment = lines[idx].split("›", 1)[1]
@@ -251,10 +249,44 @@ def codex_state(lines: list[str], raw_lines: list[str], payload: str, cx: int, c
     return "busy"
 
 
+def observe(screen: str, payload: str, cx: int, cy: int, path: pathlib.Path) -> str:
+    """Write only a validated exact draft to a caller-owned private scratch file."""
+    path.write_text("")
+    result = state(screen, payload, cx, cy)
+    if result != "busy":
+        return result
+    lines = strip_ansi(screen).splitlines()
+    glyph = "›" if codex_surface(screen) else "❯"
+    prompts = [i for i, row in enumerate(lines) if glyph in row]
+    if not prompts:
+        return result
+    idx = prompts[-1]
+    if glyph == "❯":
+        ends = [i for i in range(idx + 1, len(lines)) if lines[i].strip() and set(lines[i].strip()) == {"─"}]
+    else:
+        ends = [i for i in range(idx + 1, len(lines)) if "Context " in lines[i] or "tab to queue message" in lines[i] or re.match(r"  GPT-6-Sol · ", lines[i])]
+    if not ends:
+        return result
+    fragment = lines[idx].split(glyph, 1)[1]
+    if fragment.startswith((" ", "\u00a0")):
+        fragment = fragment[1:]
+    parts = [fragment.rstrip()] + [row[2:].rstrip() if row.startswith("  ") else row.rstrip() for row in lines[idx + 1:ends[0]]]
+    draft = "\n".join(parts).rstrip("\n")
+    if (draft and state(screen, draft, cx, cy) == "own"
+            and not re.search(r"\[Pasted (?:text|Content)", draft, re.I)):
+        path.write_text(draft)
+        return "draft"
+    return result
+
+
 def main() -> int:
     if len(sys.argv) == 2 and sys.argv[1] == "--strip-ansi":
         sys.stdout.write(strip_ansi(sys.stdin.read()))
         return 0
+    observe_path = None
+    if len(sys.argv) == 6 and sys.argv[1] == "--observe-file":
+        observe_path = pathlib.Path(sys.argv[2])
+        sys.argv[1:3] = []
     if len(sys.argv) != 4:
         return 64
     try:
@@ -268,7 +300,7 @@ def main() -> int:
     except (IndexError, ValueError):
         print("unknown")
         return 0
-    print(state(screen, payload, cx, cy))
+    print(observe(screen, payload, cx, cy, observe_path) if observe_path else state(screen, payload, cx, cy))
     return 0
 
 

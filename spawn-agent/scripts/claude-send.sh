@@ -16,6 +16,7 @@ usage() {
     echo "Usage: claude-send.sh <window> [--submit-delay SEC] [--max-wait SEC] [--render-wait SEC] [--poll-interval SEC] <message>" >&2
     echo "       claude-send.sh <window> [options] --prompt-file FILE" >&2
     echo "  --submit-delay SEC  seconds after paste before submit (integer 0-30; default 8)" >&2
+    echo "  --stable-window SEC seconds of unchanged composer (integer 0-30; default submit-delay)" >&2
     echo "  --render-wait SEC   initial post-paste render budget (integer 1-30; default 1)" >&2
     echo "  --max-wait SEC      maximum wait for an empty composer (integer 1-600; default 30)" >&2
     echo "  --poll-interval SEC base poll interval (decimal 0.1-2; default 0.5); backoff caps at 8s" >&2
@@ -24,21 +25,24 @@ if (($# < 2)); then usage; exit 1; fi
 
 window=$1; shift
 submit_delay=8
+stable_window=
 render_wait=1
 max_wait=30
 poll_interval=0.5
 while (($#)); do
     case "$1" in
-        --submit-delay|--render-wait|--max-wait|--poll-interval)
+        --stable-window|--submit-delay|--render-wait|--max-wait|--poll-interval)
             (($# >= 2)) || { echo "Error: $1 requires a value" >&2; exit 1; }
             option=$1; value=$2; shift 2
             case "$option" in
-                --submit-delay|--render-wait)
+                --stable-window|--submit-delay|--render-wait)
                     minimum=0
                     if [[ "$option" == --render-wait ]]; then minimum=1; fi
                     [[ "$value" =~ ^[0-9]+$ && ${#value} -le 2 ]] || { echo "Error: $option requires an integer from $minimum to 30" >&2; exit 1; }
                     if ((10#$value < minimum || 10#$value > 30)); then echo "Error: $option requires an integer from $minimum to 30" >&2; exit 1; fi
-                    if [[ "$option" == --submit-delay ]]; then
+                    if [[ "$option" == --stable-window ]]; then
+                        stable_window=$((10#$value))
+                    elif [[ "$option" == --submit-delay ]]; then
                         submit_delay=$((10#$value))
                     else
                         render_wait=$((10#$value))
@@ -59,6 +63,13 @@ while (($#)); do
 done
 if (($# < 1)); then echo 'Error: message or --prompt-file is required' >&2; exit 1; fi
 
+stable_window=${stable_window:-$submit_delay}
+observe_file=
+stable_file=
+expected_file=
+append_file=
+stale_draft_length=0
+typed_command=0
 prompt_file=''
 cleanup_prompt=0
 pending_dir=''
@@ -70,6 +81,9 @@ cleanup() {
     if ((buffer_loaded)); then
         "${TMUX_CMD[@]}" delete-buffer -b "$buf_name" 2>/dev/null || true
     fi
+    for scratch in "$observe_file" "$stable_file" "$expected_file" "$append_file"; do
+        [[ -z "$scratch" ]] || rm -f -- "$scratch"
+    done
     ((cleanup_prompt)) && rm -f -- "$prompt_file"
     [[ -n "$pending_dir" ]] && rmdir -- "$pending_dir" 2>/dev/null || true
 }
@@ -148,6 +162,12 @@ trap handle_exit EXIT
 trap 'handle_signal HUP 129' HUP
 trap 'handle_signal INT 130' INT
 trap 'handle_signal TERM 143' TERM
+observe_file=$(mktemp /tmp/claude-send-observe.XXXXXX)
+stable_file=$(mktemp /tmp/claude-send-stable.XXXXXX)
+expected_file=$(mktemp /tmp/claude-send-expected.XXXXXX)
+append_file=$(mktemp /tmp/claude-send-append.XXXXXX)
+cp -- "$prompt_file" "$expected_file"
+if [[ "$(<"$prompt_file")" =~ ^/[A-Za-z][A-Za-z0-9_-]*(\ [^$'\r\n']*)?$ ]]; then typed_command=1; fi
 identity=$("$SCRIPT_DIR/tmux-resolve.sh" "$window") || { echo 'Error: failed to resolve tmux target' >&2; exit 1; }
 [[ "$identity" =~ ^[0-9]+:%[0-9]+$ ]] || { echo 'Error: tmux returned an invalid target identity' >&2; exit 1; }
 pane_id=${identity#*:}
@@ -180,50 +200,68 @@ screen_state() {
         printf modal; return
     fi
     if [[ ( "$screen" == *'Context '* || "$screen" == *'tab to queue message'* || "$screen" == *'  GPT-6-Sol · '* ) && "$screen" == *'› '* ]]; then
-        printf '%s' "$screen_raw" | python3 "$SCRIPT_DIR/claude-send-screen.py" "$prompt_file" "$cursor_x" "$cursor_y"
+        printf '%s' "$screen_raw" | python3 "$SCRIPT_DIR/claude-send-screen.py" --observe-file "$observe_file" "$expected_file" "$cursor_x" "$cursor_y"
         return
     fi
     if claude_trust_modal_active "$screen"; then printf modal; return; fi
     claude_composer_ready "$screen" || { printf unknown; return; }
-    printf '%s' "$screen_raw" | python3 "$SCRIPT_DIR/claude-send-screen.py" "$prompt_file" "$cursor_x" "$cursor_y"
+    printf '%s' "$screen_raw" | python3 "$SCRIPT_DIR/claude-send-screen.py" --observe-file "$observe_file" "$expected_file" "$cursor_x" "$cursor_y"
 }
 
 # A bounded deadline avoids granting extra time after slow capture calls.
 wait_start_ns=$(python3 -c 'import time; print(time.monotonic_ns())')
 delay=$poll_interval
-empty_seen=0
+previous_state=''
+stable_start_ns=$wait_start_ns
 while :; do
     state=$(screen_state 2>/dev/null || printf unknown)
-    stable_empty=0
-    if [[ "$state" == empty ]]; then
-        if ((empty_seen)); then stable_empty=1; else empty_seen=1; fi
+    now_ns=$(python3 -c 'import time; print(time.monotonic_ns())')
+    eligible=0
+    [[ "$state" == empty || ( "$state" == draft && $typed_command == 0 ) ]] && eligible=1
+    if ((eligible)) && [[ "$state" == "$previous_state" ]] && cmp -s "$observe_file" "$stable_file"; then
+        stable_ns=$((now_ns - stable_start_ns))
     else
-        empty_seen=0
+        stable_start_ns=$now_ns
+        stable_ns=0
     fi
-    elapsed=$(python3 -c 'import time,sys; print((time.monotonic_ns()-int(sys.argv[1]))/1e9)' "$wait_start_ns")
+    elapsed=$(awk -v n="$now_ns" -v s="$wait_start_ns" 'BEGIN { print (n-s)/1000000000 }')
     remaining=$(awk -v d="$max_wait" -v e="$elapsed" 'BEGIN { printf "%.3f",d-e }')
     awk -v r="$remaining" 'BEGIN { exit !(r > 0) }' || { preserve_pending deferred "composer-$state"; exit 2; }
-    ((stable_empty)) && break
+    if ((eligible)) && [[ "$previous_state" == "$state" ]] && ((stable_ns >= stable_window * 1000000000)) && cmp -s "$observe_file" "$stable_file"; then break; fi
+    previous_state=$state
+    cp -- "$observe_file" "$stable_file"
     sleep_for=$(awk -v d="$delay" -v r="$remaining" 'BEGIN { if (d>r) d=r; printf "%.3f",d }')
     sleep "$sleep_for"
     delay=$(awk -v d="$delay" 'BEGIN { n=d*2; if (n>8) n=8; printf "%.3f",n }')
 done
 
-# Recheck under the alias-shared lock immediately before paste.
+# Recheck exact stable bytes immediately before appending; never overwrite drafts.
 state=$(screen_state 2>/dev/null || printf unknown)
 elapsed=$(python3 -c 'import time,sys; print((time.monotonic_ns()-int(sys.argv[1]))/1e9)' "$wait_start_ns")
 remaining=$(awk -v d="$max_wait" -v e="$elapsed" 'BEGIN { printf "%.3f",d-e }')
 awk -v r="$remaining" 'BEGIN { exit !(r > 0) }' || { preserve_pending deferred final-pre-paste-timeout; exit 2; }
-if [[ "$state" != empty ]]; then preserve_pending deferred "pre-paste-$state"; exit 2; fi
+if [[ "$state" != "$previous_state" ]] || ! cmp -s "$observe_file" "$stable_file"; then preserve_pending deferred "pre-paste-$state"; exit 2; fi
+if [[ "$state" == draft ]]; then
+    stale_draft_length=$(python3 -c 'import pathlib,sys; print(len(pathlib.Path(sys.argv[1]).read_text()))' "$stable_file")
+    { printf '\n'; cat "$prompt_file"; } > "$append_file"
+    { cat "$stable_file"; cat "$append_file"; } > "$expected_file"
+else
+    cp -- "$prompt_file" "$append_file"
+fi
 
+if ((typed_command)); then
+    paste_started=1
+    "${TMUX_CMD[@]}" send-keys -t "$pane_id" -l -- "$(<"$prompt_file")"
+else
 buffer_loaded=1
-"${TMUX_CMD[@]}" load-buffer -b "$buf_name" "$prompt_file"
+"${TMUX_CMD[@]}" load-buffer -b "$buf_name" "$append_file"
 paste_started=1
 if ! "${TMUX_CMD[@]}" paste-buffer -p -r -d -t "$pane_id" -b "$buf_name"; then
     preserve_pending ambiguous paste-command-failed
     exit 3
 fi
 buffer_loaded=0
+fi
 
 # Require exact visible ownership throughout the delay and again immediately
 # before Enter. A changed/unreadable frame is ambiguous; never clear, repaste,
@@ -267,4 +305,8 @@ state=$(screen_state 2>/dev/null || printf unknown)
 "${TMUX_CMD[@]}" send-keys -t "$pane_id" Enter
 # A paste attempt remains irreversible even if reporting fails after Enter.
 # Only a normal exit suppresses retention; never classify this phase deferred.
-printf 'status=sent receipt=unverified\n'
+if ((stale_draft_length)); then
+    printf 'status=sent receipt=unverified stale_draft_length=%s\n' "$stale_draft_length"
+else
+    printf 'status=sent receipt=unverified\n'
+fi

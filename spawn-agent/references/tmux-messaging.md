@@ -9,7 +9,8 @@ the resolved pane ID; deletion afterward causes failure rather than retargeting.
 
 The public sender uses `tmux-message.py`. It returns success only after observing
 new application receipt evidence. The older `claude-send.sh` remains available
-for compatibility, with its original transport-only semantics.
+for compatibility, with transport-only semantics. It recognizes single-line slash commands
+and types them literally; public callers use `--typed-command` explicitly.
 
 ## Flow
 
@@ -19,7 +20,9 @@ for compatibility, with its original transport-only semantics.
    the input does not count as typing. Changing input defers with bounded
    backoff. Preserve an unchanged draft and append a newline plus the outgoing
    payload; submit both only after verifying the combined input. Record only
-   draft length. Modals and unsupported layouts defer. A Claude `Try …`
+   draft length (`stale_draft_length`). Modals and unsupported layouts defer.
+   A draft must have a visibly verified end cursor; collapsed markers and an
+   exact copy of this outgoing payload remain ambiguous and defer. A Claude `Try …`
    suggestion retains the conservative Space/Backspace probe; suggestions are
    disabled fleet-wide, so normal idle Claude input is empty.
 3. Snapshot receipt history, recheck input, and paste actual text once through
@@ -63,7 +66,8 @@ Options precede actual message text or `--prompt-file FILE`:
 returning immediately when typing is detected. Stable drafts no longer block
 ordinary messages. Stability resets when input changes; choose a readiness
 budget longer than the settle window.
-The 8/3/10 submit/render/readiness defaults preserve the operational baseline;
+The 8/3/10 submit/render/readiness defaults remain; input readiness now uses
+the submit-delay as its default settle window, rather than three seconds;
 receipt confirmation and recovery do not depend on shortening that delay.
 The lock wait has a separate `--max-wait` budget. Confirmation is bounded by
 render + submit-delay + receipt-wait; operations also have subprocess timeouts.
