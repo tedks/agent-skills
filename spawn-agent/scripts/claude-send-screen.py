@@ -249,6 +249,30 @@ def codex_state(lines: list[str], raw_lines: list[str], payload: str, cx: int, c
     return "busy"
 
 
+def slash_command_syntax(text: str) -> bool:
+    return bool(re.fullmatch(r"/[A-Za-z][A-Za-z0-9_-]*(?: [^\r\n\x00-\x1f\x7f]*)?", text))
+
+
+def command_like(text: str) -> bool:
+    return text.lstrip().startswith(("/", "!"))
+
+
+def command_draft(text: str) -> bool:
+    """Only a short exact single-line command in an ordinary composer can clear."""
+    if (len(text.encode("utf-8")) > 200 or text != text.rstrip() or text.endswith(";")
+            or any(unicodedata.category(ch) == "Cc" for ch in text)):
+        return False
+    return slash_command_syntax(text) or (text.startswith("!") and bool(text[1:].strip()))
+
+
+def command_rows(screen: str, glyph: str, start: int, end: int) -> bool:
+    """Reject extra command rows, including trimmed blank continuations."""
+    rows = strip_ansi(screen).splitlines()
+    if glyph == "❯":
+        return end == start + 1
+    return end - start == 2 and all(not row.strip() for row in rows[start + 1:end])
+
+
 def contains_payload(text: str, payload: str) -> bool:
     """Conservative replay guard: a full payload survives wrapping/spacing."""
     wanted = "".join(payload.split())
@@ -278,8 +302,11 @@ def observe(screen: str, payload: str, cx: int, cy: int, path: pathlib.Path) -> 
         fragment = fragment[1:]
     parts = [fragment.rstrip()] + [row[2:].rstrip() if row.startswith("  ") else row.rstrip() for row in lines[idx + 1:ends[0]]]
     draft = "\n".join(parts).rstrip("\n")
+    command = command_draft(draft) and command_rows(screen, glyph, idx, ends[0])
+    if command_like(draft) and not command:
+        return result
     # These measured busy queues cannot verify multiline appended input.
-    if glyph == "›" and any(re.fullmatch(r"  tab to queue message(?: {2,}\d+% context left)?", row) for row in lines[idx + 1:]):
+    if not command and glyph == "›" and any(re.fullmatch(r"  tab to queue message(?: {2,}\d+% context left)?", row) for row in lines[idx + 1:]):
         return result
     home = ("\n" not in draft and (cx, cy) == (2, idx)
             and state(screen, draft, 2 + cell_width(draft), idx) == "own")
@@ -287,6 +314,8 @@ def observe(screen: str, payload: str, cx: int, cy: int, path: pathlib.Path) -> 
             and (state(screen, draft, cx, cy) == "own" or home)
             and not re.search(r"\[Pasted (?:text|Content)", draft, re.I)):
         path.write_text(draft, encoding="utf-8")
+        if command:
+            return "command-home" if home else "command"
         return "draft-home" if home else "draft"
     return result
 

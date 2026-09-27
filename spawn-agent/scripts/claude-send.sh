@@ -73,6 +73,8 @@ stable_file=
 expected_file=
 append_file=
 stale_draft_length=0
+clear_attempted=0
+cleared_command_draft_length=0
 prompt_file=''
 cleanup_prompt=0
 pending_dir=''
@@ -107,8 +109,12 @@ else
     cleanup_prompt=1
     printf '%s' "$message" > "$prompt_file"
 fi
-python3 - "$prompt_file" "$typed_command" <<'PY'
-import pathlib, re, sys, unicodedata
+python3 - "$prompt_file" "$typed_command" "$SCRIPT_DIR" <<'PY'
+import importlib.util, pathlib, sys, unicodedata
+sys.dont_write_bytecode = True
+spec = importlib.util.spec_from_file_location("styles", pathlib.Path(sys.argv[3]) / "claude-send-screen.py")
+styles = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(styles)
 try:
     text = pathlib.Path(sys.argv[1]).read_bytes().decode("utf-8")
 except (OSError, UnicodeError):
@@ -119,7 +125,7 @@ if any(line != line.rstrip(" \t") for line in text.splitlines()):
     raise SystemExit("Error: prompt lines may not end in spaces or tabs")
 if sys.argv[2] == "1" and (
     len(text.encode("utf-8")) > 200 or text != text.rstrip() or text.endswith(";")
-    or not re.fullmatch(r"/[A-Za-z][A-Za-z0-9_-]*(?: [^\r\n\x00-\x1f\x7f]*)?", text)
+    or not styles.slash_command_syntax(text)
 ):
     raise SystemExit("Error: unsupported typed command")
 PY
@@ -129,6 +135,8 @@ PY
 preserve_pending() {
     local status=$1 reason=$2 stale_meta=''
     ((stale_draft_length == 0)) || stale_meta=" stale_draft_length=$stale_draft_length"
+    ((clear_attempted == 0)) || stale_meta+=" clear_attempted=true"
+    ((cleared_command_draft_length == 0)) || stale_meta+=" cleared_command_draft_length=$cleared_command_draft_length"
     pending_reported=1
     if [[ -z "$pending_dir" ]]; then
         state_dir="${XDG_STATE_HOME:-$HOME/.local/state}"
@@ -154,14 +162,14 @@ preserve_pending() {
 }
 handle_signal() {
     local name=$1 code=$2 status=deferred
-    ((paste_started)) && status=ambiguous
+    ((paste_started || clear_attempted)) && status=ambiguous
     preserve_pending "$status" "signal-$name"
     exit "$code"
 }
 handle_exit() {
     local rc=$? status=deferred
     if ((cleanup_prompt && rc != 0 && !pending_reported)); then
-        ((paste_started)) && status=ambiguous
+        ((paste_started || clear_attempted)) && status=ambiguous
         preserve_pending "$status" "sender-exit-$rc" || true
     fi
     cleanup
@@ -223,13 +231,15 @@ screen_state() {
 wait_start_ns=$(python3 -c 'import time; print(time.monotonic_ns())')
 delay=$poll_interval
 previous_state=''
+previous_harness=''
 stable_start_ns=$wait_start_ns
 while :; do
     state=$(screen_state 2>/dev/null || printf unknown)
+    current_harness=$(<"$harness_file")
     now_ns=$(python3 -c 'import time; print(time.monotonic_ns())')
     eligible=0
-    [[ "$state" == empty || ( ( "$state" == draft || "$state" == draft-home ) && $typed_command == 0 ) ]] && eligible=1
-    if ((eligible)) && [[ "$state" == "$previous_state" ]] && cmp -s "$observe_file" "$stable_file"; then
+    [[ "$state" == empty || "$state" == command || "$state" == command-home || ( ( "$state" == draft || "$state" == draft-home ) && $typed_command == 0 ) ]] && eligible=1
+    if ((eligible)) && [[ "$state" == "$previous_state" && "$current_harness" == "$previous_harness" ]] && cmp -s "$observe_file" "$stable_file"; then
         stable_ns=$((now_ns - stable_start_ns))
     else
         stable_start_ns=$now_ns
@@ -238,8 +248,9 @@ while :; do
     elapsed=$(awk -v n="$now_ns" -v s="$wait_start_ns" 'BEGIN { print (n-s)/1000000000 }')
     remaining=$(awk -v d="$max_wait" -v e="$elapsed" 'BEGIN { printf "%.3f",d-e }')
     awk -v r="$remaining" 'BEGIN { exit !(r > 0) }' || { preserve_pending deferred "composer-$state"; exit 2; }
-    if ((eligible)) && [[ "$previous_state" == "$state" ]] && ((stable_ns >= stable_window * 1000000000)) && cmp -s "$observe_file" "$stable_file"; then break; fi
+    if ((eligible)) && [[ "$previous_state" == "$state" && "$current_harness" == "$previous_harness" ]] && ((stable_ns >= stable_window * 1000000000)) && cmp -s "$observe_file" "$stable_file"; then break; fi
     previous_state=$state
+    previous_harness=$current_harness
     cp -- "$observe_file" "$stable_file"
     sleep_for=$(awk -v d="$delay" -v r="$remaining" 'BEGIN { if (d>r) d=r; printf "%.3f",d }')
     if ((eligible && stable_window > 0)); then
@@ -254,8 +265,9 @@ state=$(screen_state 2>/dev/null || printf unknown)
 elapsed=$(python3 -c 'import time,sys; print((time.monotonic_ns()-int(sys.argv[1]))/1e9)' "$wait_start_ns")
 remaining=$(awk -v d="$max_wait" -v e="$elapsed" 'BEGIN { printf "%.3f",d-e }')
 awk -v r="$remaining" 'BEGIN { exit !(r > 0) }' || { preserve_pending deferred final-pre-paste-timeout; exit 2; }
-if [[ "$state" != "$previous_state" ]] || ! cmp -s "$observe_file" "$stable_file"; then preserve_pending deferred "pre-paste-$state"; exit 2; fi
-if [[ "$state" == draft-home ]]; then
+if [[ "$state" != "$previous_state" || "$(<"$harness_file")" != "$previous_harness" ]] || ! cmp -s "$observe_file" "$stable_file"; then preserve_pending deferred "pre-paste-$state"; exit 2; fi
+if [[ "$state" == draft-home || "$state" == command-home ]]; then
+    end_state=${state%-home}
     stable_harness=$(<"$harness_file")
     "${TMUX_CMD[@]}" send-keys -t "$pane_id" End
     while :; do
@@ -263,12 +275,12 @@ if [[ "$state" == draft-home ]]; then
         elapsed=$(python3 -c 'import time,sys; print((time.monotonic_ns()-int(sys.argv[1]))/1e9)' "$wait_start_ns")
         remaining=$(awk -v d="$max_wait" -v e="$elapsed" 'BEGIN { printf "%.3f",d-e }')
         awk -v r="$remaining" 'BEGIN { exit !(r > 0) }' || { preserve_pending deferred cursor-navigation-unverified; exit 2; }
-        if [[ "$state" == draft || "$state" == draft-home ]]; then
+        if [[ "$state" == "$end_state" || "$state" == "$end_state-home" ]]; then
             if [[ "$(<"$harness_file")" != "$stable_harness" ]] || ! cmp -s "$observe_file" "$stable_file"; then
                 preserve_pending deferred cursor-navigation-unverified
                 exit 2
             fi
-            [[ "$state" != draft ]] || break
+            [[ "$state" != "$end_state" ]] || break
         elif [[ "$state" != unknown ]]; then
             preserve_pending deferred cursor-navigation-unverified
             exit 2
@@ -277,6 +289,38 @@ if [[ "$state" == draft-home ]]; then
         sleep_for=$(awk -v d="$poll_interval" -v r="$remaining" 'BEGIN { if (d>r) d=r; printf "%.3f",d }')
         sleep "$sleep_for"
     done
+fi
+if [[ "$state" == command ]]; then
+    stable_harness=$(<"$harness_file")
+    command_length=$(python3 -c 'import pathlib,sys; print(len(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8")))' "$stable_file")
+    clear_attempted=1
+    if ! "${TMUX_CMD[@]}" send-keys -t "$pane_id" C-u; then
+        preserve_pending ambiguous command-clear-failed
+        exit 3
+    fi
+    while :; do
+        state=$(screen_state 2>/dev/null || printf unknown)
+        elapsed=$(python3 -c 'import time,sys; print((time.monotonic_ns()-int(sys.argv[1]))/1e9)' "$wait_start_ns")
+        remaining=$(awk -v d="$max_wait" -v e="$elapsed" 'BEGIN { printf "%.3f",d-e }')
+        awk -v r="$remaining" 'BEGIN { exit !(r > 0) }' || { preserve_pending ambiguous command-clear-unverified; exit 3; }
+        if [[ "$state" == empty && "$(<"$harness_file")" == "$stable_harness" ]]; then
+            cleared_command_draft_length=$command_length
+            break
+        fi
+        if [[ "$state" != unknown ]] && { [[ "$state" != command || "$(<"$harness_file")" != "$stable_harness" ]] || ! cmp -s "$observe_file" "$stable_file"; }; then
+            preserve_pending ambiguous command-clear-unverified
+            exit 3
+        fi
+        # Incomplete repaint/unchanged command receives no further keys.
+        sleep_for=$(awk -v d="$poll_interval" -v r="$remaining" 'BEGIN { if (d>r) d=r; printf "%.3f",d }')
+        sleep "$sleep_for"
+    done
+    state=$(screen_state 2>/dev/null || printf unknown)
+    elapsed=$(python3 -c 'import time,sys; print((time.monotonic_ns()-int(sys.argv[1]))/1e9)' "$wait_start_ns")
+    if [[ "$state" != empty || "$(<"$harness_file")" != "$stable_harness" ]] || ! awk -v e="$elapsed" -v d="$max_wait" 'BEGIN { exit !(e < d) }'; then
+        preserve_pending ambiguous input-changed-after-clear
+        exit 3
+    fi
 fi
 if [[ "$state" == draft ]]; then
     stale_draft_length=$(python3 -c 'import pathlib,sys; print(len(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8")))' "$stable_file")
@@ -342,7 +386,9 @@ state=$(screen_state 2>/dev/null || printf unknown)
 "${TMUX_CMD[@]}" send-keys -t "$pane_id" Enter
 # A paste attempt remains irreversible even if reporting fails after Enter.
 # Only a normal exit suppresses retention; never classify this phase deferred.
-if ((stale_draft_length)); then
+if ((cleared_command_draft_length)); then
+    printf 'status=sent receipt=unverified clear_attempted=true cleared_command_draft_length=%s\n' "$cleared_command_draft_length"
+elif ((stale_draft_length)); then
     printf 'status=sent receipt=unverified stale_draft_length=%s\n' "$stale_draft_length"
 else
     printf 'status=sent receipt=unverified\n'

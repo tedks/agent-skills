@@ -73,7 +73,8 @@ combined input, then submit both. Results record only the co-submitted draft
 length, never its contents. Exception: a verified stable command-shaped draft
 is cleared without execution, then the outgoing message is sent only after
 empty input is verified. Its context may pre-empt the command. Results include
-`cleared_command_draft_length` and `clear_attempted`, never draft contents.
+`cleared_command_draft_length` after empty input is verified, and
+`clear_attempted` whenever clearing was attempted, never draft contents.
 Changing input, replay residue, modals and unsupported layouts still defer.
 Claude prompt suggestions are disabled fleet-wide; an ambiguous suggestion
 frame retains the conservative probe. One pane lock serializes cooperating

@@ -97,8 +97,8 @@ case "$cmd" in
     elif [[ "${*: -1}" == '#{cursor_x}:#{cursor_y}' ]]; then
       if [[ "$(<"$FAKE_STATE/mode")" == forkcompact && -s "$FAKE_STATE/pasted" ]]; then cursor='10:50'
       elif [[ "$(<"$FAKE_STATE/mode")" == forkcompact ]]; then cursor='2:50'
-      elif [[ "$(<"$FAKE_STATE/mode")" == busycontext-draft ]]; then cursor='12:2'
-      elif [[ "$(<"$FAKE_STATE/mode")" == busyqueue-draft ]]; then cursor='12:27'
+      elif [[ "$(<"$FAKE_STATE/mode")" == busycontext-draft ]]; then cursor="$(($(wc -m < "$FAKE_STATE/composer") + 2)):2"
+      elif [[ "$(<"$FAKE_STATE/mode")" == busyqueue-draft ]]; then cursor="$(($(wc -m < "$FAKE_STATE/composer") + 2)):27"
       elif [[ "$(<"$FAKE_STATE/mode")" == busycontext && -s "$FAKE_STATE/pasted" ]]; then cursor='57:2'
       elif [[ "$(<"$FAKE_STATE/mode")" == busycontext ]]; then cursor='2:2'
       elif [[ "$(<"$FAKE_STATE/mode")" == busyqueue && -s "$FAKE_STATE/pasted" ]]; then cursor='37:27'
@@ -130,6 +130,9 @@ PY
       kill -TERM "$(<"$FAKE_STATE/sender-pid")"
       exit 143
     fi
+    if [[ "$mode" == command-claude-prechange && $n -eq 3 || "$mode" == command-claude-finalrace && -s "$FAKE_STATE/cleared" && $n -eq $(($(<"$FAKE_STATE/clear-capture") + 2)) ]]; then
+      printf 'new human text' > "$FAKE_STATE/composer"
+    fi
     if [[ "$mode" == slow-first-own && $n -eq 4 ]]; then /usr/bin/sleep 1.2; fi
     if [[ "$mode" == slow-third-empty && $n -eq 3 ]]; then /usr/bin/sleep 1.2; fi
     if [[ "$mode" == slow-second-empty && $n -eq 2 ]]; then /usr/bin/sleep 1.2; fi
@@ -155,6 +158,8 @@ mode, draft, fixtures = sys.argv[1:]
 name, old = ('codex-generating-queue.ansi', 'Reply with exactly P141-QUEUED-TEST') if mode == 'busyqueue-draft' else ('codex-context-queue.ansi', 'S short control: reply S-BUSY-1 after the current task.')
 print(Path(fixtures, name).read_text().replace(old, Path(draft).read_text()), end='')
 PYQUEUE
+    elif [[ "$mode" == command-*-unknown* && -s "$FAKE_STATE/cleared" && ( "$mode" == *-timeout || $n -le $(($(<"$FAKE_STATE/clear-capture") + 2)) ) ]]; then
+      printf 'Starting Claude Code\n' > "$FAKE_STATE/last-screen"
     elif [[ "$mode" == forkcompact ]]; then
       if [[ -s "$FAKE_STATE/pasted" ]]; then
         cat "$FIXTURES/codex-fork-compact.ansi" > "$FAKE_STATE/last-screen"
@@ -197,13 +202,17 @@ import sys
 rows = Path(sys.argv[1]).read_text().splitlines()
 import os
 mode = Path(os.environ['FAKE_STATE'], 'mode').read_text().strip()
-codex = mode == 'stable-codex' or mode.startswith('home-codex')
+codex = mode == 'stable-codex' or mode.startswith(('home-codex', 'command-codex'))
 if not codex: print('─' * 40)
 else: print('')
 print(('› ' if codex else '❯\u00a0') + (rows[0] if rows else ''))
 for row in rows[1:]: print('  ' + row)
+if mode.endswith('-command-blank'): print('')
+if codex: print('')
 print('  Any model · Context 50% left' if codex else '─' * 40)
 PY
+        elif [[ "$mode" == command-claude-harness && -s "$FAKE_STATE/cleared" || "$mode" == command-codex* || "$mode" == home-codex* && -s "$FAKE_STATE/cleared" ]]; then
+          printf '\n› \n\n  Any model · Context 50%% left\n'
         elif [[ "$mode" == human || "$mode" == slash ]]; then
           if [[ "$mode" == slash ]]; then printf '────────────────────────────────────────\n❯ /compact\n────────────────────────────────────────\n'
           else printf '────────────────────────────────────────\n❯ human draft\n────────────────────────────────────────\n'; fi
@@ -234,6 +243,19 @@ PY
     rm -f "$FAKE_BUFFER_DIR/$b" ;;
   delete-buffer) printf 'delete-buffer\n' >> "$FAKE_LOG" ;;
   send-keys)
+    if [[ "${!#}" == C-u ]]; then
+      printf 'clear\n' >> "$FAKE_LOG"
+      cp "$FAKE_STATE/captures" "$FAKE_STATE/clear-capture"
+      printf attempted > "$FAKE_STATE/cleared"
+      if [[ "$(<"$FAKE_STATE/mode")" == *-clearfail ]]; then exit 1; fi
+      if [[ "$(<"$FAKE_STATE/mode")" == *-clearsignal ]]; then kill -TERM "$PPID"; exit 143; fi
+      case "$(<"$FAKE_STATE/mode")" in
+        *-noclear) ;;
+        *-changed) printf 'new human text' > "$FAKE_STATE/composer" ;;
+        *) : > "$FAKE_STATE/composer" ;;
+      esac
+      exit 0
+    fi
     if [[ "${!#}" == End ]]; then
       printf 'end\n' >> "$FAKE_LOG"
       cp "$FAKE_STATE/captures" "$FAKE_STATE/end-capture"
@@ -278,6 +300,8 @@ reset_case() {
   : > "$FAKE_STATE/mutated"
   : > "$FAKE_STATE/end-moved"
   printf 0 > "$FAKE_STATE/end-capture"
+  printf 0 > "$FAKE_STATE/clear-capture"
+  : > "$FAKE_STATE/cleared"
   : > "$FAKE_STATE/pasted"
   : > "$FAKE_STATE/captures"
   : > "$FAKE_STATE/sleeps"
@@ -314,6 +338,68 @@ assert_pending() {
 # The live Claude frame has a suggestion in an otherwise empty composer.
 prompt_file="$TEST_DIR/payload"
 printf 'alpha\nbeta' > "$prompt_file"
+
+# Command-shaped stable drafts are cancelled, never executed with the new message.
+{
+  failures=0
+  for mode in command-claude command-codex command-claude-unknown command-codex-unknown home-claude home-codex busyqueue-draft busycontext-draft; do
+    reset_case "$mode"
+    printf '/compact old context' > "$FAKE_STATE/composer"
+    expected_keys=$'clear\npaste-start\npaste-end\nenter'
+    [[ "$mode" != home-* ]] || expected_keys=$'end\n'"$expected_keys"
+    if out=$(run_sender %7 --submit-delay 0 --max-wait 3 'fresh control' 2>"$TEST_DIR/command.err") &&
+       [[ "$(<"$FAKE_LOG")" == "$expected_keys" && "$(<"$FAKE_STATE/submitted")" == 'fresh control' && "$out" == *'cleared_command_draft_length=20'* ]]; then
+      echo "PASS: $mode verified command clear before outgoing"
+    else echo "FAIL: $mode command was not cleared safely"; failures=$((failures + 1)); fi
+  done
+  reset_case command-claude
+  printf '/compact old context' > "$FAKE_STATE/composer"
+  if out=$(run_sender %7 --typed-command --submit-delay 0 --max-wait 3 '/status' 2>"$TEST_DIR/command.err") &&
+     [[ "$(<"$FAKE_LOG")" == $'clear\nenter' && "$(<"$FAKE_STATE/submitted")" == '/status' ]]; then
+    echo 'PASS: typed outgoing follows verified command clear'
+  else echo 'FAIL: typed outgoing command clear'; failures=$((failures + 1)); fi
+  for mode in command-claude-noclear command-codex-changed command-claude-unknown-timeout command-claude-clearfail command-claude-clearsignal command-claude-harness; do
+    reset_case "$mode"
+    printf '/compact old context' > "$FAKE_STATE/composer"
+    if run_sender %7 --submit-delay 0 --max-wait 1 'fresh control' >"$TEST_DIR/command.out" 2>"$TEST_DIR/command.err"; then rc=0; else rc=$?; fi
+    expected_rc=3
+    [[ "$mode" != *-clearsignal ]] || expected_rc=143
+    if [[ $rc -eq $expected_rc && "$(<"$FAKE_LOG")" == clear ]] && grep -q 'status=ambiguous.*clear_attempted=true' "$TEST_DIR/command.err" && ! grep -q cleared_command_draft_length "$TEST_DIR/command.err"; then
+      echo "PASS: $mode uncertain clear stops before outgoing"
+    else echo "FAIL: $mode uncertain clear safety"; failures=$((failures + 1)); fi
+  done
+  for mode in command-claude command-codex; do
+    reset_case "$mode"
+    printf '!echo old context' > "$FAKE_STATE/composer"
+    if out=$(run_sender %7 --submit-delay 0 --max-wait 3 'fresh control' 2>"$TEST_DIR/command.err") && [[ "$(<"$FAKE_STATE/submitted")" == 'fresh control' && "$out" == *'cleared_command_draft_length=17'* ]]; then
+      echo "PASS: $mode ordinary shortcut command clear"
+    else echo 'FAIL: shortcut command clear'; failures=$((failures + 1)); fi
+  done
+  for mode in command-claude-prechange command-claude-finalrace; do
+    reset_case "$mode"
+    printf '/compact old context' > "$FAKE_STATE/composer"
+    if run_sender %7 --submit-delay 0 --max-wait 3 'fresh control' >"$TEST_DIR/command.out" 2>"$TEST_DIR/command.err"; then rc=0; else rc=$?; fi
+    if [[ "$mode" == *-prechange && $rc -eq 2 && ! -s "$FAKE_LOG" || "$mode" == *-finalrace && $rc -eq 3 && "$(<"$FAKE_LOG")" == clear ]] && [[ "$(<"$FAKE_STATE/composer")" == 'new human text' ]]; then
+      echo "PASS: $mode race prevents outgoing"
+    else echo 'FAIL: command clear race'; failures=$((failures + 1)); fi
+  done
+  for draft in ' /compact' '/tmp/path' '/compact;' '/compact fresh control' '/compact [Pasted text #1 +2 lines]' '!' $'/compact\ncontext' "/compact $(printf '%0200d' 0)"; do
+    reset_case command-claude
+    printf '%s' "$draft" > "$FAKE_STATE/composer"
+    if run_sender %7 --submit-delay 0 --max-wait 1 'fresh control' >"$TEST_DIR/command.out" 2>"$TEST_DIR/command.err"; then rc=0; else rc=$?; fi
+    if [[ $rc -eq 2 && ! -s "$FAKE_LOG" ]]; then echo 'PASS: invalid command-like or replay draft preserved'
+    else echo 'FAIL: invalid command-like or replay draft modified'; failures=$((failures + 1)); fi
+  done
+  for mode in home-claude-command-blank home-codex-command-blank; do
+    reset_case "$mode"
+    printf '/compact' > "$FAKE_STATE/composer"
+    if run_sender %7 --submit-delay 0 --max-wait 1 'fresh control' >"$TEST_DIR/command.out" 2>"$TEST_DIR/command.err"; then rc=0; else rc=$?; fi
+    if [[ $rc -eq 2 && ! -s "$FAKE_LOG" ]]; then echo "PASS: $mode raw blank continuation protected"
+    else echo 'FAIL: raw command continuation cleared'; failures=$((failures + 1)); fi
+  done
+  ((failures == 0))
+  if [[ "${COMMAND_INPUT_ONLY:-0}" == 1 ]]; then exit; fi
+}
 
 # Busy queue frames support only single-line exact input: do not append newline to drafts.
 {

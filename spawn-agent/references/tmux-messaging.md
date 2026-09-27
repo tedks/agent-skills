@@ -81,7 +81,8 @@ command or retry clearing blindly. Long, malformed, multiline or unsupported
 command-like drafts defer; replay residue and collapsed markers take precedence
 and cannot authorize clearing.
 
-Results include `cleared_command_draft_length` and `clear_attempted`, never the
+Results include `cleared_command_draft_length` only after empty input is
+verified, and `clear_attempted` whenever clearing was attempted, never the
 command's contents. A failure after a clear attempt is ambiguous even if
 `input_attempted` and `paste_attempted` are false: those fields describe outgoing
 input only. The retained pending file still contains only the outgoing payload.

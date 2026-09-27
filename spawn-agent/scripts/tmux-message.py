@@ -296,11 +296,13 @@ class Sender:
         self.typed = getattr(options, "typed_command", False)
         self.expected = payload
         self.stale_draft_length = 0
+        self.clear_attempted = False
+        self.cleared_command_draft_length = 0
         if self.typed and getattr(options, "literal_exit", False):
             raise DeliveryError("conflicting-input-modes")
         if self.typed and (len(payload.encode("utf-8")) > 200 or payload != payload.rstrip() or payload.endswith(";")):
             raise DeliveryError("unsupported-typed-command")
-        if self.typed and not re.fullmatch(r"/[A-Za-z][A-Za-z0-9_-]*(?: [^\r\n\x00-\x1f\x7f]*)?", payload):
+        if self.typed and not styles.slash_command_syntax(payload):
             raise DeliveryError("unsupported-typed-command")
 
     def input_evidence(self, inp):
@@ -316,6 +318,9 @@ class Sender:
 
     def at_end(self, inp):
         return inp.cursor == (2 + styles.cell_width(inp.text.rsplit("\n", 1)[-1]), inp.text.count("\n"))
+
+    def command_shape(self, frame, inp):
+        return styles.command_rows(frame.raw, "❯" if inp.harness == "claude" else "›", inp.start, inp.end)
 
     def ready(self):
         deadline = self.clock() + self.o.max_wait
@@ -347,11 +352,13 @@ class Sender:
             if twice and now - stable_since >= getattr(self.o, "stable_window", self.o.stable_wait):
                 if inp.kind == "empty":
                     return frame, inp
-                if (inp.kind == "text" and not self.typed
+                if (inp.kind == "text" and (not self.typed or styles.command_draft(inp.text))
                         and not getattr(self.o, "literal_exit", False)
                         and not PASTE.search(inp.text)
                         and "[Pasted Content " not in inp.text
                         and not styles.contains_payload(inp.text, self.payload)
+                        and (not styles.command_like(inp.text)
+                             or (styles.command_draft(inp.text) and self.command_shape(frame, inp)))
                         and (self.at_end(inp) or ("\n" not in inp.text and inp.cursor == (2, 0)))):
                     return frame, inp
                 # Retirement's literal exit permits only Claude's canonical
@@ -378,6 +385,10 @@ class Sender:
         result = self._deliver()
         if self.stale_draft_length:
             result["stale_draft_length"] = self.stale_draft_length
+        if self.clear_attempted:
+            result["clear_attempted"] = True
+        if self.cleared_command_draft_length:
+            result["cleared_command_draft_length"] = self.cleared_command_draft_length
         return result
 
     def _deliver(self):
@@ -387,6 +398,8 @@ class Sender:
         before, check = self.sample()
         if check.fingerprint() != inp.fingerprint():
             raise DeliveryError("input-changed-before-paste")
+        if check.kind == "text" and styles.command_like(check.text) and not self.command_shape(before, check):
+            raise DeliveryError("input-changed-before-clear")
         if check.kind == "text" and not self.at_end(check):
             home = check
             self.tmux.keys("End")
@@ -405,6 +418,28 @@ class Sender:
                 # End can repaint through an unreadable frame or unchanged Home.
                 # Neither grants input authority; no more keys until exact end.
                 self.sleep(min(self.o.poll_interval, remaining))
+        if check.kind == "text" and styles.command_draft(check.text):
+            if not self.command_shape(before, check):
+                raise DeliveryError("input-changed-before-clear")
+            command = check
+            self.clear_attempted = True  # C-u may mutate even if tmux reports failure.
+            self.tmux.keys("C-u")
+            while True:
+                before, check = self.sample()
+                remaining = self.readiness_deadline - self.clock()
+                if remaining <= 0:
+                    raise DeliveryError("command-clear-unverified", 3)
+                if check.kind == "empty" and check.harness == command.harness and self.at_end(check):
+                    self.cleared_command_draft_length = len(command.text)
+                    break
+                if check.kind != "unknown" and check.fingerprint() != command.fingerprint():
+                    raise DeliveryError("command-clear-unverified", 3)
+                # Repaint may retain the command or be unreadable; never clear twice.
+                self.sleep(min(self.o.poll_interval, remaining))
+            before, check = self.sample()
+            if (self.clock() >= self.readiness_deadline or check.kind != "empty"
+                    or check.harness != command.harness or not self.at_end(check)):
+                raise DeliveryError("input-changed-after-clear", 3)
         baseline = records(before, check)
         literal = getattr(self.o, "literal_exit", False)
         if literal and (self.payload != "/exit" or check.harness != "claude"):
@@ -556,14 +591,21 @@ def main():
         return 0
     except (DeliveryError, OSError, subprocess.SubprocessError) as error:
         pasted = sender is not None and sender.pasted
-        code = error.code if isinstance(error, DeliveryError) else (3 if pasted else 2)
+        changed = pasted or (sender is not None and sender.clear_attempted)
+        code = error.code if isinstance(error, DeliveryError) else (3 if changed else 2)
+        if changed and code == 2:
+            code = 3
         reason = error.reason if isinstance(error, DeliveryError) else "tmux-operation-failed"
-        result = {"status": "ambiguous" if pasted else "deferred", "reason": reason,
-                  "pending_file": str(path), "needs_review": pasted or reason in {"unsupported-layout", "modal"},
+        result = {"status": "ambiguous" if changed else "deferred", "reason": reason,
+                  "pending_file": str(path), "needs_review": changed or reason in {"unsupported-layout", "modal"},
                   "paste_attempted": pasted and not sender.typed,
                   "input_attempted": pasted, "input_method": "typed" if o.typed_command or o.literal_exit else "paste",
                   "enters": sender.enters if sender else 0}
         if sender:
+            if sender.clear_attempted:
+                result["clear_attempted"] = True
+            if sender.cleared_command_draft_length:
+                result["cleared_command_draft_length"] = sender.cleared_command_draft_length
             if sender.stale_draft_length:
                 result["stale_draft_length"] = sender.stale_draft_length
             result["pane"] = sender.tmux.pane

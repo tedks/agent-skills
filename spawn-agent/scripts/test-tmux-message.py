@@ -48,11 +48,17 @@ class Terminal:
         self.end_paint_delay = 0
         self.end_requested_at = None
         self.end_unknown_frames = 0
+        self.clear_mode = 'empty'
+        self.clear_unknown_frames = 0
+        self.clear_requested = False
 
     def sleep(self, n): self.now += n
     def clock(self): return self.now
 
     def frame(self):
+        if self.clear_requested and self.clear_unknown_frames:
+            self.clear_unknown_frames -= 1
+            return m.Frame('', -1, -1)
         if self.end_requested_at is not None and self.end_unknown_frames:
             self.end_unknown_frames -= 1
             self.frames += 1
@@ -88,6 +94,12 @@ class Terminal:
             self.end_requested_at = self.now
             if not self.end_paint_delay:
                 self.home = False
+        if keys == ('C-u',):
+            self.clear_requested = True
+            if self.clear_mode == 'empty':
+                self.draft = ''
+            elif self.clear_mode == 'changed':
+                self.draft = 'new human text'
         if keys == ('Enter',):
             self.enters += 1
             if self.enters > self.dropped:
@@ -131,6 +143,172 @@ def deliver(t, **kw):
 
 
 class DeliveryTests(unittest.TestCase):
+    def test_command_draft_cleared_without_execution_both_harnesses(self):
+        for harness in ('codex', 'claude'):
+            for command in ('/compact old context', '!echo old context'):
+                for home in (False, True):
+                    with self.subTest(harness=harness, command=command, home=home):
+                        t = Terminal(draft=command)
+                        t.harness, t.home = harness, home
+                        result = deliver(t)
+                        self.assertEqual(t.actions, (['End'] if home else []) + ['C-u', 'paste', 'Enter'])
+                        self.assertEqual(t.submitted, t.payload)
+                        self.assertEqual(result['cleared_command_draft_length'], len(command))
+                        self.assertTrue(result['clear_attempted'])
+                        self.assertNotIn('stale_draft_length', result)
+
+    def test_command_clear_allows_typed_outgoing(self):
+        t = Terminal(payload='/status', draft='/compact old context')
+        result = deliver(t, typed_command=True)
+        self.assertEqual(t.actions, ['C-u', 'typed:/status', 'Enter'])
+        self.assertEqual(t.submitted, '/status')
+        self.assertTrue(result['clear_attempted'])
+
+    def test_command_like_invalid_or_replay_drafts_never_mutate(self):
+        for draft in (' /compact', '/tmp/path', '/compact;', '/compact ' + 'x' * 200,
+                      '/compact\ncontext', '!', '!echo\ncontext', '/compact hello',
+                      '/compact [Pasted text #1 +2 lines]'):
+            for harness in ('codex', 'claude'):
+                with self.subTest(draft=draft, harness=harness):
+                    t = Terminal(draft=draft)
+                    t.harness = harness
+                    with self.assertRaises(m.DeliveryError): deliver(t)
+                    self.assertEqual(t.actions, [])
+
+    def test_command_clear_unknown_repaint_then_empty(self):
+        for harness in ('codex', 'claude'):
+            t = Terminal(draft='/compact old context')
+            t.harness, t.clear_unknown_frames = harness, 2
+            deliver(t)
+            self.assertEqual(t.actions, ['C-u', 'paste', 'Enter'])
+            self.assertEqual(t.submitted, 'hello')
+
+    def test_command_clear_failure_never_sends_or_claims_cleared(self):
+        for mode, unknown in (('unchanged', 0), ('changed', 0), ('empty', 100)):
+            for harness in ('codex', 'claude'):
+                t = Terminal(draft='/compact old context')
+                t.harness, t.clear_mode, t.clear_unknown_frames = harness, mode, unknown
+                with tempfile.TemporaryDirectory() as tmp:
+                    path = Path(tmp) / 'message'
+                    path.write_text('hello')
+                    o = SimpleNamespace(max_wait=5, stable_wait=3, poll_interval=.25, backoff=False,
+                                        typed_command=False, submit_delay=1, render_wait=3, receipt_wait=8, retry_wait=3)
+                    sender = m.Sender(t, o, 'hello', path, t.clock, t.sleep)
+                    with self.assertRaisesRegex(m.DeliveryError, 'command-clear-unverified'):
+                        sender.deliver()
+                    self.assertEqual(t.actions, ['C-u'])
+                    self.assertTrue(sender.clear_attempted)
+                    self.assertFalse(sender.pasted)
+                    self.assertEqual(sender.cleared_command_draft_length, 0)
+
+    def test_command_clear_failure_main_metadata_keeps_only_outgoing(self):
+        for verified in (False, True):
+            with tempfile.TemporaryDirectory() as tmp:
+                pending = Path(tmp) / 'pending'
+                pending.mkdir()
+                t = Terminal(draft='/compact old context')
+                t.identity = '0:%1'
+                t.clear_mode = 'changed' if not verified else 'empty'
+                original = t.frame
+                count = 0
+                def frame():
+                    nonlocal count
+                    if t.clear_requested:
+                        count += 1
+                        if verified and count == 2: t.draft = 'new human text'
+                    return original()
+                t.frame = frame
+                o = m.options(['%1', '--stable-window', '0', '--submit-delay', '0', '--poll-interval', '.01', 'hello'])
+                err = io.StringIO()
+                with patch.object(m, 'options', return_value=o), patch.object(m, 'Tmux', return_value=t), patch.object(m, 'pane_lock', return_value=nullcontext()), patch.object(m.tempfile, 'mkdtemp', return_value=str(pending)), redirect_stderr(err):
+                    self.assertEqual(m.main(), 3)
+                result = json.loads(err.getvalue())
+                self.assertEqual(result['status'], 'ambiguous')
+                self.assertTrue(result['clear_attempted'])
+                self.assertFalse(result['input_attempted'])
+                self.assertFalse(result['paste_attempted'])
+                self.assertTrue(result['needs_review'])
+                self.assertEqual(result.get('cleared_command_draft_length', 0), 20 if verified else 0)
+                self.assertNotIn('old context', err.getvalue())
+                self.assertEqual((pending / 'message').read_bytes(), b'hello')
+
+    def test_command_clear_known_modal_harness_or_cursor_change_stops(self):
+        for kind in ('modal', 'harness', 'cursor'):
+            t = Terminal(draft='/compact old context')
+            old_frame = t.frame
+            def frame():
+                f = old_frame()
+                if t.clear_requested:
+                    if kind == 'modal': return m.Frame('Would you like to proceed?\n› yes\n', 2, 1)
+                    if kind == 'harness': return screen('', harness='claude')
+                    f.x = 3
+                return f
+            t.frame = frame
+            with self.assertRaisesRegex(m.DeliveryError, 'command-clear-unverified'): deliver(t)
+            self.assertEqual(t.actions, ['C-u'])
+
+    def test_command_draft_changing_or_final_preclear_race_no_keys(self):
+        for continuous in (False, True):
+            t = Terminal(draft='/compact old context')
+            old_frame = t.frame
+            def frame():
+                if continuous or t.frames == 2: t.draft += 'x'
+                return old_frame()
+            t.frame = frame
+            with self.assertRaises(m.DeliveryError): deliver(t, stable_wait=0)
+            self.assertEqual(t.actions, [])
+
+    def test_command_trailing_blank_rows_at_home_never_clear(self):
+        for harness in ('codex', 'claude'):
+            t = Terminal(draft='/compact\n')
+            t.harness, t.home = harness, True
+            old_frame = t.frame
+            def frame():
+                f = old_frame()
+                f.y -= 1
+                return f
+            t.frame = frame
+            with self.assertRaises(m.DeliveryError): deliver(t)
+            self.assertEqual(t.actions, [])
+
+    def test_command_clear_tmux_failure_main_is_ambiguous(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            pending = Path(tmp) / 'pending'
+            pending.mkdir()
+            t = Terminal(draft='/compact old context')
+            t.identity = '0:%1'
+            def keys(*keys):
+                t.actions.extend(keys)
+                raise OSError('private tmux detail')
+            t.keys = keys
+            o = m.options(['%1', '--stable-window', '0', '--poll-interval', '.01', 'hello'])
+            err = io.StringIO()
+            with patch.object(m, 'options', return_value=o), patch.object(m, 'Tmux', return_value=t), patch.object(m, 'pane_lock', return_value=nullcontext()), patch.object(m.tempfile, 'mkdtemp', return_value=str(pending)), redirect_stderr(err):
+                self.assertEqual(m.main(), 3)
+            result = json.loads(err.getvalue())
+            self.assertEqual(result['status'], 'ambiguous')
+            self.assertTrue(result['clear_attempted'])
+            self.assertTrue(result['needs_review'])
+            self.assertFalse(result['input_attempted'])
+            self.assertFalse(result['paste_attempted'])
+            self.assertNotIn('cleared_command_draft_length', result)
+            self.assertEqual(t.actions, ['C-u'])
+
+    def test_command_clear_final_empty_recheck_protects_new_text(self):
+        t = Terminal(draft='/compact old context')
+        old_frame = t.frame
+        count = 0
+        def frame():
+            nonlocal count
+            if t.clear_requested:
+                count += 1
+                if count == 2: t.draft = 'new human text'
+            return old_frame()
+        t.frame = frame
+        with self.assertRaisesRegex(m.DeliveryError, 'input-changed-after-clear'):
+            deliver(t)
+        self.assertEqual(t.actions, ['C-u'])
+
     def test_literal_and_typed_modes_conflict_before_input(self):
         t = ClaudeExitTerminal()
         with self.assertRaisesRegex(m.DeliveryError, 'conflicting-input-modes'):
@@ -848,7 +1026,7 @@ def typed_mutations():
         ('typed_length_tail', 'if self.typed and (len(payload.encode("utf-8")) > 200 or payload != payload.rstrip() or payload.endswith(";")):', 'if False:'),
         ('typed_failure_method', '"typed" if o.typed_command or o.literal_exit else "paste"', '"typed" if sender and sender.typed else "paste"'),
         ('typed_dispatch', 'self.tmux.type_command(self.payload)', 'self.tmux.paste(self.path)'),
-        ('typed_scope', 'if self.typed and not re.fullmatch(r"/[A-Za-z][A-Za-z0-9_-]*(?: [^\\r\\n\\x00-\\x1f\\x7f]*)?", payload):', 'if False:'),
+        ('typed_scope', 'if self.typed and not styles.slash_command_syntax(payload):', 'if False:'),
         ('literal', 'self.pane, "-l", "--", text', 'self.pane, "--", text'),
         ('typed_evidence', 'return inp.kind == "text" and inp.text == self.payload',
          'return paste_evidence(inp, self.payload)'),
