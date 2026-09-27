@@ -1244,6 +1244,17 @@ assert screen.observe(frame, 'outgoing', 6, 1, pathlib.Path(sys.argv[2])) == 'dr
                     deliver(t)
                 self.assertEqual((t.pastes, t.enters), (1, 1))
 
+    def test_claude_cosubmit_ignores_old_indented_full_body_in_sender_baseline(self):
+        draft, payload = 'Stable ordinary draft.', 'hello'
+        old_quote = ('Tool output before\n  ❯ ' + draft + '\n  ' + payload +
+                     '\nTool output after\n')
+        t = Terminal(payload=payload, draft=draft)
+        t.harness = 'claude'
+        t.history = old_quote
+        result = deliver(t)
+        self.assertEqual((result['status'], result['receipt']), ('delivered', 'submitted'))
+        self.assertEqual((t.pastes, t.enters), (1, 1))
+
     def test_measured_claude_marker_rejects_unowned_shapes(self):
         draft = 'Disposable retirement rehearsal reminder.'
         marker = '[Pasted text #1 +1 lines]'

@@ -112,10 +112,9 @@ existing receipt normalization for terminal wrapping. This public receipt
 check supports only the measured single blank separator; extra blank paragraphs
 and cropped views remain ambiguous. It only counts an explicit new column-zero
 `❯` user row before a recognized current composer;
-assistant prose,
-an archived composer, an incomplete or cropped block, and an unchanged old
-body do not confirm delivery. Other blank-row or queued layouts remain subject to the
-ordinary receipt parser and may stay ambiguous.
+assistant prose, an archived composer, an incomplete or cropped block, and an
+unchanged old body do not confirm delivery. Other blank-row or queued layouts
+remain subject to the ordinary receipt parser and may stay ambiguous.
 
 ## Stable command drafts
 
