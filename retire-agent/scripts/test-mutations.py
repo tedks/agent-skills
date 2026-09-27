@@ -9,6 +9,8 @@ import tempfile
 HERE = Path(__file__).resolve().parent
 source = (HERE / 'retire.py').read_text()
 mutations = [
+    ('narrowed event namespace', "r'[0-9a-f]{32}\\.json'", "r'[0-9a-f]{33}\\.json'", 'test_malformed_state_and_history_preserved'),
+    ('history event filename identity', "if existing.stem != previous['id']:", 'if False:', 'test_historical_event_filename_id_mismatch_preserved'),
     ('native Codex UI footer', "and len(tail) == 1", 'and False', 'test_codex_ui_footer_allows_marker_completion'),
     ('Codex footer harness attribution', "codex_footer = (self.state['identity']['process']['agent'] == 'codex'", "codex_footer = (True", 'test_claude_cannot_use_codex_ui_footer'),
     ('foreign private state namespace', "                           if re.fullmatch(r'[0-9a-f]{32}\\.json', path.name)", '', 'test_foreign_private_json_does_not_block_new_retirement'),

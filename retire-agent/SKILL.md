@@ -10,7 +10,8 @@ A saved handoff and an ended agent process are separate receipts. Preserve
 human input and leave a session open when either receipt cannot be established.
 Read [the shard and recovery contract](references/protocol.md) before invoking
 the script. Linux `/proc`, tmux, Git, Python 3 and the installed spawn-agent
-skill are required. Defaults: `~/Projects/off-duty` on `master`, origin private
+skill are required. The sender must provide the stable ordinary draft
+co-submission contract from dotfiles PR #156, plus guarded typed Claude exit. Defaults: `~/Projects/off-duty` on `master`, origin private
 on GitHub, and `~/Projects/orgs/master/doctrine/ROLES.md`.
 
 ## Modes
@@ -75,12 +76,26 @@ prove a resource owner's release claim.
 ## Repair verification
 
 Run `scripts/test-retire.py` and `scripts/test-mutations.py` for isolated
-behavior and guard-removal tests. `scripts/test-retire-native.py` is an opt-in
-model-token test: pass `--worktree` naming a trusted directory, `--evidence`
+behavior and guard-removal tests. Set `RETIRE_TEST_SHARED_SCRIPTS` to the
+published spawn-agent `scripts` directory to verify a dependency checkout;
+the default is this checkout's sibling spawn-agent.
+
+`scripts/test-retire-native.py` is an opt-in model-token test. Pass `--worktree`
+naming an exclusively owned, clean disposable Git directory, `--evidence`
 naming a new private directory, and `--shared-skill` naming the published
-spawn-agent installation. It launches real Codex and Claude on its own tmux
-server and verifies remote shard blobs, fresh harness exit notices and original
-process end. It retains private artifacts and releases only its owned server.
+spawn-agent installation. The cwd must be separate from the skill's source
+worktree. The launcher grants Claude trust only to that exact disposable cwd.
+The test compares cwd HEAD/status/tracked diff on success and failure, samples
+fresh exit notices, checks the actual local bare remote, and releases its owned
+server. These checks do not provide an OS sandbox or prove absence of writes
+elsewhere: real agents retain normal host access. The rehearsal prompt permits
+only assigned identity/shard files and forbids live publication or pane control.
+Artifacts are retained for inspection; source/shared heads and dirty state are
+recorded separately as fidelity evidence.
+
 `--stale-offer-draft` also exercises ordinary draft co-submission through the
-published sender. An optional `--baseline-script` runs the original history-discovery failure
-against the real Codex pane before checking the repaired flow.
+published sender. `--baseline-script` runs the original history-discovery
+failure against real Codex before checking the repaired flow. Observation
+continues with `--resume` after a delivered offer exhausts its first minute;
+it never resends that offer. Run without Python optimization so assertions
+remain enabled. SIGTERM unwinds the owned server cleanup.

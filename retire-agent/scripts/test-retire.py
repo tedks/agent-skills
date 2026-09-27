@@ -41,10 +41,11 @@ def terminal(directory, mode):
     directory = Path(directory)
     old = termios.tcgetattr(0)
     tty.setraw(0)
-    draft = b'human unfinished draft' if mode == 'draft' else b''
+    draft = b'human unfinished draft' if mode in ('draft', 'stable-draft') else b''
     pending = b''
     pasting = False
     pasted_payload = False
+    paste_prefix = b''
     pastes = enters = exit_enters = 0
     history = ''
     event = None
@@ -63,7 +64,10 @@ def terminal(directory, mode):
             else:
                 children.append(subprocess.Popen(['bash', '-c', 'exec -a ' + shlex.quote(name) + ' sleep 360']))
     def draw():
-        collapsed = f'[Pasted Content {len(draft.decode(errors="replace"))} chars]' if draft and mode != 'draft' else draft.decode(errors='replace')
+        plain_draft = mode == 'draft' or (mode in ('stable-draft', 'claude-exit-draft') and not pasted_payload)
+        collapsed = f'[Pasted Content {len(draft.decode(errors="replace"))} chars]' if draft and not plain_draft else draft.decode(errors='replace')
+        if mode == 'stable-draft' and pasted_payload and paste_prefix:
+            collapsed = paste_prefix.decode() + f'[Pasted Content {len(draft[len(paste_prefix):].decode())} chars]'
         body = history + '\r\n› ' + collapsed + '\r\n\r\n  Test model · branch\r\n'
         if mode.startswith('claude'):
             if mode == 'claude-ghost' and event and not draft:
@@ -118,6 +122,7 @@ def terminal(directory, mode):
             while pending:
                 if pending.startswith(b'\x1b[200~'):
                     pastes += 1
+                    paste_prefix = draft
                     pasting = True
                     pasted_payload = True
                     pending = pending[6:]
@@ -195,6 +200,8 @@ def terminal(directory, mode):
                                 hook.write_text('#!/bin/sh\nexit 1\n')
                                 hook.chmod(0o700)
                         history = ('❯' if mode.startswith('claude') else '›') + ' [Pasted Content ' + str(len(payload)) + ' chars]\r\n'
+                        if mode == 'stable-draft' and paste_prefix:
+                            history = '› ' + paste_prefix.decode() + ' [Pasted Content ' + str(len(payload) - len(paste_prefix.decode())) + ' chars]\r\n'
                         if mode.startswith('claude'):
                             history = '• Messages to be submitted after next tool call\r\n  ↳ [Pasted Content ' + str(len(payload)) + ' chars]\r\n'
                         if mode == 'ambiguous':
@@ -223,7 +230,7 @@ def terminal(directory, mode):
                                         history += '  Do not retire yet; recovery still needs correction.\r\n'
                                     elif mode.endswith('later-assistant'):
                                         history += '● Recovery still needs correction.\r\n'
-                        draft = ('● RETIRE-DONE-' + event).encode() if mode in ('composer', 'claude-composer') else b''
+                        draft = ('● RETIRE-DONE-' + event).encode() if mode in ('composer', 'claude-composer') else (b'ordinary human draft' if mode == 'claude-exit-draft' else b'')
                         pasted_payload = False
                     else:
                         draft += char
@@ -378,6 +385,13 @@ class Tests(unittest.TestCase):
         self.assertIn('wait in (0,1800]', usage.stderr)
         self.assertNotIn('Traceback', usage.stderr)
 
+    def test_wait_zero_rejected_and_maximum_accepted(self):
+        self.actor()
+        self.assertEqual(self.invoke('--wait', '0').returncode, 2)
+        result = self.invoke('--wait', '1800')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.observed()['exit_enters'], 1)
+
     def test_twenty_minute_wait_is_accepted(self):
         self.actor()
         result = self.invoke('--wait', '1200')
@@ -405,6 +419,30 @@ class Tests(unittest.TestCase):
         index = (self.repo / 'waiting' / 'INDEX.md').read_text()
         self.assertIn('Session | Provider | Role | State | Last verified', index)
         self.assertIn('test-session-id | OpenAI | Utility | retired', index)
+
+    def test_stable_ordinary_offer_draft_is_co_submitted(self):
+        self.actor('stable-draft')
+        result = self.invoke()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.observed()['pastes'], 2)  # combined offer plus Codex exit
+        self.assertEqual(self.state()[1]['offer']['stale_draft_length'], len('human unfinished draft'))
+        self.assertEqual(self.observed()['exit_enters'], 1)
+
+    def test_claude_stable_ordinary_draft_defers_literal_exit(self):
+        self.actor('claude-exit-draft')
+        result = self.invoke()
+        self.assertEqual(result.returncode, 2, result.stderr)
+        self.assertIn('exit deferred before submission', result.stderr)
+        state = self.state()[1]
+        self.assertEqual(state['exit']['status'], 'deferred')
+        self.assertFalse(state['exit']['input_attempted'])
+        self.assertEqual(state['exit']['input_method'], 'typed')
+        self.assertEqual(state['exit']['enters'], 0)
+        self.assertEqual(self.observed()['pastes'], 1)
+        self.assertFalse((self.directory / 'exit-order.json').exists())
+        self.assertIn('ordinary human draft', self.command(*self.tmux, 'capture-pane', '-p', '-t', self.pane))
+        self.assertTrue(state.get('handoff_receipt'))
+        self.assertEqual(self.git('rev-parse', 'origin/master:' + state['shard']), state['shard_hash'])
 
     def test_changing_draft_preserved_without_paste(self):
         self.actor('draft')
@@ -786,6 +824,20 @@ class Tests(unittest.TestCase):
         self.assertEqual(result.returncode, 2, result.stderr)
         self.assertIn('malformed retirement state', result.stderr)
         self.assertEqual(history.read_text(), '[]')
+        self.assertEqual(self.observed()['pastes'], before)
+
+    def test_historical_event_filename_id_mismatch_preserved(self):
+        self.actor('decline')
+        self.invoke()
+        path, state = self.state()
+        wrong = path.parent / ('f' * 32 + '.json')
+        content = json.dumps(dict(state, id='0' * 32))
+        wrong.write_text(content)
+        before = self.observed()['pastes']
+        result = self.invoke()
+        self.assertEqual(result.returncode, 2, result.stderr)
+        self.assertIn('malformed historical retirement event identity', result.stderr)
+        self.assertEqual(wrong.read_text(), content)
         self.assertEqual(self.observed()['pastes'], before)
 
     def test_malformed_receipt_and_index_preserved(self):
