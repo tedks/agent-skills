@@ -319,7 +319,12 @@ def terminal(directory, mode):
                                     if mode == 'padded-marker':
                                         history = history[:-2] + '   \t\r\n'
                                     if 'codex-footer' in mode:
-                                        history += '  Worked for 1m 21s · 12:23\r\n'
+                                        footer = '  Worked for 1m 21s · 12:23'
+                                        if 'hours' in mode:
+                                            footer = '  Worked for 1h 8m 53s · 02:26'
+                                        elif 'time-only' in mode:
+                                            footer = '  02:55'
+                                        history += footer + '\r\n'
                                         if mode.endswith('padded-footer'):
                                             history = history[:-2] + '   \t\r\n'
                                         if mode.endswith('extra-prose'):
@@ -1836,6 +1841,16 @@ class Tests(unittest.TestCase):
         result = self.invoke()
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(self.observed()['exit_enters'], 1)
+
+    def test_codex_ui_footer_with_hours_allows_marker_completion(self):
+        self.actor('done-codex-footer-hours')
+        result = self.invoke()
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_codex_ui_footer_time_only_allows_marker_completion(self):
+        self.actor('done-codex-footer-time-only')
+        result = self.invoke()
+        self.assertEqual(result.returncode, 0, result.stderr)
 
     def test_codex_ui_footer_trailing_padding_is_allowed(self):
         self.actor('done-codex-footer-padded-footer')

@@ -24,7 +24,7 @@ mutations = [
     ('same-session exit notice', "re.escape(command + session_id)", "re.escape(command) + r'[0-9a-f-]+'", 'test_wrong_session_exit_notice_is_pending'),
     ('exit notice required', 'self.ended() and self.fresh_exit_notice(session_id)', 'self.ended()', 'test_missing_exit_notice_is_pending'),
     ('Codex footer single row', 'and len(tail) == 1', 'and True', 'test_codex_ui_footer_never_hides_additional_prose'),
-    ('Codex footer full row', "and re.fullmatch(r'  Worked for", "and re.search(r'  Worked for", 'test_codex_ui_footer_same_row_prose_is_pending'),
+    ('Codex footer full row', "and re.fullmatch(r'  (?:Worked for", "and re.search(r'  (?:Worked for", 'test_codex_ui_footer_same_row_prose_is_pending'),
     ('exit requires attempted input', "or (attempt.get('status') == 'ambiguous' and attempt.get('input_attempted') is True)", "or (attempt.get('status') == 'deferred')", 'test_deferred_positive_enter_is_not_exit_request'),
     ('fresh exit notice baseline', "self.exit_notice_count(session_id) > baseline['before']", "self.exit_notice_count(session_id) >= baseline['before']", 'test_exit_notice_requires_native_banner_and_fresh_requested_input'),
     ('native exit notice banner', r"prefix + r'[ \t]*'", r"r'[ \t]*'", 'test_exit_notice_requires_native_banner_and_fresh_requested_input'),
