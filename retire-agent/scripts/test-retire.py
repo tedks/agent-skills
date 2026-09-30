@@ -190,6 +190,11 @@ def terminal(directory, mode):
                 history = '• Assistant output cleared.\r\n'
                 cleared.unlink()
                 draw()
+            fresh_decline = directory / 'human-fresh-decline'
+            if fresh_decline.exists():
+                history = '● RETIRE-DECLINED-' + event + '\r\n'
+                fresh_decline.unlink()
+                draw()
             new_draft = directory / 'human-typed-draft'
             if new_draft.exists():
                 draft = b'human new draft'
@@ -285,7 +290,7 @@ def terminal(directory, mode):
                                 target = directory / 'outside.json'
                                 target.write_text(json.dumps(data))
                                 shard.symlink_to(target)
-                            elif mode != 'decline':
+                            elif mode not in ('decline', 'ambiguous-decline'):
                                 shard.write_text(json.dumps(data))
                             if mode == 'push-reject':
                                 hook = directory / 'remote.git' / 'hooks' / 'pre-receive'
@@ -304,7 +309,8 @@ def terminal(directory, mode):
                             history = 'Assistant continues without acceptance evidence.\r\n'
                             if mode != 'ambiguous':
                                 marker_event = '0' * 32 if mode == 'ambiguous-done-wrong' else event
-                                history += '● RETIRE-DONE-' + marker_event + '\r\n'
+                                disposition = 'DECLINED' if mode == 'ambiguous-decline' else 'DONE'
+                                history += '● RETIRE-' + disposition + '-' + marker_event + '\r\n'
                                 if mode == 'ambiguous-done-suffix':
                                     history += '  Shard still needs correction.\r\n'
                                 if mode == 'ambiguous-done-background':
@@ -1205,6 +1211,31 @@ class Tests(unittest.TestCase):
                 self.assertEqual(self.observed().get('exit_enters', 0), 0)
         payload.unlink()
         payload.write_bytes(original)
+
+    def test_ambiguous_offer_caller_decline_requires_current_marker(self):
+        self.actor('ambiguous-decline')
+        self.assertEqual(self.invoke().returncode, 2)
+        path, state = self.state()
+        self.assertEqual(state['offer']['status'], 'ambiguous')
+        result = self.invoke('--resume', str(path))
+        self.assertEqual(result.returncode, 2)
+        self.assertEqual(self.state()[1]['disposition'], 'DECLINED')
+        shard = path.with_suffix('.shard')
+        data = shard_data(state['id'], state['identity'])
+        data.update(author='caller', declined=True, provenance='caller from committed artifacts; agent declined')
+        shard.write_text(json.dumps(data))
+        (self.directory / 'human-cleared-history').touch()
+        self.wait_for(lambda: 'Assistant output cleared.' in self.command(*self.tmux, 'capture-pane', '-p', '-t', self.pane))
+        result = self.invoke('--resume', str(path), '--caller-shard')
+        self.assertEqual(result.returncode, 2)
+        self.assertIn('current observed agent decline', result.stderr)
+        self.assertNotIn('handoff_receipt', self.state()[1])
+        self.assertEqual(self.observed()['pastes'], 1)
+        (self.directory / 'human-fresh-decline').touch()
+        self.wait_for(lambda: 'RETIRE-DECLINED-' + state['id'] in self.command(*self.tmux, 'capture-pane', '-p', '-t', self.pane))
+        result = self.invoke('--resume', str(path), '--caller-shard')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.observed()['pastes'], 1)
 
     def test_private_and_missing_remotes_before_send(self):
         self.actor()

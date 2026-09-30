@@ -211,7 +211,9 @@ prose; the caller must audit those before requesting retirement.
 Observation consumes only spawn-agent's published `read_response_rows(pane,
 socket)` and `DeliveryError` Python contract. It excludes archived redraws and
 the live composer. Keep the final marker visible until the controller records
-DONE; after that, resume uses the recorded disposition and revalidates identity.
+DONE. For an ambiguous offer, every resume before the handoff receipt rechecks
+the exact preserved offer and current final marker, even after a recorded DONE
+or DECLINED. A delivered offer may use its recorded disposition on resume.
 The socket is pinned in private state and reused for observation and transport;
 server failure is not evidence that the pane disappeared. Recognized
 `codex mcp-server` support processes are excluded from harness identity, but
