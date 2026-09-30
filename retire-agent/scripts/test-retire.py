@@ -708,6 +708,13 @@ class Tests(unittest.TestCase):
         self.actor(mode)
         result = self.invoke()
         self.assertEqual(result.returncode, 2, result.stderr)
+        if 'offer ambiguous;' in result.stderr:
+            path, state = self.state()
+            self.assertTrue(state['offer']['paste_attempted'])
+            self.assertGreaterEqual(state['offer']['enters'], 1)
+            pastes = self.observed()['pastes']
+            result = self.invoke('--resume', str(path))
+            self.assertEqual(self.observed()['pastes'], pastes)
         self.assertIn('native session binding differs or unavailable', result.stderr)
         self.assertNotIn('exit', self.state()[1])
 
@@ -1133,6 +1140,7 @@ class Tests(unittest.TestCase):
         self.actor('ambiguous-done')
         self.assertEqual(self.invoke().returncode, 2)
         path, state = self.state()
+        self.assertEqual(self.invoke('--resume', str(path), '--retry-deferred', 'offer').returncode, 2)
         original = path.read_bytes()
         for key, value in (('enters', 0), ('input_attempted', False), ('paste_attempted', False),
                            ('pane', '%999'), ('input_method', 'typed'), ('payload', '/tmp/foreign')):
@@ -1152,6 +1160,51 @@ class Tests(unittest.TestCase):
         self.assertEqual(self.invoke('--resume', str(path)).returncode, 2)
         self.assertEqual(self.observed().get('exit_enters', 0), 0)
         self.assertNotIn('handoff_receipt', self.state()[1])
+
+    def test_ambiguous_offer_rechecks_cached_done_after_bad_shard(self):
+        self.actor('ambiguous-done')
+        self.assertEqual(self.invoke().returncode, 2)
+        path, _ = self.state()
+        shard = path.with_suffix('.shard')
+        original = shard.read_bytes()
+        data = json.loads(original)
+        data['session_id'] = 'unknown'
+        shard.write_text(json.dumps(data))
+        self.assertEqual(self.invoke('--resume', str(path)).returncode, 2)
+        self.assertEqual(self.state()[1]['disposition'], 'DONE')
+        shard.write_bytes(original)
+        (self.directory / 'human-cleared-history').touch()
+        self.wait_for(lambda: 'Assistant output cleared.' in self.command(*self.tmux, 'capture-pane', '-p', '-t', self.pane))
+        result = self.invoke('--resume', str(path))
+        self.assertEqual(result.returncode, 2)
+        self.assertIn('DONE not observed', result.stderr)
+        self.assertNotIn('handoff_receipt', self.state()[1])
+        self.assertEqual(self.observed()['pastes'], 1)
+        self.assertEqual(self.observed().get('exit_enters', 0), 0)
+
+    def test_ambiguous_offer_rejects_changed_missing_or_symlink_payload(self):
+        self.actor('ambiguous-done')
+        self.assertEqual(self.invoke().returncode, 2)
+        path, state = self.state()
+        payload = Path(state['offer']['payload'])
+        original = payload.read_bytes()
+        for variant in ('fragments', 'missing', 'symlink'):
+            with self.subTest(variant=variant):
+                payload.unlink(missing_ok=True)
+                if variant == 'fragments':
+                    payload.write_text('Event ' + state['id'] + '.\nidentity '
+                                       + json.dumps(state['identity']) + '\nRETIRE-DONE-' + state['id'])
+                elif variant == 'symlink':
+                    target = self.directory / 'foreign-offer'
+                    target.write_bytes(original)
+                    payload.symlink_to(target)
+                result = self.invoke('--resume', str(path))
+                self.assertEqual(result.returncode, 2)
+                self.assertNotIn('handoff_receipt', self.state()[1])
+                self.assertEqual(self.observed()['pastes'], 1)
+                self.assertEqual(self.observed().get('exit_enters', 0), 0)
+        payload.unlink()
+        payload.write_bytes(original)
 
     def test_private_and_missing_remotes_before_send(self):
         self.actor()
