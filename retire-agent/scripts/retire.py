@@ -401,12 +401,13 @@ class Retirement:
         tail = [row for row in rows[position + 1:]
                 if row.strip() and not (len(row.strip()) >= 3 and set(row.strip()) == {'─'})]
         # Codex renders this measured UI duration/time line after a final reply
-        # ("Worked for 1m 21s · 12:23", with hours for long turns, or the bare
-        # time for sub-minute turns). It is not agent prose; permit one exact
+        # ("Worked for 1m 21s · 12:23" or "Worked for 19s • 19:35", with
+        # hours for long turns, or the bare time for sub-minute turns).
+        # It is not agent prose; permit one exact
         # footer only for pinned Codex.
         codex_footer = (self.state['identity']['process']['agent'] == 'codex'
                         and len(tail) == 1
-                        and re.fullmatch(r'  (?:Worked for (?:[1-9][0-9]*h )?(?:[1-9][0-9]*m )?[0-5]?[0-9]s · )?(?:[01][0-9]|2[0-3]):[0-5][0-9]', tail[0].rstrip()))
+                        and re.fullmatch(r'  (?:Worked for (?:[1-9][0-9]*h )?(?:[1-9][0-9]*m )?[0-5]?[0-9]s [·•] )?(?:[01][0-9]|2[0-3]):[0-5][0-9]', tail[0].rstrip()))
         # Claude 2.1.283 emits this native turn-duration row plus a padded
         # token status row. Verb pool/glyph/duration were verified in its local
         # renderer; only the measured default 12-hour done time is recognized.

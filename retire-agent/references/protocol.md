@@ -17,7 +17,7 @@ or a later assistant response keeps completion pending. Trailing UI whitespace
 is ignored. Blank rows and the
 pure horizontal Claude composer separator are permitted suffix rows. A pinned
 Codex target may also render one measured UI footer `  Worked for 1m 21s · 12:23`
-(the duration and 24-hour time vary). Only that anchored minute/second/time
+or `  Worked for 19s • 19:35` (the duration and 24-hour time vary). Only that anchored minute/second/time
 layout is recognized; additional prose, duplicate footers, other status text,
 and that footer on a Claude target still keep completion pending.
 A pinned Claude target may render one native duration row followed by one padded

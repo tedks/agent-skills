@@ -340,6 +340,8 @@ def terminal(directory, mode):
                                             footer = '  Worked for 1h 8m 53s · 02:26'
                                         elif 'time-only' in mode:
                                             footer = '  02:55'
+                                        elif 'bullet' in mode:
+                                            footer = '  Worked for 19s • 19:35'
                                         history += footer + '\r\n'
                                         if mode.endswith('padded-footer'):
                                             history = history[:-2] + '   \t\r\n'
@@ -2013,6 +2015,15 @@ class Tests(unittest.TestCase):
         self.actor('done-codex-footer-hours')
         result = self.invoke()
         self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_codex_ui_bullet_footer_allows_marker_completion(self):
+        self.actor('done-codex-footer-bullet')
+        result = self.invoke()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.observed()['exit_enters'], 1)
+
+    def test_codex_ui_bullet_footer_same_row_prose_is_pending(self):
+        self.assert_completion_block_pending('done-codex-footer-bullet-same-row-prose')
 
     def test_codex_ui_footer_time_only_allows_marker_completion(self):
         self.actor('done-codex-footer-time-only')
