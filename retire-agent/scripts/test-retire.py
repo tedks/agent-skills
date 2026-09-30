@@ -300,8 +300,18 @@ def terminal(directory, mode):
                             history = '› ' + paste_prefix.decode(errors='replace') + '[Pasted Content ' + str(len(payload) - len(paste_prefix.decode(errors='replace'))) + ' chars]\r\n'
                         if mode.startswith('claude'):
                             history = '• Messages to be submitted after next tool call\r\n  ↳ [Pasted Content ' + str(len(payload)) + ' chars]\r\n'
-                        if mode == 'ambiguous':
+                        if mode.startswith('ambiguous'):
                             history = 'Assistant continues without acceptance evidence.\r\n'
+                            if mode != 'ambiguous':
+                                marker_event = '0' * 32 if mode == 'ambiguous-done-wrong' else event
+                                history += '● RETIRE-DONE-' + marker_event + '\r\n'
+                                if mode == 'ambiguous-done-suffix':
+                                    history += '  Shard still needs correction.\r\n'
+                                if mode == 'ambiguous-done-background':
+                                    history += '  Worked for 2m 4s · 11:47\r\n'
+                                    history += '1 background terminal running · /ps to view · /stop to close\r\n'
+                                if mode == 'ambiguous-done-time':
+                                    history += '  11:46\r\n'
                         else:
                             history += '• Accepted\r\n'
                             if payload != '/exit' and mode not in ('composer', 'claude-composer'):
@@ -1069,6 +1079,79 @@ class Tests(unittest.TestCase):
         self.assertEqual(self.invoke('--resume', str(path)).returncode, 2)
         self.assertEqual(self.invoke('--resume', str(path), '--retry-deferred', 'offer').returncode, 2)
         self.assertEqual(self.observed()['pastes'], count)
+
+    def test_ambiguous_offer_observed_done_resumes_without_replay(self):
+        self.actor('ambiguous-done')
+        self.assertEqual(self.invoke().returncode, 2)
+        path, state = self.state()
+        self.assertEqual(state['offer']['status'], 'ambiguous')
+        self.assertEqual(self.observed()['pastes'], 1)
+        resumed = self.invoke('--resume', str(path))
+        self.assertEqual(resumed.returncode, 0, resumed.stderr)
+        state = self.state()[1]
+        self.assertEqual(state['offer']['status'], 'ambiguous')
+        self.assertEqual(state['disposition'], 'DONE')
+        self.assertEqual(self.observed()['pastes'], 1)
+        self.assertEqual(self.observed()['exit_enters'], 1)
+        ledger = [json.loads(line) for line in path.with_suffix('.jsonl').read_text().splitlines()]
+        self.assertTrue(any(row['action'] == 'ambiguous-offer-completion-observed'
+                            and row['disposition'] == 'DONE' for row in ledger))
+
+    def test_ambiguous_offer_time_only_footer_is_completion(self):
+        self.actor('ambiguous-done-time')
+        self.assertEqual(self.invoke().returncode, 2)
+        path, _ = self.state()
+        self.assertEqual(self.invoke('--resume', str(path)).returncode, 0)
+        self.assertEqual(self.observed()['pastes'], 1)
+
+    def test_ambiguous_offer_wrong_or_extra_completion_stays_pending(self):
+        self.actor('ambiguous-done-wrong')
+        self.assertEqual(self.invoke().returncode, 2)
+        path, _ = self.state()
+        self.assertEqual(self.invoke('--resume', str(path)).returncode, 2)
+        self.assertNotIn('handoff_receipt', self.state()[1])
+        self.assertEqual(self.observed()['pastes'], 1)
+        self.assertEqual(self.observed().get('exit_enters', 0), 0)
+
+    def test_ambiguous_offer_suffix_stays_pending(self):
+        self.actor('ambiguous-done-suffix')
+        self.assertEqual(self.invoke().returncode, 2)
+        path, _ = self.state()
+        self.assertEqual(self.invoke('--resume', str(path)).returncode, 2)
+        self.assertNotIn('handoff_receipt', self.state()[1])
+        self.assertEqual(self.observed().get('exit_enters', 0), 0)
+
+    def test_ambiguous_offer_background_status_stays_pending(self):
+        self.actor('ambiguous-done-background')
+        self.assertEqual(self.invoke().returncode, 2)
+        path, _ = self.state()
+        self.assertEqual(self.invoke('--resume', str(path)).returncode, 2)
+        self.assertNotIn('handoff_receipt', self.state()[1])
+        self.assertEqual(self.observed().get('exit_enters', 0), 0)
+
+    def test_ambiguous_offer_positive_input_and_shard_gates(self):
+        self.actor('ambiguous-done')
+        self.assertEqual(self.invoke().returncode, 2)
+        path, state = self.state()
+        original = path.read_bytes()
+        for key, value in (('enters', 0), ('input_attempted', False), ('paste_attempted', False),
+                           ('pane', '%999'), ('input_method', 'typed'), ('payload', '/tmp/foreign')):
+            with self.subTest(key=key):
+                changed = json.loads(original)
+                changed['offer'][key] = value
+                path.write_text(json.dumps(changed))
+                self.assertEqual(self.invoke('--resume', str(path)).returncode, 2)
+                self.assertEqual(self.observed()['pastes'], 1)
+                self.assertEqual(self.observed().get('exit_enters', 0), 0)
+                self.assertNotIn('handoff_receipt', self.state()[1])
+        path.write_bytes(original)
+        shard = path.with_suffix('.shard')
+        data = json.loads(shard.read_text())
+        data['session_id'] = 'unknown'
+        shard.write_text(json.dumps(data))
+        self.assertEqual(self.invoke('--resume', str(path)).returncode, 2)
+        self.assertEqual(self.observed().get('exit_enters', 0), 0)
+        self.assertNotIn('handoff_receipt', self.state()[1])
 
     def test_private_and_missing_remotes_before_send(self):
         self.actor()

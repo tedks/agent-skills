@@ -10,6 +10,9 @@ import tempfile
 HERE = Path(__file__).resolve().parent
 source = (HERE / 'retire.py').read_text()
 mutations = [
+    ('ambiguous offer observe-only recovery', 'if ambiguous_offer:\n                        self.observe_ambiguous_offer()', 'if False:\n                        self.observe_ambiguous_offer()', 'test_ambiguous_offer_observed_done_resumes_without_replay'),
+    ('ambiguous offer positive Enter', "or type(attempt.get('enters')) is not int or attempt['enters'] < 1", 'or False', 'test_ambiguous_offer_positive_input_and_shard_gates'),
+    ('ambiguous offer pinned payload', "or attempt.get('payload') != str(expected)", 'or False', 'test_ambiguous_offer_positive_input_and_shard_gates'),
     ('narrowed event namespace', "r'[0-9a-f]{32}\\.json'", "r'[0-9a-f]{33}\\.json'", 'test_malformed_state_and_history_preserved'),
     ('history event filename identity', "if existing.stem != previous['id']:", 'if False:', 'test_historical_event_filename_id_mismatch_preserved'),
     ('native Codex UI footer', "and len(tail) == 1", 'and False', 'test_codex_ui_footer_allows_marker_completion'),

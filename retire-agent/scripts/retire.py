@@ -349,6 +349,27 @@ class Retirement:
         if self.state[phase]['status'] != 'delivered':
             raise Stop(f'{phase} {self.state[phase]["status"]}; exact payload preserved')
 
+    def observe_ambiguous_offer(self):
+        """Permit observation after a proven offer input attempt, never a resend."""
+        attempt = self.state.get('offer', {})
+        expected = self.path.parent / (self.state['id'] + '-offer.txt')
+        if (not self.args.resume or attempt.get('status') != 'ambiguous'
+                or attempt.get('input_attempted') is not True
+                or attempt.get('paste_attempted') is not True
+                or type(attempt.get('enters')) is not int or attempt['enters'] < 1
+                or attempt.get('input_method') != 'paste'
+                or attempt.get('pane') != self.args.pane
+                or attempt.get('payload') != str(expected)
+                or expected.is_symlink() or not expected.is_file()):
+            raise Stop('ambiguous offer lacks pinned positive input evidence; never replay')
+        payload = expected.read_text()
+        event = self.state['id']
+        if (f'Event {event}.' not in payload or f'RETIRE-DONE-{event}' not in payload
+                or f'identity {json.dumps(self.state["identity"])}' not in payload):
+            raise Stop('preserved ambiguous offer payload does not match pinned event')
+        self.verify_identity()
+        self.audit('ambiguous-offer-observe-only', phase='offer', status='ambiguous')
+
     def observe(self):
         self.verify_identity()
         try:
@@ -698,7 +719,11 @@ class Retirement:
             if not self.args.caller_shard:
                 if self.state.get('disposition') != 'DONE':
                     protocol = Path(__file__).resolve().parents[1] / 'references' / 'protocol.md'
-                    self.send('offer', f'Thank you for your work. Every agent at every tier is offered retirement and off-duty time. Event {event}. Stop product work; preserve operational recovery separately from any personal thanks. Read {protocol} and write {shard} using its complete JSON schema, event {event}, identity {json.dumps(self.state["identity"])}. Include date/session_id/harness/model/working_directory/tmux_window/role/landed_work/lessons/provenance, structured recovery and resources. Do not exit. After writing your shard, your ENTIRE final reply must be RETIRE-DONE-{event}, with no preface, suffix or extra lines. You may decline; your ENTIRE final reply must then be RETIRE-DECLINED-{event}, with no extra text, and the caller will author recovery with honest attribution. Off-duty is not permission for product work.' + (' Include waiting.decision and waiting.owner for the pending human decision.' if self.args.waiting else ''))
+                    ambiguous_offer = self.state.get('offer', {}).get('status') == 'ambiguous'
+                    if ambiguous_offer:
+                        self.observe_ambiguous_offer()
+                    else:
+                        self.send('offer', f'Thank you for your work. Every agent at every tier is offered retirement and off-duty time. Event {event}. Stop product work; preserve operational recovery separately from any personal thanks. Read {protocol} and write {shard} using its complete JSON schema, event {event}, identity {json.dumps(self.state["identity"])}. Include date/session_id/harness/model/working_directory/tmux_window/role/landed_work/lessons/provenance, structured recovery and resources. Do not exit. After writing your shard, your ENTIRE final reply must be RETIRE-DONE-{event}, with no preface, suffix or extra lines. You may decline; your ENTIRE final reply must then be RETIRE-DECLINED-{event}, with no extra text, and the caller will author recovery with honest attribution. Off-duty is not permission for product work.' + (' Include waiting.decision and waiting.owner for the pending human decision.' if self.args.waiting else ''))
                     deadline = time.monotonic() + self.args.wait
                     disposition = None
                     while time.monotonic() < deadline:
@@ -711,6 +736,9 @@ class Retirement:
                     self.state['disposition'] = disposition
                     self.persist()
                     self.audit('completion-observed', disposition=disposition)
+                    if ambiguous_offer and disposition:
+                        self.audit('ambiguous-offer-completion-observed', disposition=disposition,
+                                   status='ambiguous', receipt_type='assistant-final-marker')
                     if disposition != 'DONE':
                         raise Stop('agent declined; author caller shard then --resume --caller-shard' if disposition == 'DECLINED' else 'DONE not observed; resume observes, never resends')
             elif self.state.get('disposition') != 'DECLINED':
