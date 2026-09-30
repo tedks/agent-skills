@@ -74,7 +74,12 @@ The script emits a private state path on failure. `--resume PATH` continues
 observation after a delivered offer, without resending it. After an observed
 decline, author the assigned shard then use `--resume PATH --caller-shard`.
 Only a proven pre-paste deferral permits `--resume PATH --retry-deferred offer`
-(or `exit`); ambiguous attempts require receipt inspection and remain blocked.
+(or `exit`). An ambiguous offer with a pinned positive paste and Enter can be
+observed on `--resume PATH` without replay: only a final assistant
+`RETIRE-DONE` or `RETIRE-DECLINED` for that exact event advances disposition.
+The sender result remains ambiguous; absent or unsupported completion stays
+pending. Ambiguous exit attempts still require the independent native notice
+and original-process end, never another blind command.
 There is no automatic manual relay or ambiguous-send override.
 
 Private state records and exact outgoing payloads live under the private

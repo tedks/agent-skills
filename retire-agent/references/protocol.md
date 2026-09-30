@@ -33,6 +33,16 @@ must render an assistant `●` or `•` row marker. Bare wrapped user text and
 live composer text do not count. Unsupported response layouts stay pending.
 The controller never accepts a reported alternate shard path.
 
+If the shared sender reported an ambiguous **offer** after an actual paste and
+positive Enter, `--resume` may observe this same event without sending again.
+The pinned pane and process, preserved event-specific offer file and sender
+input report must still agree. Only the exact final assistant completion or
+decline block above advances disposition; the sender report remains ambiguous
+in the private record. A missing, wrong, quoted, incomplete or followed marker
+does not advance. This is not a retry or a way to waive shard, resource,
+private remote, native-session or exit checks. No such observation-only path
+exists for an ambiguous exit command.
+
 The complete envelope (use explicit `"none"` or empty lists where appropriate):
 
 ```json
