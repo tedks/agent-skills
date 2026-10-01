@@ -1927,7 +1927,7 @@ class Tests(unittest.TestCase):
         module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(module)
         with patch.object(Path, 'read_bytes', return_value=b'codex\0mcp-server\0'):
-            self.assertIsNone(module.proc(os.getpid()))
+            self.assertEqual(module.proc(os.getpid())['agent'], 'codex-support')
         with patch.object(Path, 'read_bytes', return_value=b'codex\0'):
             self.assertEqual(module.proc(os.getpid())['agent'], 'codex')
 
@@ -1950,12 +1950,46 @@ class Tests(unittest.TestCase):
                 with patch.object(Path, 'read_bytes', return_value=argv), patch.object(module.os, 'readlink', return_value=actual_exe):
                     result = module.proc(os.getpid())
                 if auxiliary:
-                    self.assertIsNone(result)
+                    self.assertEqual(result['agent'], 'codex-support')
                 else:
                     self.assertEqual(result['agent'], 'codex')
         argv = b'\0'.join([desktop.encode(), b'app-server', b'--listen', b'stdio://', b''])
         with patch.object(Path, 'read_bytes', return_value=argv), patch.object(module.os, 'readlink', side_effect=OSError):
             self.assertEqual(module.proc(os.getpid())['agent'], 'codex')
+
+    def test_auxiliary_parent_does_not_hide_nested_cli_actor(self):
+        spec = importlib.util.spec_from_file_location('retirement-tree-test', Path(os.environ.get('RETIRE_TEST_SCRIPT', str(HERE / 'retire.sh'))).with_name('retire.py'))
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        desktop = '/nix/store/kpmq44z3v3pwammvi1iff193yqim4cg2-codex-desktop-26.911.61220/lib/chatgpt/resources/codex'
+        parents = {100: 1, 101: 100, 102: 101}
+        commands = {
+            100: b'/usr/bin/codex\0resume\0',
+            102: b'/usr/bin/codex\0resume\0',
+        }
+        paths = [Path('/proc') / str(pid) for pid in parents]
+
+        def read_text(path):
+            if str(path) == '/proc/sys/kernel/random/boot_id':
+                return 'fixture-boot'
+            pid = int(path.parent.name)
+            fields = ['S', str(parents[pid]), *(['0'] * 18)]
+            fields[19] = '123'
+            return f'{pid} (codex) ' + ' '.join(fields)
+
+        def read_bytes(path):
+            return commands[int(path.parent.name)]
+
+        observer = module.Retirement.__new__(module.Retirement)
+        for support_command in (desktop.encode() + b'\0app-server\0--listen\0stdio://\0',
+                                b'/usr/bin/codex\0mcp-server\0'):
+            with self.subTest(support_command=support_command):
+                commands[101] = support_command
+                with (patch.object(Path, 'iterdir', return_value=paths),
+                      patch.object(Path, 'read_text', read_text),
+                      patch.object(Path, 'read_bytes', read_bytes),
+                      patch.object(module.os, 'readlink', return_value=desktop)):
+                    self.assertEqual([actor['pid'] for actor in observer.actors(100)], [100, 102])
 
     def test_remote_requested_receipt_cannot_authorize_successor(self):
         self.actor('hold')

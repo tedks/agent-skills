@@ -27,6 +27,8 @@ mutations = [
     ('desktop support binary exact', "and re.fullmatch(r'/nix/store/[0-9a-z]{32}-codex-desktop-[^/]+/lib/chatgpt/resources/codex', executable)", 'and True', 'test_desktop_codex_app_server_classifier_is_exact'),
     ('desktop support executable verified', "if os.readlink(f'/proc/{pid}/exe') == executable:", 'if True:', 'test_desktop_codex_app_server_classifier_is_exact'),
     ('desktop executable lookup fail closed', 'pass  # Unverified executable remains a possible harness actor.', 'return None  # Treat lookup failure as auxiliary.', 'test_desktop_codex_app_server_classifier_is_exact'),
+    ('auxiliary parent keeps child reachability', "agent = 'codex-support'  # Keep the parent edge; only exclude from actor count.", 'return None  # Lose auxiliary parent before walking descendants.', 'test_auxiliary_parent_does_not_hide_nested_cli_actor'),
+    ('mcp parent keeps child reachability', "agent = 'codex-support'  # Keep the parent edge for descendant CLI detection.", 'return None  # Lose MCP parent before walking descendants.', 'test_auxiliary_parent_does_not_hide_nested_cli_actor'),
     ('foreign private state namespace', "                           if re.fullmatch(r'[0-9a-f]{32}\\.json', path.name)", '', 'test_foreign_private_json_does_not_block_new_retirement'),
     ('long handoff observation', 'not 0 < args.wait <= 1800', 'not 0 < args.wait <= 600', 'test_twenty_minute_wait_is_accepted'),
     ('remote host', "'https://github.com/' + match[1]", 'match[1]', 'test_gh_privacy_pins_remote_host'),

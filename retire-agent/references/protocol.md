@@ -218,7 +218,9 @@ The socket is pinned in private state and reused for observation and transport;
 server failure is not evidence that the pane disappeared. Recognized
 `codex mcp-server` and exact Nix `codex-desktop` `app-server --listen stdio://`
 support processes are excluded from harness identity, but their resources
-still require shard receipts. Other `codex app-server` shapes and additional harness
+still require shard receipts. Their process records remain in descendant
+traversal so a nested interactive CLI cannot disappear with its parent.
+Other `codex app-server` shapes and additional harness
 invocations remain a safe deferral pending operator reconciliation.
 Follow-up `retire-agent-helper-identification` tracks richer auxiliary-command
 classification; do not weaken identity checks to bypass that deferral.

@@ -128,13 +128,13 @@ def proc(pid):
         executable = argv[0].decode()
         agent = Path(executable).name
         if agent == 'codex' and len(argv) > 1 and argv[1] == b'mcp-server':
-            return None  # Harness support server; resource ownership remains in the shard.
+            agent = 'codex-support'  # Keep the parent edge for descendant CLI detection.
         if (agent == 'codex'
                 and argv[1:] == [b'app-server', b'--listen', b'stdio://', b'']
                 and re.fullmatch(r'/nix/store/[0-9a-z]{32}-codex-desktop-[^/]+/lib/chatgpt/resources/codex', executable)):
             try:
                 if os.readlink(f'/proc/{pid}/exe') == executable:
-                    return None  # Exact desktop support server, not an interactive CLI harness.
+                    agent = 'codex-support'  # Keep the parent edge; only exclude from actor count.
             except OSError:
                 pass  # Unverified executable remains a possible harness actor.
         if agent == 'node' and len(argv) > 1:
