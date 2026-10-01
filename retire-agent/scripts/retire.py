@@ -125,9 +125,18 @@ def proc(pid):
         if text[0] == 'Z':
             return None  # An unreaped process has ended and cannot accept work.
         argv = Path(f'/proc/{pid}/cmdline').read_bytes().split(b'\0')
-        agent = Path(argv[0].decode()).name
+        executable = argv[0].decode()
+        agent = Path(executable).name
         if agent == 'codex' and len(argv) > 1 and argv[1] == b'mcp-server':
             return None  # Harness support server; resource ownership remains in the shard.
+        if (agent == 'codex'
+                and argv[1:] == [b'app-server', b'--listen', b'stdio://', b'']
+                and re.fullmatch(r'/nix/store/[0-9a-z]{32}-codex-desktop-[^/]+/lib/chatgpt/resources/codex', executable)):
+            try:
+                if os.readlink(f'/proc/{pid}/exe') == executable:
+                    return None  # Exact desktop support server, not an interactive CLI harness.
+            except OSError:
+                pass  # Unverified executable remains a possible harness actor.
         if agent == 'node' and len(argv) > 1:
             entry = Path(argv[1].decode())
             if not entry.is_absolute():
@@ -137,8 +146,8 @@ def proc(pid):
                 agent = 'codex' if '@openai/codex/' in entry else 'claude'
         return {'pid': int(pid), 'parent': int(text[1]), 'start': text[19],
                 'agent': agent, 'boot': Path('/proc/sys/kernel/random/boot_id').read_text().strip(),
-                'wrapper': Path(argv[0].decode()).name == 'node' and agent in ('codex', 'claude'),
-                'native': '/@openai/codex/' in argv[0].decode() and '/vendor/' in argv[0].decode()}
+                'wrapper': Path(executable).name == 'node' and agent in ('codex', 'claude'),
+                'native': '/@openai/codex/' in executable and '/vendor/' in executable}
     except (OSError, ValueError, UnicodeError):
         return None
 

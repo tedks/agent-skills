@@ -1931,6 +1931,32 @@ class Tests(unittest.TestCase):
         with patch.object(Path, 'read_bytes', return_value=b'codex\0'):
             self.assertEqual(module.proc(os.getpid())['agent'], 'codex')
 
+    def test_desktop_codex_app_server_classifier_is_exact(self):
+        spec = importlib.util.spec_from_file_location('retirement-desktop-test', Path(os.environ.get('RETIRE_TEST_SCRIPT', str(HERE / 'retire.sh'))).with_name('retire.py'))
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        desktop = '/nix/store/kpmq44z3v3pwammvi1iff193yqim4cg2-codex-desktop-26.911.61220/lib/chatgpt/resources/codex'
+        cli = '/home/tedks/.npm-global/lib/node_modules/@openai/codex/vendor/bin/codex'
+        cases = (
+            (desktop, (b'app-server', b'--listen', b'stdio://'), desktop, True),
+            (desktop, (b'resume',), desktop, False),
+            (desktop, (b'app-server', b'--listen', b'tcp://'), desktop, False),
+            (desktop, (b'app-server', b'--listen', b'stdio://'), cli, False),
+            (cli, (b'app-server', b'--listen', b'stdio://'), cli, False),
+        )
+        for executable, args, actual_exe, auxiliary in cases:
+            with self.subTest(executable=executable, args=args, actual_exe=actual_exe):
+                argv = b'\0'.join([executable.encode(), *args, b''])
+                with patch.object(Path, 'read_bytes', return_value=argv), patch.object(module.os, 'readlink', return_value=actual_exe):
+                    result = module.proc(os.getpid())
+                if auxiliary:
+                    self.assertIsNone(result)
+                else:
+                    self.assertEqual(result['agent'], 'codex')
+        argv = b'\0'.join([desktop.encode(), b'app-server', b'--listen', b'stdio://', b''])
+        with patch.object(Path, 'read_bytes', return_value=argv), patch.object(module.os, 'readlink', side_effect=OSError):
+            self.assertEqual(module.proc(os.getpid())['agent'], 'codex')
+
     def test_remote_requested_receipt_cannot_authorize_successor(self):
         self.actor('hold')
         self.invoke('--handoff', 'codex', 'model', '--roles', str(self.roles))
