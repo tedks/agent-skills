@@ -44,7 +44,8 @@ nix develop --command <test>
 
 This project uses `ditz`; issues live on the `ditz-metadata` branch. Run
 commands from the intended worktree and check `~/.ditz-config` before writing:
-a configured issue directory can select a different store. Use the installed
+an existing `ditz-metadata` branch takes precedence; otherwise a configured
+issue directory can select the filesystem store. Use the installed
 `ditz` binary and its `--help=plain`; do not initialize or migrate an existing
 tracker merely because discovery fails.
 

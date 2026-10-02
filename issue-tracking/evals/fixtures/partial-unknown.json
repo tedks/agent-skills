@@ -26,10 +26,11 @@
     "status": "closed",
     "log_events": [
       {
-        "action": "closed with disposition fixed"
+        "what": "closed: fixed",
+        "comment": ""
       },
       {
-        "action": "commented",
+        "what": "commented",
         "comment": "Verified literal receipt"
       }
     ]

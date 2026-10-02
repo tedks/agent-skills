@@ -11,5 +11,6 @@
       "id": "other-invoice",
       "title": "Invoice layout in unrelated billing project"
     }
-  ]
+  ],
+  "metadata_branch_exists": false
 }

@@ -21,9 +21,11 @@ Before mutation, identify the intended project/worktree, executable, and store:
    approved install or `nix run github:tedks/ditz -- <cmd>` fallback. Do not
    silently switch binaries after a failure.
 3. Inspect relevant `~/.ditz-config` settings and the project's documented
-   storage mode. A configured issue directory can override the repository's
-   metadata branch. Correlate a known issue or project identity with that
-   store before writing. Keep private config contents out of reports.
+   storage mode. An existing `ditz-metadata` branch takes precedence over
+   the configured issue directory; without that branch, the configured
+   directory selects the filesystem store. Correlate a known issue or project
+   identity with that store before writing. Keep private config contents out
+   of reports.
 
 If repo instructions, config, or the observed store disagree, resolve that
 specific mismatch before mutation. A missing binary, failed read, or empty
