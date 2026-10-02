@@ -10,6 +10,7 @@ import tempfile
 HERE = Path(__file__).resolve().parent
 source = (HERE / 'retire.py').read_text()
 mutations = [
+    ('missing Codex reader blocks before offer', 'if not helper.is_file():', 'if False:', 'test_missing_codex_reader_blocks_before_offer'),
     ('pinned Codex lookup PID', "f'{shlex.quote(str(helper.parent))} {pid}')", "f'{shlex.quote(str(helper.parent))} {os.getpid()}')", 'test_codex_offer_pins_executable_reader_lookup_and_resources'),
     ('ambiguous offer evidence verification', 'self.observe_ambiguous_offer()  # Recheck even a cached DONE before publication.', 'pass  # Drop ambiguous offer evidence verification.', 'test_ambiguous_offer_positive_input_and_shard_gates'),
     ('ambiguous offer never resends', 'if not ambiguous_offer:\n                        self.send(\'offer\', self.offer_payload(event, shard))', 'if True:\n                        self.send(\'offer\', self.offer_payload(event, shard))', 'test_ambiguous_offer_observed_done_resumes_without_replay'),

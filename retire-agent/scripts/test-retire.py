@@ -721,7 +721,8 @@ class Tests(unittest.TestCase):
 
     def test_missing_codex_reader_blocks_before_offer(self):
         self.actor()
-        entry = self.instrument("        if not helper.is_file():", "        if True:")
+        entry = self.instrument("        process = self.state['identity']['process']", "        process = self.state['identity']['process']")
+        (entry.resolve().parents[4] / 'mcp/claude-introspect/codex_status.py').unlink()
         with patch.dict(os.environ, {'RETIRE_TEST_SCRIPT': str(entry)}):
             result = self.invoke()
         self.assertEqual(result.returncode, 2, result.stderr)
@@ -743,15 +744,10 @@ class Tests(unittest.TestCase):
         self.actor(mode)
         result = self.invoke()
         self.assertEqual(result.returncode, 2, result.stderr)
-        if 'offer ambiguous;' in result.stderr:
-            path, state = self.state()
-            self.assertTrue(state['offer']['paste_attempted'])
-            self.assertGreaterEqual(state['offer']['enters'], 1)
-            pastes = self.observed()['pastes']
-            result = self.invoke('--resume', str(path))
-            self.assertEqual(self.observed()['pastes'], pastes)
-        self.assertIn('native session binding differs or unavailable', result.stderr)
+        self.assertIn('pinned Codex native session binding unavailable', result.stderr)
+        self.assertNotIn('offer', self.state()[1])
         self.assertNotIn('exit', self.state()[1])
+        self.assertEqual(self.observed()['pastes'], 0)
 
     def test_codex_missing_native_fd_never_requests_exit(self):
         self.assert_native_fd_pending('missing-native-fd')
