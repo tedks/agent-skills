@@ -1155,12 +1155,11 @@ class Tests(unittest.TestCase):
         self.actor('ambiguous-done')
         self.assertEqual(self.invoke().returncode, 2)
         path, state = self.state()
-        spec = importlib.util.spec_from_file_location('retire_fixture_legacy', HERE / 'retire.py')
-        module = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(module)
-        legacy = module.Retirement.offer_payload(
-            SimpleNamespace(state=state, args=SimpleNamespace(waiting=False)),
-            state['id'], path.with_suffix('.shard'), legacy=True)
+        # Golden offer from the installed pre-change script, independent of
+        # the new implementation's legacy reconstruction.
+        event, shard = state['id'], path.with_suffix('.shard')
+        protocol = HERE.parent / 'references/protocol.md'
+        legacy = f'Thank you for your work. Every agent at every tier is offered retirement and off-duty time. Event {event}. Stop product work; preserve operational recovery separately from any personal thanks. Read {protocol} and write {shard} using its complete JSON schema, event {event}, identity {json.dumps(state["identity"])}. Include date/session_id/harness/model/working_directory/tmux_window/role/landed_work/lessons/provenance, structured recovery and resources. Do not exit. After writing your shard, your ENTIRE final reply must be RETIRE-DONE-{event}, with no preface, suffix or extra lines. You may decline; your ENTIRE final reply must then be RETIRE-DECLINED-{event}, with no extra text, and the caller will author recovery with honest attribution. Off-duty is not permission for product work.'
         state['offer'].pop('payload_bytes')
         state['offer'].pop('payload_sha256')
         path.write_text(json.dumps(state))

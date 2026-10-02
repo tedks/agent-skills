@@ -377,6 +377,7 @@ class Retirement:
             raise Stop(f'{phase} {self.state[phase]["status"]}; exact payload preserved')
 
     def offer_payload(self, event, shard, legacy=False):
+        # legacy is the installed pre-change offer, not an intermediate PR commit.
         protocol = Path(__file__).resolve().parents[1] / 'references' / 'protocol.md'
         binding = ''
         if not legacy and self.state['identity']['process']['agent'] == 'codex':
