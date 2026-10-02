@@ -10,14 +10,14 @@ import tempfile
 HERE = Path(__file__).resolve().parent
 source = (HERE / 'retire.py').read_text()
 mutations = [
-    ('missing Codex reader blocks before offer', 'if not helper.is_file():', 'if False:', 'test_missing_codex_reader_blocks_before_offer'),
-    ('pinned Codex lookup PID', "f'{shlex.quote(str(helper.parent))} {pid}')", "f'{shlex.quote(str(helper.parent))} {os.getpid()}')", 'test_codex_offer_pins_executable_reader_lookup_and_resources'),
+    ('missing shared reader blocks before offer', 'if not helper.is_file():', 'if False:', 'test_missing_shared_binding_blocks_before_offer'),
+    ('pinned peer lookup PID', "pin = ProcessPin(actor['pid'], actor['start'], actor['boot'])", "pin = ProcessPin(os.getpid(), actor['start'], actor['boot'])", 'test_codex_offer_supplies_verified_id_and_resources'),
     ('ambiguous offer evidence verification', 'self.observe_ambiguous_offer()  # Recheck even a cached DONE before publication.', 'pass  # Drop ambiguous offer evidence verification.', 'test_ambiguous_offer_positive_input_and_shard_gates'),
     ('ambiguous offer never resends', 'if not ambiguous_offer:\n                        self.send(\'offer\', self.offer_payload(event, shard))', 'if True:\n                        self.send(\'offer\', self.offer_payload(event, shard))', 'test_ambiguous_offer_observed_done_resumes_without_replay'),
     ('ambiguous offer positive Enter', "or type(attempt.get('enters')) is not int or attempt['enters'] < 1", 'or False', 'test_ambiguous_offer_positive_input_and_shard_gates'),
     ('ambiguous offer pinned payload', "or attempt.get('payload') != str(expected)", 'or False', 'test_ambiguous_offer_positive_input_and_shard_gates'),
     ('ambiguous offer pinned digest', 'if len(actual) != size or hashlib.sha256(actual).hexdigest() != digest:', 'if False:', 'test_ambiguous_offer_rejects_changed_missing_or_symlink_payload'),
-    ('ambiguous offer no live binding dependency', 'size, digest = attempt.get(\'payload_bytes\'), attempt.get(\'payload_sha256\')', 'self.codex_binding()\n        size, digest = attempt.get(\'payload_bytes\'), attempt.get(\'payload_sha256\')', 'test_ambiguous_offer_uses_original_bytes_after_binding_disappears'),
+    ('ambiguous offer no live binding dependency', 'size, digest = attempt.get(\'payload_bytes\'), attempt.get(\'payload_sha256\')', 'self.native_binding()\n        size, digest = attempt.get(\'payload_bytes\'), attempt.get(\'payload_sha256\')', 'test_ambiguous_offer_uses_original_bytes_after_binding_disappears'),
     ('previous offer digest upgrade', 'if legacy:\n            original = self.offer_payload', 'if False:\n            original = self.offer_payload', 'test_previous_version_ambiguous_offer_is_verified_and_upgraded'),
     ('ambiguous cached DONE reobservation', "if ambiguous_offer or self.state.get('disposition') != 'DONE':", "if self.state.get('disposition') != 'DONE':", 'test_ambiguous_offer_rechecks_cached_done_after_bad_shard'),
     ('ambiguous caller decline reobservation', "if self.observe() != 'DECLINED':", 'if False:', 'test_ambiguous_offer_caller_decline_requires_current_marker'),
@@ -52,11 +52,11 @@ mutations = [
     ('Codex footer UI padding', 'tail[0].rstrip()', 'tail[0]', 'test_codex_ui_footer_trailing_padding_is_allowed'),
     ('cached retired publication', "if self.state.get('status') == 'retired' and not self.exit_verified:", 'if False:', 'test_retired_resume_lost_pane_preserves_historical_receipt'),
     ('cached retired audit', "'exit_confirmed': self.exit_verified", "'exit_confirmed': self.state.get('status') == 'retired'", 'test_forged_retired_status_cannot_upgrade_pending_receipt'),
-    ('native binding before exit baseline', "            self.verify_native_session(session_id)\n            self.state['exit_notice']", "            pass\n            self.state['exit_notice']", 'test_wrong_native_session_shard_never_requests_exit'),
+    ('native binding before exit baseline', "            self.verify_native_session(session_id)\n            if self.state.get('native_session_id')", "            pass\n            if self.state.get('native_session_id')", 'test_wrong_native_session_shard_never_requests_exit'),
     ('native binding before sender input', "            self.verify_native_session(preserved.get('session_id', 'unknown'))", '            pass', 'test_send_rechecks_binding_after_notice_baseline'),
-    ('preexit Codex native UUID binding', "proof.get('session_id') != session_id", 'False', 'test_wrong_native_session_shard_never_requests_exit'),
-    ('preexit Claude native UUID binding', 'any(value != session_id for value, _ in bindings)', 'False', 'test_claude_wrong_native_session_shard_never_requests_exit'),
-    ('Claude process pointer lifetime', "fields[1:] != [actor['start'], actor['boot']]", 'False', 'test_claude_stale_process_pointer_never_requests_exit'),
+    ('native UUID match', "if proof['session_id'] != session_id:", 'if False:', 'test_wrong_native_session_shard_never_requests_exit'),
+    ('offer binding recheck', "        if phase == 'offer':\n            self.verify_native_session(self.state.get('native_session_id'))", "        if phase == 'offer':\n            pass", 'test_offer_rechecks_binding_before_sender_input'),
+    ('offer session ID supplied', "binding = (f' The controller verified native session ID {session_id} for this pinned process. '", "binding = (f' Native session ID unavailable for this pinned process. '", 'test_codex_offer_supplies_verified_id_and_resources'),
     ('joined wrapped native exit notice', "['capture-pane', '-p', '-J', '-S', '-'", "['capture-pane', '-p', '-S', '-'", 'test_narrow_pane_joined_native_exit_notice'),
     ('native Claude UI footer', 'and len(tail) == 2', 'and False', 'test_claude_native_ui_footer_allows_marker_completion'),
     ('Claude footer harness attribution', "claude_footer = (self.state['identity']['process']['agent'] == 'claude'", 'claude_footer = (True', 'test_codex_cannot_use_claude_ui_footer'),
@@ -106,9 +106,10 @@ for label, before, after, test in mutations:
         mutated = mutated.replace(before, after, 2 if label == 'commit ownership' else 1)
     with tempfile.TemporaryDirectory(prefix='retire-mutation-') as directory:
         directory = Path(directory)
-        helper = directory / 'mcp/claude-introspect/codex_status.py'
-        helper.parent.mkdir(parents=True)
-        shutil.copyfile(HERE.parents[3] / 'mcp/claude-introspect/codex_status.py', helper)
+        helper_dir = directory / 'mcp/claude-introspect'
+        helper_dir.mkdir(parents=True)
+        for name in ('harness_identity.py', 'codex_status.py', 'session_binding.py'):
+            shutil.copyfile(HERE.parents[3] / 'mcp/claude-introspect' / name, helper_dir / name)
         directory = directory / '.claude/skills/retire-agent/scripts'
         directory.mkdir(parents=True)
         (directory / 'retire.py').write_text(mutated)

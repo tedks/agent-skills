@@ -167,16 +167,18 @@ alone cannot establish retirement. Unsupported layouts and unknown caller
 session IDs preserve the handoff pending exit verification. If the original
 ended before any exit request, leave pending without sending into its shell.
 
-Before requesting exit, match the immutable shard UUID to the pinned live
-process using the installed native binding. Codex reuses the canonical pure
-`mcp/claude-introspect/codex_status.py` reader on the pinned native core (or
+Before offering retirement, the controller observes the pinned peer through
+`mcp/claude-introspect/session_binding.py` and puts its verified provider-native
+session UUID in the offer beside the assigned shard path. The retiring agent
+copies that exact ID into the shard; it does not find a helper or rediscover
+its session. The controller rechecks the pinned peer just before sending the
+offer, before requesting exit, and again just before exit input. Codex uses
+the canonical bounded `codex_status.py` reader on the pinned native core (or
 original process): a unique writable CLI rollout descriptor, its first native
 session metadata, and descriptor inode/device checks, with pinned `CODEX_HOME`.
-The generated Codex offer gives the resolved absolute helper path, the pinned
-native PID, and an exact `python3 -c` invocation of `read_codex_status(pid)`.
-Require its `state: observed` and matching session UUID. If the helper or
-binding is unavailable, report the blocker; do not search all of home or
-`/nix/store` and do not infer a session from cwd, environment or newest rollout.
+Require `state: observed` and the same session UUID at each action boundary.
+If the reader or binding is unavailable, report the blocker; do not search all
+of home or `/nix/store` or infer a session from cwd, environment or newest rollout.
 Claude reads only `current.<pid>` from pinned `CLAUDE_CONFIG_DIR/session-state`
 and the installed hook's pinned `HOME/.claude/session-state` contract. Any
 present pointer must contain the same UUID, process start ticks and boot ID;

@@ -10,17 +10,21 @@ A saved handoff and an ended agent process are separate receipts. Preserve
 human input and leave a session open when either receipt cannot be established.
 Read [the shard and recovery contract](references/protocol.md) before invoking
 the script. Linux `/proc`, tmux, Git, Python 3.11+ and the installed spawn-agent
-skill are required. Keep the canonical dotfiles repository layout: Codex exit
-verification loads `mcp/claude-introspect/codex_status.py`. Claude requires the
+skill are required. Keep the canonical dotfiles repository layout: native
+verification loads `mcp/claude-introspect/session_binding.py`, which uses the
+bounded Codex rollout reader. Claude requires the
 installed `capture-session-state.sh` PreToolUse hook and its per-process pointer.
 The sender must provide stable ordinary draft co-submission and guarded typed
 Codex / literal Claude exits. Defaults: `~/Projects/off-duty` on `master`,
 origin private on GitHub, and `~/Projects/orgs/master/doctrine/ROLES.md`.
 
-For Codex, the generated offer supplies the resolved absolute status-reader
-path, pinned native PID and exact Python lookup command. A missing reader or
-unobserved pinned binding blocks the offer. Do not substitute home-wide
-searches, `/nix/store` discovery, cwd, environment UUIDs or newest rollout.
+The controller resolves the pinned peer's provider-native session ID before
+sending the offer and supplies that ID with the assigned shard path. The agent
+uses it in the shard without hunting for helpers or rediscovering identity.
+The controller rechecks the binding immediately before offer and exit input.
+A missing, changed or conflicting binding blocks input. Do not substitute
+home-wide searches, `/nix/store` discovery, cwd, environment UUIDs or newest
+rollout.
 
 ## Modes
 
@@ -62,7 +66,7 @@ from personal thanks. A provider-native resume handle comes last and must not
 be required to reconstruct the work.
 
 Record attempts privately without storing pane contents or unfinished human
-text. Before exit, match the immutable shard UUID to the pinned native process:
+text. Before offer and exit, match the assigned and immutable shard UUID to the pinned native process:
 Codex uses its unique writable CLI rollout descriptor; Claude uses its
 per-process session pointer with start/boot identity. Missing or conflicting
 bindings leave the handoff pending without exit input. Verify all pinned

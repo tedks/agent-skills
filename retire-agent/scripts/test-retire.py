@@ -527,9 +527,10 @@ class Tests(unittest.TestCase):
     def instrument(self, before, after):
         stage = self.directory / ('instrumented-' + uuid.uuid4().hex)
         stage.mkdir()
-        helper = stage / 'mcp/claude-introspect/codex_status.py'
-        helper.parent.mkdir(parents=True)
-        shutil.copyfile(HERE.parents[3] / 'mcp/claude-introspect/codex_status.py', helper)
+        helper_dir = stage / 'mcp/claude-introspect'
+        helper_dir.mkdir(parents=True)
+        for name in ('harness_identity.py', 'codex_status.py', 'session_binding.py'):
+            shutil.copyfile(HERE.parents[3] / 'mcp/claude-introspect' / name, helper_dir / name)
         stage = stage / '.claude/skills/retire-agent/scripts'
         stage.mkdir(parents=True)
         source = self.source()
@@ -693,29 +694,25 @@ class Tests(unittest.TestCase):
 
     def test_native_reader_failure_is_pending_without_exit(self):
         self.actor()
-        entry = self.instrument("            proof = module.read_codex_status(actor['pid'])", "            raise RuntimeError('fixture reader unavailable')")
+        entry = self.instrument("            proof = observe_native_session(process['agent'], pin)", "            raise RuntimeError('fixture reader unavailable')")
         with patch.dict(os.environ, {'RETIRE_TEST_SCRIPT': str(entry)}):
             result = self.invoke()
         self.assertEqual(result.returncode, 2, result.stderr)
-        self.assertIn('native Codex session reader failed', result.stderr)
+        self.assertIn('native session binding reader failed for pinned PID', result.stderr)
         self.assertNotIn('Traceback', result.stderr)
         self.assertNotIn('offer', self.state()[1])
         self.assertNotIn('exit', self.state()[1])
 
-    def test_codex_offer_pins_executable_reader_lookup_and_resources(self):
+    def test_codex_offer_supplies_verified_id_and_resources(self):
         self.actor('resource')
         result = self.invoke()
         self.assertEqual(result.returncode, 2, result.stderr)
         state = self.state()[1]
         payload = Path(state['offer']['payload']).read_text()
-        native = (state['identity']['process'].get('cores') or [state['identity']['process']])[0]
-        helper = HERE.parents[3] / 'mcp/claude-introspect/codex_status.py'
-        self.assertIn(f'the installed reader is {helper}', payload)
-        self.assertIn(f'pinned native Codex PID is {native["pid"]}', payload)
-        lookup = payload.split('Use exactly ', 1)[1].split(' to inspect that process', 1)[0]
-        proof = json.loads(subprocess.check_output(shlex.split(lookup), text=True))
-        self.assertEqual(proof['state'], 'observed')
-        self.assertEqual(proof['session_id'], 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa')
+        self.assertEqual(state['native_session_id'], 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa')
+        self.assertIn('controller verified native session ID ' + state['native_session_id'], payload)
+        self.assertIn('write ' + str(Path(state['offer']['payload']).with_name(state['id'] + '.shard')), payload)
+        self.assertNotIn('Use exactly python3', payload)
         self.assertIn('Retain handles for any running exec calls', payload)
         self.assertIn('parent shell ending does not prove its descendants ended', payload)
 
@@ -726,8 +723,33 @@ class Tests(unittest.TestCase):
         with patch.dict(os.environ, {'RETIRE_TEST_SCRIPT': str(entry)}):
             result = self.invoke()
         self.assertEqual(result.returncode, 2, result.stderr)
-        self.assertIn('native Codex session reader unavailable at ', result.stderr)
+        self.assertIn('native session binding reader failed for pinned PID', result.stderr)
         self.assertNotIn('offer', self.state()[1])
+
+    def test_missing_shared_binding_blocks_before_offer(self):
+        self.actor()
+        entry = self.instrument("        process = self.state['identity']['process']", "        process = self.state['identity']['process']")
+        (entry.resolve().parents[4] / 'mcp/claude-introspect/session_binding.py').unlink()
+        with patch.dict(os.environ, {'RETIRE_TEST_SCRIPT': str(entry)}):
+            result = self.invoke()
+        self.assertEqual(result.returncode, 2, result.stderr)
+        self.assertIn('native session binding reader unavailable', result.stderr)
+        self.assertNotIn('offer', self.state()[1])
+
+    def test_offer_rechecks_binding_before_sender_input(self):
+        self.actor('claude')
+        before = "        if phase == 'offer':\n            self.verify_native_session"
+        after = ('        if phase == "offer":\n'
+                 '            pointer = self.repo.parent / "actor-home/.claude/session-state" / ("current." + str(self.state["identity"]["process"]["pid"]))\n'
+                 '            fields = pointer.read_text().split()\n'
+                 '            pointer.write_text("bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb " + " ".join(fields[1:]) + "\\n")\n' + before)
+        entry = self.instrument(before, after)
+        with patch.dict(os.environ, {'RETIRE_TEST_SCRIPT': str(entry)}):
+            result = self.invoke()
+        self.assertEqual(result.returncode, 2, result.stderr)
+        self.assertIn('native session binding differs', result.stderr)
+        self.assertNotIn('offer', self.state()[1])
+        self.assertEqual(self.observed()['pastes'], 0)
 
     def test_wrong_native_session_shard_never_requests_exit(self):
         self.actor('wrong-shard-id')
@@ -760,7 +782,7 @@ class Tests(unittest.TestCase):
         next((self.directory / 'actor-home/.claude/session-state').glob('current.*')).unlink()
         result = self.invoke()
         self.assertEqual(result.returncode, 2, result.stderr)
-        self.assertIn('native session binding differs or unavailable', result.stderr)
+        self.assertIn('pinned Claude native session binding unavailable', result.stderr)
         self.assertNotIn('exit', self.state()[1])
 
     def test_claude_conflicting_present_pointers_never_request_exit(self):
@@ -772,7 +794,7 @@ class Tests(unittest.TestCase):
         configured.write_text('bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb ' + ' '.join(fields[1:]) + '\n')
         result = self.invoke()
         self.assertEqual(result.returncode, 2, result.stderr)
-        self.assertIn('native session binding differs', result.stderr)
+        self.assertIn('pinned Claude native session binding unavailable', result.stderr)
         self.assertNotIn('exit', self.state()[1])
         self.assertFalse((self.directory / 'exit-order.json').exists())
 
@@ -817,7 +839,7 @@ class Tests(unittest.TestCase):
         pointer.write_text(fields[0] + ' 0 ' + fields[2] + '\n')
         result = self.invoke()
         self.assertEqual(result.returncode, 2, result.stderr)
-        self.assertIn('stale or malformed Claude process pointer', result.stderr)
+        self.assertIn('pinned Claude native session binding unavailable', result.stderr)
         self.assertNotIn('exit', self.state()[1])
         self.assertFalse((self.directory / 'exit-order.json').exists())
 
@@ -1144,7 +1166,7 @@ class Tests(unittest.TestCase):
         with patch.dict(os.environ, {'RETIRE_TEST_SCRIPT': str(entry)}):
             result = self.invoke('--resume', str(path))
         self.assertEqual(result.returncode, 2, result.stderr)
-        self.assertIn('native Codex session reader unavailable', result.stderr)
+        self.assertIn('native session binding reader unavailable', result.stderr)
         state = self.state()[1]
         self.assertEqual(state['disposition'], 'DONE')
         self.assertTrue(state.get('handoff_receipt'))
