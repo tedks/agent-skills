@@ -54,7 +54,8 @@ mutations = [
     ('cached retired audit', "'exit_confirmed': self.exit_verified", "'exit_confirmed': self.state.get('status') == 'retired'", 'test_forged_retired_status_cannot_upgrade_pending_receipt'),
     ('native binding before exit baseline', "            self.verify_native_session(session_id)\n            if self.state.get('native_session_id')", "            pass\n            if self.state.get('native_session_id')", 'test_wrong_native_session_shard_never_requests_exit'),
     ('native binding before sender input', "            self.verify_native_session(preserved.get('session_id', 'unknown'))", '            pass', 'test_send_rechecks_binding_after_notice_baseline'),
-    ('native UUID match', "if proof['session_id'] != session_id:", 'if False:', 'test_wrong_native_session_shard_never_requests_exit'),
+    ('native UUID match', "if proof['session_id'] != session_id:", 'if False:', 'test_changed_binding_retry_never_requests_exit'),
+    ('offered session remains authoritative', ["if self.state.get('native_session_id') and session_id != self.state['native_session_id']:", "if self.state.get('native_session_id') and preserved.get('session_id') != self.state['native_session_id']:"], ['if False:', 'if False:'], 'test_switched_native_session_cannot_replace_offered_id'),
     ('offer binding recheck', "        if phase == 'offer':\n            self.verify_native_session(self.state.get('native_session_id'))", "        if phase == 'offer':\n            pass", 'test_offer_rechecks_binding_before_sender_input'),
     ('offer session ID supplied', "binding = (f' The controller verified native session ID {session_id} for this pinned process. '", "binding = (f' Native session ID unavailable for this pinned process. '", 'test_codex_offer_supplies_verified_id_and_resources'),
     ('joined wrapped native exit notice', "['capture-pane', '-p', '-J', '-S', '-'", "['capture-pane', '-p', '-S', '-'", 'test_narrow_pane_joined_native_exit_notice'),
@@ -99,6 +100,8 @@ mutations = [
     ('corrupt index receipt', "                record = receipt_record(receipt_text)", '                try:\n                    record = json.loads(receipt_text)\n                except ValueError:\n                    continue\n                if not isinstance(record, dict):\n                    continue', 'test_corrupt_other_receipt_preserves_generated_index'),
 ]
 for label, before, after, test in mutations:
+    if len(sys.argv) > 1 and label not in sys.argv[1:]:
+        continue
     replacements = list(zip(before, after)) if isinstance(before, list) else [(before, after)]
     mutated = source
     for before, after in replacements:

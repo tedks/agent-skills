@@ -282,6 +282,10 @@ def terminal(directory, mode):
                             data = shard_data(event, identity)
                             if mode.endswith('wrong-shard-id'):
                                 data['session_id'] = 'bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb'
+                            if mode == 'claude-switched-wrong-shard-id':
+                                pointer = Path(os.environ['HOME']) / '.claude/session-state' / ('current.' + str(os.getpid()))
+                                fields = pointer.read_text().split()
+                                pointer.write_text(data['session_id'] + ' ' + ' '.join(fields[1:]) + '\n')
                             if mode != 'waiting-bad':
                                 data['waiting'] = {'decision': 'Choose scope', 'owner': 'Ted'}
                             if mode == 'resource':
@@ -738,7 +742,7 @@ class Tests(unittest.TestCase):
 
     def test_offer_rechecks_binding_before_sender_input(self):
         self.actor('claude')
-        before = "        if phase == 'offer':\n            self.verify_native_session"
+        before = "        attempt = self.state.get(phase)"
         after = ('        if phase == "offer":\n'
                  '            pointer = self.repo.parent / "actor-home/.claude/session-state" / ("current." + str(self.state["identity"]["process"]["pid"]))\n'
                  '            fields = pointer.read_text().split()\n'
@@ -849,6 +853,17 @@ class Tests(unittest.TestCase):
         self.assertEqual(result.returncode, 2, result.stderr)
         self.assertIn('native session binding differs', result.stderr)
         self.assertNotIn('exit', self.state()[1])
+        self.assertFalse((self.directory / 'exit-order.json').exists())
+
+    def test_switched_native_session_cannot_replace_offered_id(self):
+        self.actor('claude-switched-wrong-shard-id')
+        result = self.invoke()
+        self.assertEqual(result.returncode, 2, result.stderr)
+        self.assertIn('shard differs from offered native session ID', result.stderr)
+        state = self.state()[1]
+        self.assertEqual(state['native_session_id'], 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa')
+        self.assertTrue(state.get('handoff_receipt'))
+        self.assertNotIn('exit', state)
         self.assertFalse((self.directory / 'exit-order.json').exists())
 
     def test_narrow_pane_joined_native_exit_notice(self):
