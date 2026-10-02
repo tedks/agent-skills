@@ -89,7 +89,8 @@ def terminal(directory, mode):
     directory = Path(directory)
     register_fixture(directory, os.getpid(), 'terminal')
     register_fixture(directory, os.getppid(), 'pane-root')
-    session = 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa'
+    session = ('AAAAAAAA-AAAA-AAAA-AAAA-AAAAAAAAAAAA' if mode == 'claude-uppercase'
+               else 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa')
     rollout = Path(os.environ['CODEX_HOME']) / 'sessions/rollout-fixture-' / ('rollout-' + session + '.jsonl')
     rollout.parent.mkdir(parents=True, exist_ok=True)
     if not rollout.exists():
@@ -267,7 +268,7 @@ def terminal(directory, mode):
                                 (directory / 'terminal.json').write_text(json.dumps({'pastes': pastes, 'enters': enters, 'event': event, 'exit_pasted': pasted_payload, 'exit_enters': exit_enters}))
                                 if mode != 'no-exit-notice':
                                     session = 'bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb' if mode.endswith('wrong-exit-notice') else 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa'
-                                    notice = ('Resume this session with:\r\nclaude --resume ' if mode.startswith('claude') else ('Token usage: total=42 input=100000 (+ 90000 cached) output=10000 (reasoning 9000)\r\nTo continue this session, run:\r\n  codex resume ' if mode == 'narrow-notice' else 'Token usage: total=42\r\nTo continue this session, run:\r\n  codex resume ')) + session + '\r\n'
+                                    notice = ('Resume this session with:\r\nclaude --resume ' if mode.startswith('claude') else ('Token usage: total=42 input=100000 (+ 90000 cached) output=10000 (reasoning 9000)\r\nTo continue this session, run:\r\n  codex resume ' if mode == 'narrow-notice' else 'Token usage: total=42\r\nTo continue this session, run:\r\n  codex resume ')) + session.lower() + '\r\n'
                                     sys.stdout.write('\r\n\x1b[J' + notice)
                                     sys.stdout.flush()
                                 return
@@ -280,6 +281,8 @@ def terminal(directory, mode):
                             identity = json.JSONDecoder().raw_decode(payload.split(', identity ', 1)[1])[0]
                             shard = directory / 'repo' / '.git' / 'retirements' / (event + '.shard')
                             data = shard_data(event, identity)
+                            if mode == 'claude-uppercase':
+                                data['session_id'] = session
                             if mode.endswith('wrong-shard-id'):
                                 data['session_id'] = 'bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb'
                             if mode == 'claude-switched-wrong-shard-id':
@@ -854,6 +857,15 @@ class Tests(unittest.TestCase):
         self.assertIn('native session binding differs', result.stderr)
         self.assertNotIn('exit', self.state()[1])
         self.assertFalse((self.directory / 'exit-order.json').exists())
+
+    def test_uppercase_claude_pointer_matches_native_notice(self):
+        self.actor('claude-uppercase')
+        result = self.invoke()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        state = self.state()[1]
+        self.assertEqual(state['native_session_id'], 'AAAAAAAA-AAAA-AAAA-AAAA-AAAAAAAAAAAA')
+        self.assertEqual(state['status'], 'retired')
+        self.assertTrue(json.loads((self.directory / 'exit-order.json').read_text())['receipt_before_exit'])
 
     def test_switched_native_session_cannot_replace_offered_id(self):
         self.actor('claude-switched-wrong-shard-id')

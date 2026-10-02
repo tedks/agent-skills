@@ -21,7 +21,8 @@ origin private on GitHub, and `~/Projects/orgs/master/doctrine/ROLES.md`.
 The controller resolves the pinned peer's provider-native session ID before
 sending the offer and supplies that ID with the assigned shard path. The agent
 uses it in the shard without hunting for helpers or rediscovering identity.
-The controller rechecks the binding immediately before offer and exit input.
+The controller rechecks the binding before asking the sender to submit offer
+or exit input.
 A missing, changed or conflicting binding blocks input. Do not substitute
 home-wide searches, `/nix/store` discovery, cwd, environment UUIDs or newest
 rollout.

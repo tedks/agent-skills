@@ -630,7 +630,7 @@ class Retirement:
     def exit_notice_count(self, session_id):
         # Raw pane bytes stay in memory. Only an exact native resume command
         # naming the immutable shard's UUID can establish this lifecycle receipt.
-        if not re.fullmatch(r'[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}', session_id):
+        if not re.fullmatch(r'[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}', session_id):
             raise Stop('handoff verified; exit pending verifiable native session UUID')
         agent = self.state['identity']['process']['agent']
         command = {'codex': 'codex resume ', 'claude': 'claude --resume '}.get(agent)
@@ -642,7 +642,8 @@ class Retirement:
         frame = checked(self.tmux + ['capture-pane', '-p', '-J', '-S', '-', '-t', self.args.pane], strip=False)
         prefix = (r'^Token usage: [^\n]+\nTo continue this session, run:[ \t]*\n' if agent == 'codex'
                   else r'^Resume this session with:[ \t]*\n')
-        return len(re.findall(prefix + r'[ \t]*' + re.escape(command + session_id) + r'[ \t]*$', frame, re.MULTILINE))
+        return len(re.findall(prefix + r'[ \t]*' + re.escape(command) + r'(?i:' + re.escape(session_id) + r')[ \t]*$',
+                              frame, re.MULTILINE))
 
     def fresh_exit_notice(self, session_id):
         attempt = self.state.get('exit', {})
