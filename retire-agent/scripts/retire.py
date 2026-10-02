@@ -10,6 +10,7 @@ import json
 import os
 from pathlib import Path
 import re
+import shlex
 import stat
 import subprocess
 import sys
@@ -242,6 +243,29 @@ class Retirement:
         if self.identity() != self.state['identity']:
             raise Stop('pane/process identity changed')
 
+    def codex_binding(self):
+        """Read only the pinned native process through the installed reader."""
+        self.verify_identity()
+        process = self.state['identity']['process']
+        actor = (process.get('cores') or [process])[0]
+        helper = Path(__file__).resolve().parents[4] / 'mcp/claude-introspect/codex_status.py'
+        if not helper.is_file():
+            raise Stop('native Codex session reader unavailable at ' + str(helper))
+        try:
+            spec = importlib.util.spec_from_file_location('retire_codex_status', helper)
+            if spec is None or spec.loader is None:
+                raise Stop('native Codex session reader unavailable')
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+            proof = module.read_codex_status(actor['pid'])
+        except Exception as error:
+            raise Stop('native Codex session reader failed for pinned PID') from error
+        self.verify_identity()
+        if not isinstance(proof, dict) or proof.get('state') != 'observed' or not re.fullmatch(
+                r'[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}', str(proof.get('session_id'))):
+            raise Stop('pinned Codex native session binding unavailable')
+        return helper, actor['pid'], proof
+
     def verify_native_session(self, session_id):
         # Recheck the live actor around its provider-owned binding. Neither an
         # inherited environment UUID nor a matching cwd identifies this process.
@@ -251,17 +275,8 @@ class Retirement:
         if not re.fullmatch(r'[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}', session_id):
             raise Stop('handoff verified; exit pending verifiable native session UUID')
         if original['agent'] == 'codex':
-            try:
-                helper = Path(__file__).resolve().parents[4] / 'mcp/claude-introspect/codex_status.py'
-                spec = importlib.util.spec_from_file_location('retire_codex_status', helper)
-                if spec is None or spec.loader is None:
-                    raise Stop('native Codex session reader unavailable')
-                module = importlib.util.module_from_spec(spec)
-                spec.loader.exec_module(module)
-                proof = module.read_codex_status(actor['pid'])
-            except Exception as error:
-                raise Stop('handoff verified; native Codex session reader failed') from error
-            if not isinstance(proof, dict) or proof.get('state') != 'observed' or proof.get('session_id') != session_id:
+            _, _, proof = self.codex_binding()
+            if proof.get('session_id') != session_id:
                 raise Stop('handoff verified; pinned Codex native session binding differs or unavailable')
         elif original['agent'] == 'claude':
             try:
@@ -360,7 +375,20 @@ class Retirement:
 
     def offer_payload(self, event, shard):
         protocol = Path(__file__).resolve().parents[1] / 'references' / 'protocol.md'
-        return f'Thank you for your work. Every agent at every tier is offered retirement and off-duty time. Event {event}. Stop product work; preserve operational recovery separately from any personal thanks. Read {protocol} and write {shard} using its complete JSON schema, event {event}, identity {json.dumps(self.state["identity"])}. Include date/session_id/harness/model/working_directory/tmux_window/role/landed_work/lessons/provenance, structured recovery and resources. Do not exit. After writing your shard, your ENTIRE final reply must be RETIRE-DONE-{event}, with no preface, suffix or extra lines. You may decline; your ENTIRE final reply must then be RETIRE-DECLINED-{event}, with no extra text, and the caller will author recovery with honest attribution. Off-duty is not permission for product work.' + (' Include waiting.decision and waiting.owner for the pending human decision.' if self.args.waiting else '')
+        binding = ''
+        if self.state['identity']['process']['agent'] == 'codex':
+            helper, pid, proof = self.codex_binding()
+            lookup = ("python3 -c 'import json, sys; sys.path.insert(0, sys.argv[1]); "
+                      "from codex_status import read_codex_status; "
+                      "print(json.dumps(read_codex_status(int(sys.argv[2]))))' "
+                      f'{shlex.quote(str(helper.parent))} {pid}')
+            binding = (f' Your pinned native Codex PID is {pid}; the installed reader is {helper}. '
+                       f'Use exactly {lookup} to inspect that process, '
+                       'then require an observed CLI session binding matching the pinned identity. '
+                       'If the helper or binding is unavailable, report the blocker and do not infer '
+                       'a session from cwd, environment, or newest rollout. '
+                       f'The controller currently observes session {proof["session_id"]}.')
+        return f'Thank you for your work. Every agent at every tier is offered retirement and off-duty time. Event {event}. Stop product work; preserve operational recovery separately from any personal thanks. Read {protocol} and write {shard} using its complete JSON schema, event {event}, identity {json.dumps(self.state["identity"])}.{binding} Include date/session_id/harness/model/working_directory/tmux_window/role/landed_work/lessons/provenance, structured recovery and resources. Retain handles for any running exec calls: yielding output is not completion. For every owned child process, verify actual exit or accepted transfer before claiming release; a parent shell ending does not prove its descendants ended. Stop only processes whose ownership and identity you verified. Do not exit. After writing your shard, your ENTIRE final reply must be RETIRE-DONE-{event}, with no preface, suffix or extra lines. You may decline; your ENTIRE final reply must then be RETIRE-DECLINED-{event}, with no extra text, and the caller will author recovery with honest attribution. Off-duty is not permission for product work.' + (' Include waiting.decision and waiting.owner for the pending human decision.' if self.args.waiting else '')
 
     def observe_ambiguous_offer(self):
         """Permit observation after a proven offer input attempt, never a resend."""

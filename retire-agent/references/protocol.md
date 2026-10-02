@@ -89,6 +89,15 @@ use `personal_thanks` and `thanks_provenance`, apart from recovery. Recovery
 must stand alone without live chat, pane inspection or predecessor resumption.
 The optional native resume handle is last and is not a reconstruction shortcut.
 
+Retain every running exec session handle until that call completes or is
+deliberately stopped. A yielded output chunk is not a completion receipt. Track
+owned child processes, including descendants of shells; a shell exiting after
+a stop signal does not establish that its children exited. Stop only processes
+whose ownership and identity were verified, then check actual descendants
+ended or document an accepted transfer. If a handle or child is still running,
+unknown, or orphaned without verified release, keep resource status pending and
+do not claim quiescence or submit DONE.
+
 After an observed decline, the caller writes the assigned file with
 `author: "caller"`, `declined: true`, and honest evidence attribution and
 uncertainty. Preserve a known session ID; explicitly use `"unknown"` if it
@@ -156,6 +165,11 @@ process using the installed native binding. Codex reuses the canonical pure
 `mcp/claude-introspect/codex_status.py` reader on the pinned native core (or
 original process): a unique writable CLI rollout descriptor, its first native
 session metadata, and descriptor inode/device checks, with pinned `CODEX_HOME`.
+The generated Codex offer gives the resolved absolute helper path, the pinned
+native PID, and an exact `python3 -c` invocation of `read_codex_status(pid)`.
+Require its `state: observed` and matching session UUID. If the helper or
+binding is unavailable, report the blocker; do not search all of home or
+`/nix/store` and do not infer a session from cwd, environment or newest rollout.
 Claude reads only `current.<pid>` from pinned `CLAUDE_CONFIG_DIR/session-state`
 and the installed hook's pinned `HOME/.claude/session-state` contract. Any
 present pointer must contain the same UUID, process start ticks and boot ID;

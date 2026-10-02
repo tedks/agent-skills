@@ -693,13 +693,40 @@ class Tests(unittest.TestCase):
 
     def test_native_reader_failure_is_pending_without_exit(self):
         self.actor()
-        entry = self.instrument("                proof = module.read_codex_status(actor['pid'])", "                raise RuntimeError('fixture reader unavailable')")
+        entry = self.instrument("            proof = module.read_codex_status(actor['pid'])", "            raise RuntimeError('fixture reader unavailable')")
         with patch.dict(os.environ, {'RETIRE_TEST_SCRIPT': str(entry)}):
             result = self.invoke()
         self.assertEqual(result.returncode, 2, result.stderr)
         self.assertIn('native Codex session reader failed', result.stderr)
         self.assertNotIn('Traceback', result.stderr)
+        self.assertNotIn('offer', self.state()[1])
         self.assertNotIn('exit', self.state()[1])
+
+    def test_codex_offer_pins_executable_reader_lookup_and_resources(self):
+        self.actor('resource')
+        result = self.invoke()
+        self.assertEqual(result.returncode, 2, result.stderr)
+        state = self.state()[1]
+        payload = Path(state['offer']['payload']).read_text()
+        native = (state['identity']['process'].get('cores') or [state['identity']['process']])[0]
+        helper = HERE.parents[3] / 'mcp/claude-introspect/codex_status.py'
+        self.assertIn(f'the installed reader is {helper}', payload)
+        self.assertIn(f'pinned native Codex PID is {native["pid"]}', payload)
+        lookup = payload.split('Use exactly ', 1)[1].split(' to inspect that process', 1)[0]
+        proof = json.loads(subprocess.check_output(shlex.split(lookup), text=True))
+        self.assertEqual(proof['state'], 'observed')
+        self.assertEqual(proof['session_id'], 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa')
+        self.assertIn('Retain handles for any running exec calls', payload)
+        self.assertIn('parent shell ending does not prove its descendants ended', payload)
+
+    def test_missing_codex_reader_blocks_before_offer(self):
+        self.actor()
+        entry = self.instrument("        if not helper.is_file():", "        if True:")
+        with patch.dict(os.environ, {'RETIRE_TEST_SCRIPT': str(entry)}):
+            result = self.invoke()
+        self.assertEqual(result.returncode, 2, result.stderr)
+        self.assertIn('native Codex session reader unavailable at ', result.stderr)
+        self.assertNotIn('offer', self.state()[1])
 
     def test_wrong_native_session_shard_never_requests_exit(self):
         self.actor('wrong-shard-id')

@@ -17,6 +17,11 @@ The sender must provide stable ordinary draft co-submission and guarded typed
 Codex / literal Claude exits. Defaults: `~/Projects/off-duty` on `master`,
 origin private on GitHub, and `~/Projects/orgs/master/doctrine/ROLES.md`.
 
+For Codex, the generated offer supplies the resolved absolute status-reader
+path, pinned native PID and exact Python lookup command. A missing reader or
+unobserved pinned binding blocks the offer. Do not substitute home-wide
+searches, `/nix/store` discovery, cwd, environment UUIDs or newest rollout.
+
 ## Modes
 
 - `scripts/retire.sh %PANE --retire`: thank the agent, preserve its handoff,
@@ -89,6 +94,12 @@ exclude human typing, audit the truth of recovery prose, or independently
 prove a resource owner's release claim.
 
 ## Repair verification
+
+Keep handles for running exec calls until they complete or are deliberately
+stopped. A yielded output chunk is not process completion. Before claiming
+resource release, identify owned descendants and verify their actual exit or
+accepted transfer; parent-shell exit alone is insufficient. Stop only verified
+owned processes, and record pending or unknown descendants as blockers.
 
 Run `scripts/test-retire.py` and `scripts/test-mutations.py` for isolated
 behavior and guard-removal tests. Set `RETIRE_TEST_SHARED_SCRIPTS` to the
