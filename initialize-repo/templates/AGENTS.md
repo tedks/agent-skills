@@ -42,37 +42,37 @@ nix develop --command <test>
 
 ## Issue tracking (ditz)
 
-Issues live as plain-text YAML on the `ditz-metadata` git branch, one
-file per issue; the `ditz` CLI reads and writes them. Nothing appears in
-the working tree, and no per-worktree setup is needed — any worktree of
-this repo can run `ditz`. Install via Nix:
-`nix run github:tedks/ditz -- <cmd>` (or install `github:tedks/ditz#ditz`).
+This project uses `ditz`; issues live on the `ditz-metadata` branch. Run
+commands from the intended worktree and check `~/.ditz-config` before writing:
+a configured issue directory can select a different store. Use the installed
+`ditz` binary and its `--help=plain`; do not initialize or migrate an existing
+tracker merely because discovery fails.
 
 ```bash
-ditz add "title"              # file a new issue (-t bugfix|feature|task, -c <component>)
-ditz ready                    # find available work (unblocked, ranked)
-ditz show <id>                # view issue details (add --json for machine output)
-ditz start <id>               # claim work (marks in_progress)
-ditz close <id> --reason "…"  # complete work (or --wontfix / --reorg)
-ditz comment <id> "message"   # add a progress note
-ditz sync                     # fetch/merge/push the ditz-metadata branch
+ditz ready --json             # readiness snapshot, not an ownership claim
+ditz show <id> --json         # inspect the exact issue before changing it
+ditz start <id> --json        # record in_progress; coordinate ownership separately
+ditz sync                    # explicitly fetch/merge/push metadata
 ```
 
-Include `ditz sync` in the end-of-session push workflow:
+Use the canonical [agent recipes](https://github.com/tedks/ditz/blob/master/docs/agent-recipes.md)
+for creation, multiline text and partial batch results, and the
+[JSON/retry contract](https://github.com/tedks/ditz/blob/master/docs/json-contracts.md)
+for command-specific receipts. If available, use the shared `issue-tracking`
+skill for context checks and recovery. Keep detailed CLI examples in those
+references rather than copying them here.
 
-```bash
-git pull --rebase
-ditz sync
-git push
-```
+`add --id <name>` creates once, returning an existing issue unchanged; it is
+not an upsert. Use `set` for intentional updates. Preserve exit status, stdout
+and stderr: a failed batch can have successful items, and an interrupted
+mutation can have taken effect. Inspect state/history before retrying an
+uncertain append or close. Local mutations do not prove remote sync; include
+`ditz sync` in the session completion workflow and check its result.
 
-Use `ditz` commands rather than hand-editing the `ditz-metadata` branch.
-Ditz has no priority / label / assignee fields: grouping is by component
-(`-c <component>`), sequencing is by the dependency graph
-(`ditz blocks <a> <b>`), and urgency is derived. Use a deterministic id
-with `--id <name>` when you need an idempotent add — re-creating with the
-same id is a no-op, which is what makes `ditz add` safe to call from
-unattended jobs.
+If `ditz` is absent, follow the project's environment policy. An explicit
+installation is `nix profile install github:tedks/ditz#ditz`; a one-off fallback
+is `nix run github:tedks/ditz -- <cmd>`. Do not silently switch binaries after a
+failed mutation, and do not mistake Nix startup output for ditz JSON.
 
 ## Planning
 

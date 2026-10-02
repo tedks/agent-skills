@@ -784,8 +784,11 @@ Note: `gh repo create --source` does not work from a worktree. Create the repo w
 
 ### Step F7: Initialize ditz
 
-`ditz` is installed via Nix — `nix run github:tedks/ditz -- <cmd>`, or
-install it once with `nix profile install github:tedks/ditz#ditz`.
+Use the installed `ditz` binary (`command -v ditz`, then
+`ditz --help=plain`). If absent, install it once with
+`nix profile install github:tedks/ditz#ditz`, following the project environment
+policy. `nix run github:tedks/ditz -- <cmd>` is an explicit one-off fallback;
+keep Nix startup output separate from any machine-readable ditz result.
 
 Run `ditz init` from inside the worktree. It creates the orphan
 `ditz-metadata` branch that holds the issues; nothing lands in the
@@ -799,8 +802,8 @@ ditz init --no-onboarding
 
 `--no-onboarding` suppresses the onboarding block ditz would otherwise
 append to `AGENTS.md`; the AGENTS.md written in Step F1 already carries a
-curated "Issue tracking (ditz)" section, and letting ditz append its own
-would duplicate it. Drop the flag if you would rather have ditz's text
+short "Issue tracking (ditz)" section linked to the canonical agent recipes
+and JSON/retry contract, and letting ditz append its own would duplicate it. Drop the flag if you would rather have ditz's text
 and delete the template's section instead — but do not keep both.
 
 Then push the branch so the issues exist on the remote:

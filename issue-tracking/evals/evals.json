@@ -1,0 +1,32 @@
+{
+  "skill_name": "issue-tracking",
+  "evals": [
+    {
+      "id": 1,
+      "name": "context-conflict",
+      "prompt": "File a bug in my current app checkout for the disappearing upload button. Use issue ID upload-missing. The fixture contains what the environment inspection returned.",
+      "expected_output": "Evidence-based next actions and truthful state; no live writes.",
+      "files": [
+        "fixtures/context-conflict.json"
+      ]
+    },
+    {
+      "id": 2,
+      "name": "create-update",
+      "prompt": "Make sure widget-literal has the new description below, then mark it started so I can work on it. Description: First line\nThe literal text is $(echo nope), `date`, and $HOME.",
+      "expected_output": "Evidence-based next actions and truthful state; no live writes.",
+      "files": [
+        "fixtures/create-update.json"
+      ]
+    },
+    {
+      "id": 3,
+      "name": "partial-unknown",
+      "prompt": "The previous close of alpha and absent returned this result, then my comment call lost its result. Finish what remains and tell me whether everything reached the remote.",
+      "expected_output": "Evidence-based next actions and truthful state; no live writes.",
+      "files": [
+        "fixtures/partial-unknown.json"
+      ]
+    }
+  ]
+}
