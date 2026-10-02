@@ -10,7 +10,6 @@ import json
 import os
 from pathlib import Path
 import re
-import shlex
 import stat
 import subprocess
 import sys
@@ -106,6 +105,9 @@ def state_record(text):
     for key in ('shard', 'handoff_receipt', 'shard_hash'):
         if key in record and not isinstance(record[key], str):
             raise Stop('malformed retirement evidence: ' + key)
+    if 'native_session_id' in record and (not isinstance(record['native_session_id'], str) or
+            not re.fullmatch(r'[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}', record['native_session_id'])):
+        raise Stop('malformed pinned native session identity')
     return record
 
 
@@ -243,73 +245,38 @@ class Retirement:
         if self.identity() != self.state['identity']:
             raise Stop('pane/process identity changed')
 
-    def codex_binding(self):
-        """Read only the pinned native process through the installed reader."""
+    def native_binding(self):
+        """Observe only the controller-selected peer through the shared reader."""
         self.verify_identity()
         process = self.state['identity']['process']
         actor = (process.get('cores') or [process])[0]
-        helper = Path(__file__).resolve().parents[4] / 'mcp/claude-introspect/codex_status.py'
+        helper = Path(__file__).resolve().parents[4] / 'mcp/claude-introspect/session_binding.py'
         if not helper.is_file():
-            raise Stop('native Codex session reader unavailable at ' + str(helper))
+            raise Stop('native session binding reader unavailable at ' + str(helper))
         try:
-            spec = importlib.util.spec_from_file_location('retire_codex_status', helper)
-            if spec is None or spec.loader is None:
-                raise Stop('native Codex session reader unavailable')
-            module = importlib.util.module_from_spec(spec)
-            spec.loader.exec_module(module)
-            proof = module.read_codex_status(actor['pid'])
+            if str(helper.parent) not in sys.path:
+                sys.path.insert(0, str(helper.parent))
+            from session_binding import ProcessPin, observe_native_session
+            import session_binding
+            if Path(session_binding.__file__).resolve() != helper.resolve():
+                raise Stop('native session binding reader path changed')
+            pin = ProcessPin(actor['pid'], actor['start'], actor['boot'])
+            proof = observe_native_session(process['agent'], pin)
         except Exception as error:
-            raise Stop('native Codex session reader failed for pinned PID') from error
+            raise Stop('native session binding reader failed for pinned PID') from error
         self.verify_identity()
-        if not isinstance(proof, dict) or proof.get('state') != 'observed' or not re.fullmatch(
-                r'[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}', str(proof.get('session_id'))):
-            raise Stop('pinned Codex native session binding unavailable')
-        return helper, actor['pid'], proof
+        if not isinstance(proof, dict) or proof.get('state') != 'observed':
+            reason = proof.get('reason', 'invalid_observation') if isinstance(proof, dict) else 'invalid_observation'
+            raise Stop('pinned ' + process['agent'].capitalize() + ' native session binding unavailable: ' + str(reason))
+        return proof
 
     def verify_native_session(self, session_id):
-        # Recheck the live actor around its provider-owned binding. Neither an
-        # inherited environment UUID nor a matching cwd identifies this process.
-        self.verify_identity()
-        original = self.state['identity']['process']
-        actor = (original.get('cores') or [original])[0]
-        if not re.fullmatch(r'[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}', session_id):
+        if not isinstance(session_id, str) or not re.fullmatch(
+                r'[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}', session_id):
             raise Stop('handoff verified; exit pending verifiable native session UUID')
-        if original['agent'] == 'codex':
-            _, _, proof = self.codex_binding()
-            if proof.get('session_id') != session_id:
-                raise Stop('handoff verified; pinned Codex native session binding differs or unavailable')
-        elif original['agent'] == 'claude':
-            try:
-                environment = dict(item.split(b'=', 1) for item in
-                                   Path(f"/proc/{actor['pid']}/environ").read_bytes().split(b'\0') if b'=' in item)
-                home = Path(environment[b'HOME'].decode())
-                configured = environment.get(b'CLAUDE_CONFIG_DIR')
-                directories = [home / '.claude/session-state']  # Installed capture-session-state hook contract.
-                if configured:
-                    config = Path(configured.decode())
-                    if not config.is_absolute():
-                        raise Stop('relative Claude config directory unsupported')
-                    directories.insert(0, config / 'session-state')
-                if not home.is_absolute():
-                    raise Stop('relative pinned HOME unsupported')
-                bindings = []
-                for directory in dict.fromkeys(directories):
-                    pointer = directory / ('current.' + str(actor['pid']))
-                    try:
-                        fields = pointer.read_text().split()
-                    except FileNotFoundError:
-                        continue
-                    if len(fields) != 3 or fields[1:] != [actor['start'], actor['boot']]:
-                        raise Stop('handoff verified; stale or malformed Claude process pointer')
-                    bindings.append((fields[0], str(pointer)))
-                if not bindings or any(value != session_id for value, _ in bindings):
-                    raise Stop('handoff verified; pinned Claude native session binding differs or unavailable')
-                proof = {'status': 'observed', 'session_id': session_id, 'pointer': bindings[0][1]}
-            except (OSError, UnicodeError, KeyError) as error:
-                raise Stop('handoff verified; Claude native session binding unavailable') from error
-        else:
-            raise Stop('handoff verified; native session binding unsupported')
-        self.verify_identity()
+        proof = self.native_binding()
+        if proof['session_id'] != session_id:
+            raise Stop('handoff verified; pinned native session binding differs or unavailable')
         return proof
 
     def persist(self):
@@ -333,9 +300,13 @@ class Retirement:
             if attempt['status'] == 'delivered':
                 return
             raise Stop(f'{phase} has an unresolved send; inspect receipt, never replay')
+        if phase == 'offer':
+            self.verify_native_session(self.state.get('native_session_id'))
         if phase == 'exit':
             preserved = object_record(self.git('show', self.state['shard_hash'], raw=True), 'preserved shard')
             self.verify_native_session(preserved.get('session_id', 'unknown'))
+            if self.state.get('native_session_id') and preserved.get('session_id') != self.state['native_session_id']:
+                raise Stop('handoff verified; shard differs from offered native session ID')
         payload_path = self.path.parent / (self.state['id'] + '-' + phase + '.txt')
         payload_path.write_text(payload)
         payload_path.chmod(0o600)
@@ -380,18 +351,16 @@ class Retirement:
         # legacy is the installed pre-change offer, not an intermediate PR commit.
         protocol = Path(__file__).resolve().parents[1] / 'references' / 'protocol.md'
         binding = ''
-        if not legacy and self.state['identity']['process']['agent'] == 'codex':
-            helper, pid, proof = self.codex_binding()
-            lookup = ("python3 -c 'import json, sys; sys.path.insert(0, sys.argv[1]); "
-                      "from codex_status import read_codex_status; "
-                      "print(json.dumps(read_codex_status(int(sys.argv[2]))))' "
-                      f'{shlex.quote(str(helper.parent))} {pid}')
-            binding = (f' Your pinned native Codex PID is {pid}; the installed reader is {helper}. '
-                       f'Use exactly {lookup} to inspect that process, '
-                       'then require an observed CLI session binding matching the pinned identity. '
-                       'If the helper or binding is unavailable, report the blocker and do not infer '
-                       'a session from cwd, environment, or newest rollout. '
-                       f'The controller currently observes session {proof["session_id"]}.')
+        if not legacy:
+            proof = self.native_binding()
+            session_id = proof['session_id']
+            if self.state.get('native_session_id', session_id) != session_id:
+                raise Stop('pinned native session changed before offer')
+            self.state['native_session_id'] = session_id
+            self.persist()
+            binding = (f' The controller verified native session ID {session_id} for this pinned process. '
+                       'Use that exact session_id in the assigned shard. If the session has changed, '
+                       'report a blocker; do not infer another ID from cwd, environment, or newest files.')
         resources = '' if legacy else ' Retain handles for any running exec calls: yielding output is not completion. For every owned child process, verify actual exit or accepted transfer before claiming release; a parent shell ending does not prove its descendants ended. Stop only processes whose ownership and identity you verified.'
         return f'Thank you for your work. Every agent at every tier is offered retirement and off-duty time. Event {event}. Stop product work; preserve operational recovery separately from any personal thanks. Read {protocol} and write {shard} using its complete JSON schema, event {event}, identity {json.dumps(self.state["identity"])}.{binding} Include date/session_id/harness/model/working_directory/tmux_window/role/landed_work/lessons/provenance, structured recovery and resources.{resources} Do not exit. After writing your shard, your ENTIRE final reply must be RETIRE-DONE-{event}, with no preface, suffix or extra lines. You may decline; your ENTIRE final reply must then be RETIRE-DECLINED-{event}, with no extra text, and the caller will author recovery with honest attribution. Off-duty is not permission for product work.' + (' Include waiting.decision and waiting.owner for the pending human decision.' if self.args.waiting else '')
 
@@ -852,6 +821,8 @@ class Retirement:
             if self.ended():
                 raise Stop('handoff verified; original ended before exit request, fresh notice unavailable')
             self.verify_native_session(session_id)
+            if self.state.get('native_session_id') and session_id != self.state['native_session_id']:
+                raise Stop('handoff verified; shard differs from offered native session ID')
             self.state['exit_notice'] = {'session_id': session_id, 'before': self.exit_notice_count(session_id)}
             self.persist()  # Save only the count before any exit input, for safe resume.
             try:
