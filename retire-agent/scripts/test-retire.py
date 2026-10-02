@@ -1135,6 +1135,22 @@ class Tests(unittest.TestCase):
         self.assertTrue(any(row['action'] == 'ambiguous-offer-completion-observed'
                             and row['disposition'] == 'DONE' for row in ledger))
 
+    def test_ambiguous_offer_uses_original_bytes_after_binding_disappears(self):
+        self.actor('ambiguous-done')
+        self.assertEqual(self.invoke().returncode, 2)
+        path, state = self.state()
+        self.assertEqual(state['offer']['status'], 'ambiguous')
+        entry = self.instrument("        if not helper.is_file():", "        if True:")
+        with patch.dict(os.environ, {'RETIRE_TEST_SCRIPT': str(entry)}):
+            result = self.invoke('--resume', str(path))
+        self.assertEqual(result.returncode, 2, result.stderr)
+        self.assertIn('native Codex session reader unavailable', result.stderr)
+        state = self.state()[1]
+        self.assertEqual(state['disposition'], 'DONE')
+        self.assertTrue(state.get('handoff_receipt'))
+        self.assertNotIn('exit', state)
+        self.assertEqual(self.observed()['pastes'], 1)
+
     def test_ambiguous_offer_time_only_footer_is_completion(self):
         self.actor('ambiguous-done-time')
         self.assertEqual(self.invoke().returncode, 2)

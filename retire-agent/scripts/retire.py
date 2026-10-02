@@ -340,6 +340,9 @@ class Retirement:
         payload_path.write_text(payload)
         payload_path.chmod(0o600)
         self.state[phase] = {'status': 'attempting', 'payload': str(payload_path)}
+        if phase == 'offer':
+            encoded = payload.encode()
+            self.state[phase].update(payload_bytes=len(encoded), payload_sha256=hashlib.sha256(encoded).hexdigest())
         self.persist()  # A crash from here is ambiguous, never a resend.
         self.audit('send-attempt', phase=phase)
         control = []
@@ -403,14 +406,15 @@ class Retirement:
                 or attempt.get('payload') != str(expected)
                 or expected.is_symlink() or not expected.is_file()):
             raise Stop('ambiguous offer lacks pinned positive input evidence; never replay')
-        event = self.state['id']
-        wanted = self.offer_payload(event, self.path.parent / (event + '.shard')).encode()
+        size, digest = attempt.get('payload_bytes'), attempt.get('payload_sha256')
+        if type(size) is not int or not 0 < size <= 65536 or not isinstance(digest, str) or not re.fullmatch(r'[0-9a-f]{64}', digest):
+            raise Stop('ambiguous offer lacks original payload digest; never replay')
         descriptor = os.open(expected, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
         with os.fdopen(descriptor, 'rb') as offer:
             if not stat.S_ISREG(os.fstat(offer.fileno()).st_mode):
                 raise Stop('preserved ambiguous offer must be a regular file')
-            actual = offer.read(len(wanted) + 1)
-        if actual != wanted:
+            actual = offer.read(size + 1)
+        if len(actual) != size or hashlib.sha256(actual).hexdigest() != digest:
             raise Stop('preserved ambiguous offer payload does not match pinned event')
         self.verify_identity()
         self.audit('ambiguous-offer-observe-only', phase='offer', status='ambiguous')

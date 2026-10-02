@@ -36,13 +36,16 @@ The controller never accepts a reported alternate shard path.
 If the shared sender reported an ambiguous **offer** after an actual paste and
 positive Enter, `--resume` may observe this same event without sending again.
 The pinned pane and process, complete byte-for-byte preserved event-specific
-offer file and sender input report must still agree on every pending resume,
+offer file (checked against its length and SHA-256 saved before the first send)
+and sender input report must still agree on every pending resume,
 including one with a cached DONE disposition. Only the current exact final assistant completion or
 decline block above advances disposition; the sender report remains ambiguous
 in the private record. A missing, wrong, quoted, incomplete or followed marker
 does not advance. This is not a retry or a way to waive shard, resource,
 private remote, native-session or exit checks. No such observation-only path
 exists for an ambiguous exit command.
+The saved offer is checked without re-reading a potentially changed native
+session; exit still requires a fresh pinned native binding matching the shard.
 
 The complete envelope (use explicit `"none"` or empty lists where appropriate):
 
