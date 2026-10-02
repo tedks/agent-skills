@@ -1151,6 +1151,30 @@ class Tests(unittest.TestCase):
         self.assertNotIn('exit', state)
         self.assertEqual(self.observed()['pastes'], 1)
 
+    def test_previous_version_ambiguous_offer_is_verified_and_upgraded(self):
+        self.actor('ambiguous-done')
+        self.assertEqual(self.invoke().returncode, 2)
+        path, state = self.state()
+        spec = importlib.util.spec_from_file_location('retire_fixture_legacy', HERE / 'retire.py')
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        legacy = module.Retirement.offer_payload(
+            SimpleNamespace(state=state, args=SimpleNamespace(waiting=False)),
+            state['id'], path.with_suffix('.shard'), legacy=True)
+        state['offer'].pop('payload_bytes')
+        state['offer'].pop('payload_sha256')
+        path.write_text(json.dumps(state))
+        self.assertEqual(self.invoke('--resume', str(path)).returncode, 2)
+        self.assertNotIn('handoff_receipt', self.state()[1])
+        Path(state['offer']['payload']).write_text(legacy)
+        resumed = self.invoke('--resume', str(path))
+        self.assertEqual(resumed.returncode, 0, resumed.stderr)
+        upgraded = self.state()[1]
+        self.assertEqual(upgraded['disposition'], 'DONE')
+        self.assertEqual(upgraded['offer']['payload_bytes'], len(legacy.encode()))
+        self.assertRegex(upgraded['offer']['payload_sha256'], r'^[0-9a-f]{64}$')
+        self.assertEqual(self.observed()['pastes'], 1)
+
     def test_ambiguous_offer_time_only_footer_is_completion(self):
         self.actor('ambiguous-done-time')
         self.assertEqual(self.invoke().returncode, 2)

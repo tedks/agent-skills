@@ -46,6 +46,10 @@ private remote, native-session or exit checks. No such observation-only path
 exists for an ambiguous exit command.
 The saved offer is checked without re-reading a potentially changed native
 session; exit still requires a fresh pinned native binding matching the shard.
+An ambiguous offer persisted by the preceding version has no saved digest.
+For that exact legacy envelope only, reconstruct the preceding offer text,
+compare its complete bytes, then save its length and digest for later resumes.
+Missing or partial digest fields on any other payload remain pending.
 
 The complete envelope (use explicit `"none"` or empty lists where appropriate):
 

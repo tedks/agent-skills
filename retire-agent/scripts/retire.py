@@ -376,10 +376,10 @@ class Retirement:
         if self.state[phase]['status'] != 'delivered':
             raise Stop(f'{phase} {self.state[phase]["status"]}; exact payload preserved')
 
-    def offer_payload(self, event, shard):
+    def offer_payload(self, event, shard, legacy=False):
         protocol = Path(__file__).resolve().parents[1] / 'references' / 'protocol.md'
         binding = ''
-        if self.state['identity']['process']['agent'] == 'codex':
+        if not legacy and self.state['identity']['process']['agent'] == 'codex':
             helper, pid, proof = self.codex_binding()
             lookup = ("python3 -c 'import json, sys; sys.path.insert(0, sys.argv[1]); "
                       "from codex_status import read_codex_status; "
@@ -391,7 +391,8 @@ class Retirement:
                        'If the helper or binding is unavailable, report the blocker and do not infer '
                        'a session from cwd, environment, or newest rollout. '
                        f'The controller currently observes session {proof["session_id"]}.')
-        return f'Thank you for your work. Every agent at every tier is offered retirement and off-duty time. Event {event}. Stop product work; preserve operational recovery separately from any personal thanks. Read {protocol} and write {shard} using its complete JSON schema, event {event}, identity {json.dumps(self.state["identity"])}.{binding} Include date/session_id/harness/model/working_directory/tmux_window/role/landed_work/lessons/provenance, structured recovery and resources. Retain handles for any running exec calls: yielding output is not completion. For every owned child process, verify actual exit or accepted transfer before claiming release; a parent shell ending does not prove its descendants ended. Stop only processes whose ownership and identity you verified. Do not exit. After writing your shard, your ENTIRE final reply must be RETIRE-DONE-{event}, with no preface, suffix or extra lines. You may decline; your ENTIRE final reply must then be RETIRE-DECLINED-{event}, with no extra text, and the caller will author recovery with honest attribution. Off-duty is not permission for product work.' + (' Include waiting.decision and waiting.owner for the pending human decision.' if self.args.waiting else '')
+        resources = '' if legacy else ' Retain handles for any running exec calls: yielding output is not completion. For every owned child process, verify actual exit or accepted transfer before claiming release; a parent shell ending does not prove its descendants ended. Stop only processes whose ownership and identity you verified.'
+        return f'Thank you for your work. Every agent at every tier is offered retirement and off-duty time. Event {event}. Stop product work; preserve operational recovery separately from any personal thanks. Read {protocol} and write {shard} using its complete JSON schema, event {event}, identity {json.dumps(self.state["identity"])}.{binding} Include date/session_id/harness/model/working_directory/tmux_window/role/landed_work/lessons/provenance, structured recovery and resources.{resources} Do not exit. After writing your shard, your ENTIRE final reply must be RETIRE-DONE-{event}, with no preface, suffix or extra lines. You may decline; your ENTIRE final reply must then be RETIRE-DECLINED-{event}, with no extra text, and the caller will author recovery with honest attribution. Off-duty is not permission for product work.' + (' Include waiting.decision and waiting.owner for the pending human decision.' if self.args.waiting else '')
 
     def observe_ambiguous_offer(self):
         """Permit observation after a proven offer input attempt, never a resend."""
@@ -407,6 +408,10 @@ class Retirement:
                 or expected.is_symlink() or not expected.is_file()):
             raise Stop('ambiguous offer lacks pinned positive input evidence; never replay')
         size, digest = attempt.get('payload_bytes'), attempt.get('payload_sha256')
+        legacy = size is None and digest is None
+        if legacy:
+            original = self.offer_payload(self.state['id'], self.path.parent / (self.state['id'] + '.shard'), legacy=True).encode()
+            size, digest = len(original), hashlib.sha256(original).hexdigest()
         if type(size) is not int or not 0 < size <= 65536 or not isinstance(digest, str) or not re.fullmatch(r'[0-9a-f]{64}', digest):
             raise Stop('ambiguous offer lacks original payload digest; never replay')
         descriptor = os.open(expected, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
@@ -417,6 +422,9 @@ class Retirement:
         if len(actual) != size or hashlib.sha256(actual).hexdigest() != digest:
             raise Stop('preserved ambiguous offer payload does not match pinned event')
         self.verify_identity()
+        if legacy:
+            attempt.update(payload_bytes=size, payload_sha256=digest)
+            self.persist()  # Only the exact previous-version offer can be upgraded.
         self.audit('ambiguous-offer-observe-only', phase='offer', status='ambiguous')
 
     def observe(self):

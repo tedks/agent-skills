@@ -18,6 +18,7 @@ mutations = [
     ('ambiguous offer pinned payload', "or attempt.get('payload') != str(expected)", 'or False', 'test_ambiguous_offer_positive_input_and_shard_gates'),
     ('ambiguous offer pinned digest', 'if len(actual) != size or hashlib.sha256(actual).hexdigest() != digest:', 'if False:', 'test_ambiguous_offer_rejects_changed_missing_or_symlink_payload'),
     ('ambiguous offer no live binding dependency', 'size, digest = attempt.get(\'payload_bytes\'), attempt.get(\'payload_sha256\')', 'self.codex_binding()\n        size, digest = attempt.get(\'payload_bytes\'), attempt.get(\'payload_sha256\')', 'test_ambiguous_offer_uses_original_bytes_after_binding_disappears'),
+    ('previous offer digest upgrade', 'if legacy:\n            original = self.offer_payload', 'if False:\n            original = self.offer_payload', 'test_previous_version_ambiguous_offer_is_verified_and_upgraded'),
     ('ambiguous cached DONE reobservation', "if ambiguous_offer or self.state.get('disposition') != 'DONE':", "if self.state.get('disposition') != 'DONE':", 'test_ambiguous_offer_rechecks_cached_done_after_bad_shard'),
     ('ambiguous caller decline reobservation', "if self.observe() != 'DECLINED':", 'if False:', 'test_ambiguous_offer_caller_decline_requires_current_marker'),
     ('narrowed event namespace', "r'[0-9a-f]{32}\\.json'", "r'[0-9a-f]{33}\\.json'", 'test_malformed_state_and_history_preserved'),
