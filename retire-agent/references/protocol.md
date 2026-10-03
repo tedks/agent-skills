@@ -216,7 +216,7 @@ Waits are bounded: `--wait` defaults to 300 seconds (maximum 1800), model-result
 polling `--poll` defaults to 60 seconds (maximum 90); tests may shorten polling.
 Use `--wait 1200` for a handoff that needs 10–20 minutes. If the observation
 budget ends, continue with the same mode and target using
-`--resume PRIVATE_STATE --wait 1200`; a delivered offer is never resent.
+`scripts/retire.sh %PANE --resume PRIVATE_STATE --wait 1200`; a delivered offer is never resent.
 Process exit has a separate fast poll. The shared sender has its own bounded
 waits. Exit may end the harness before a sender receipt; the original process
 end and fresh same-session native notice remain mandatory. Offer acceptance

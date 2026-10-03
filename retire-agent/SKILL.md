@@ -81,12 +81,12 @@ The wrapper directly `exec`s Python: pending or usage failure exits nonzero
 (2), and only completed retirement exits zero. If piping output through `tail`
 or another command, enable shell `pipefail` so the caller retains that status.
 Use `--wait 1200` for a 10–20 minute shard; the maximum is 1800 seconds.
-The script emits a private state path on failure. `--resume PATH` continues
+The script emits a private state path on failure. `scripts/retire.sh %PANE --resume PATH` continues
 observation after a delivered offer, without resending it. After an observed
-decline, author the assigned shard then use `--resume PATH --caller-shard`.
-Only a proven pre-paste deferral permits `--resume PATH --retry-deferred offer`
+decline, author the assigned shard then use `scripts/retire.sh %PANE --resume PATH --caller-shard`.
+Only a proven pre-paste deferral permits `scripts/retire.sh %PANE --resume PATH --retry-deferred offer`
 (or `exit`). An ambiguous offer with a pinned positive paste and Enter can be
-observed on `--resume PATH` without replay: only a final assistant
+observed on `scripts/retire.sh %PANE --resume PATH` without replay: only a final assistant
 `RETIRE-DONE` or `RETIRE-DECLINED` for that exact event advances disposition.
 The sender result remains ambiguous; absent or unsupported completion stays
 pending. Ambiguous exit attempts still require the independent native notice

@@ -625,6 +625,12 @@ class Tests(unittest.TestCase):
         self.assertEqual(usage.returncode, 2, usage.stderr)
         self.assertIn('wait in (0,1800]', usage.stderr)
         self.assertNotIn('Traceback', usage.stderr)
+        missing_pane = subprocess.run(
+            [os.environ.get('RETIRE_TEST_SCRIPT', str(HERE / 'retire.sh')),
+             '--resume', '/no/such/state'], env=self.env, text=True,
+            capture_output=True, timeout=12)
+        self.assertEqual(missing_pane.returncode, 2, missing_pane.stderr)
+        self.assertIn('the following arguments are required: pane', missing_pane.stderr)
 
     def test_wait_zero_rejected_and_maximum_accepted(self):
         self.actor()
