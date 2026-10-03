@@ -183,7 +183,12 @@ def terminal(directory, mode):
                 draft = b'human unfinished draft ' + str(typing_tick).encode()
                 draw()
             if due is not None and time.monotonic() >= due:
-                history += '● RETIRE-DONE-' + event + '\r\n'
+                if mode == 'claude-real-reply-row-late':
+                    history += '● RETIRE-DONE-' + event + '\r\n✻ Baked for 37s · done 6:25 PM\r\n'
+                elif mode == 'codex-real-reply-row-late':
+                    history += '• RETIRE-DONE-' + event + '\r\n• Worked for 19s • 19:35\r\n'
+                else:
+                    history += '● RETIRE-DONE-' + event + '\r\n'
                 due = None
                 draw()
             cleared = directory / 'human-cleared-history'
@@ -337,8 +342,15 @@ def terminal(directory, mode):
                                     history += '● Shard written.\r\n  RETIRE-DONE-' + event + '\r\n'
                                 elif mode == 'late-done':
                                     due = time.monotonic() + .2
+                                elif mode in ('claude-real-reply-row-late', 'codex-real-reply-row-late'):
+                                    due = time.monotonic() + 1
                                 else:
-                                    history += '● RETIRE-' + disposition + '-' + event + '\r\n'
+                                    reply_bullet = '•' if mode == 'codex-real-reply-row' else '●'
+                                    history += reply_bullet + ' RETIRE-' + disposition + '-' + event + '\r\n'
+                                    if mode == 'claude-real-reply-row':
+                                        history += '✻ Baked for 37s · done 6:25 PM\r\n'
+                                    if mode == 'codex-real-reply-row':
+                                        history += '• Worked for 19s • 19:35\r\n'
                                     if mode == 'padded-marker':
                                         history = history[:-2] + '   \t\r\n'
                                     if 'codex-footer' in mode:
@@ -631,6 +643,56 @@ class Tests(unittest.TestCase):
             capture_output=True, timeout=12)
         self.assertEqual(missing_pane.returncode, 2, missing_pane.stderr)
         self.assertIn('the following arguments are required: pane', missing_pane.stderr)
+
+    def test_claude_real_reply_row_with_valid_shard(self):
+        self.actor('claude-real-reply-row')
+        result = self.invoke()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.observed()['exit_enters'], 1)
+
+    def test_codex_real_reply_row_with_valid_shard(self):
+        self.actor('codex-real-reply-row')
+        result = self.invoke()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.observed()['exit_enters'], 1)
+
+    def test_claude_real_reply_row_on_resume(self):
+        self.actor('claude-real-reply-row-late')
+        first = self.invoke('--wait', '.05')
+        self.assertEqual(first.returncode, 2, first.stderr)
+        path, state = self.state()
+        self.assertEqual(state['offer']['status'], 'delivered')
+        result = self.invoke('--resume', str(path), '--wait', '2')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.observed()['pastes'], 1)
+
+    def test_codex_real_reply_row_on_resume(self):
+        self.actor('codex-real-reply-row-late')
+        first = self.invoke('--wait', '.05')
+        self.assertEqual(first.returncode, 2, first.stderr)
+        path, state = self.state()
+        self.assertEqual(state['offer']['status'], 'delivered')
+        result = self.invoke('--resume', str(path), '--wait', '2')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.observed()['pastes'], 1)
+
+    def test_reply_row_cannot_publish_invalid_shard_on_resume(self):
+        self.actor('claude-real-reply-row-late')
+        self.assertEqual(self.invoke('--wait', '.05').returncode, 2)
+        path, _ = self.state()
+        shard = path.with_suffix('.shard')
+        original = shard.read_bytes()
+        data = json.loads(original)
+        data['session_id'] = 'unknown'
+        shard.write_text(json.dumps(data))
+        bad = self.invoke('--resume', str(path), '--wait', '2')
+        self.assertEqual(bad.returncode, 2, bad.stderr)
+        self.assertIn('agent must establish its own session identity', bad.stderr)
+        self.assertNotIn('handoff_receipt', self.state()[1])
+        shard.write_bytes(original)
+        good = self.invoke('--resume', str(path), '--wait', '2')
+        self.assertEqual(good.returncode, 0, good.stderr)
+        self.assertEqual(self.observed()['pastes'], 1)
 
     def test_wait_zero_rejected_and_maximum_accepted(self):
         self.actor()

@@ -410,7 +410,15 @@ class Retirement:
         event = self.state['id']
         # Only the final assistant block can establish disposition. The shared
         # API already excludes input; a Claude upper composer rule can remain.
-        candidates = [i for i, row in enumerate(rows) if re.match(r'^[●•] ', row)]
+        agent = self.state['identity']['process']['agent']
+        codex_footer_row = re.compile(
+            r'(?:  |• )(?:Worked for (?:[1-9][0-9]*h )?(?:[1-9][0-9]*m )?[0-5]?[0-9]s [·•] )?'
+            r'(?:[01][0-9]|2[0-3]):[0-5][0-9]')
+        # Codex can render its duration footer with a leading bullet. It is
+        # native UI, not a later assistant reply that invalidates the marker.
+        candidates = [i for i, row in enumerate(rows)
+                      if re.match(r'^[●•] ', row)
+                      and not (agent == 'codex' and codex_footer_row.fullmatch(row.rstrip()))]
         if not candidates:
             return None
         position = candidates[-1]
@@ -420,20 +428,19 @@ class Retirement:
         tail = [row for row in rows[position + 1:]
                 if row.strip() and not (len(row.strip()) >= 3 and set(row.strip()) == {'─'})]
         # Codex renders this measured UI duration/time line after a final reply
-        # ("Worked for 1m 21s · 12:23" or "Worked for 19s • 19:35", with
+        # ("Worked for 1m 21s · 12:23" or "• Worked for 19s • 19:35", with
         # hours for long turns, or the bare time for sub-minute turns).
         # It is not agent prose; permit one exact
         # footer only for pinned Codex.
-        codex_footer = (self.state['identity']['process']['agent'] == 'codex'
+        codex_footer = (agent == 'codex'
                         and len(tail) == 1
-                        and re.fullmatch(r'  (?:Worked for (?:[1-9][0-9]*h )?(?:[1-9][0-9]*m )?[0-5]?[0-9]s [·•] )?(?:[01][0-9]|2[0-3]):[0-5][0-9]', tail[0].rstrip()))
-        # Claude 2.1.283 emits this native turn-duration row plus a padded
-        # token status row. Verb pool/glyph/duration were verified in its local
-        # renderer; only the measured default 12-hour done time is recognized.
-        claude_footer = (self.state['identity']['process']['agent'] == 'claude'
-                         and len(tail) == 2
+                        and codex_footer_row.fullmatch(tail[0].rstrip()))
+        # Claude can render the duration alone or add a padded token row.
+        # A token row is UI metadata, never a prerequisite for DONE.
+        claude_footer = (agent == 'claude'
+                         and len(tail) in (1, 2)
                          and re.fullmatch(r'✻ (?:Baked|Brewed|Churned|Cogitated|Cooked|Crunched|Sautéed|Worked) for (?:[0-5]?[0-9]s|[1-9][0-9]*m [0-5]?[0-9]s) · done (?:[1-9]|1[0-2]):[0-5][0-9] (?:AM|PM)', tail[0].rstrip())
-                         and re.fullmatch(r' +[0-9]+ tokens', tail[1].rstrip()))
+                         and (len(tail) == 1 or re.fullmatch(r' +[0-9]+ tokens', tail[1].rstrip())))
         if tail and not (codex_footer or claude_footer):
             return None
         return marker[1]

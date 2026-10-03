@@ -16,15 +16,15 @@ must show that marker as the final assistant block; trailing continuation text
 or a later assistant response keeps completion pending. Trailing UI whitespace
 is ignored. Blank rows and the
 pure horizontal Claude composer separator are permitted suffix rows. A pinned
-Codex target may also render one measured UI footer `  Worked for 1m 21s · 12:23`
-or `  Worked for 19s • 19:35` (the duration and 24-hour time vary). Only that anchored minute/second/time
+Codex target may also render one measured UI footer `  Worked for 1m 21s · 12:23`,
+`  Worked for 19s • 19:35`, or `• Worked for 19s • 19:35` (the duration and 24-hour time vary). Only that anchored minute/second/time
 layout is recognized; additional prose, duplicate footers, other status text,
 and that footer on a Claude target still keep completion pending.
-A pinned Claude target may render one native duration row followed by one padded
-integer `tokens` status row: `✻ Baked for 19s · done 1:27 PM`. Claude2.1.283's
+A pinned Claude target may render one native duration row, optionally followed by
+one padded integer `tokens` status row: `✻ Baked for 37s · done 6:25 PM`. Claude 2.1.283's
 local renderer verifies the glyph and verb pool Baked, Brewed, Churned,
 Cogitated, Cooked, Crunched, Sautéed, Worked, and seconds/minutes-plus-seconds
-format. Only the measured default 12-hour AM/PM done time and complete token
+format. Only the measured default 12-hour AM/PM done time and, when present, a complete token
 row are accepted; unknown verbs, other time layouts, partial status, extra
 prose or later assistant blocks remain pending. This consumer disposition
 rule uses the public shared response-row API; it does not fork its normalizer.
