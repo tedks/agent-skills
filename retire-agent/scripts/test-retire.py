@@ -122,6 +122,14 @@ def terminal(directory, mode):
     due = None
     children = []
     typing_tick = 0
+    def record_codex_completion(message, later_started=False):
+        native_fd.write(json.dumps({'type': 'event_msg', 'payload': {
+            'type': 'task_complete', 'turn_id': 'fixture-turn',
+            'last_agent_message': message}}) + '\n')
+        if later_started:
+            native_fd.write(json.dumps({'type': 'event_msg', 'payload': {
+                'type': 'task_started', 'turn_id': 'later-fixture-turn'}}) + '\n')
+        native_fd.flush()
     if mode in ('node-core', 'extra-core', 'linger-core'):
         core = str(directory / '@openai/codex/node_modules/@openai/codex-linux-x64/vendor/test/bin/codex')
         names = (core,) if mode == 'linger-core' else (core, core if mode == 'extra-core' else 'node')
@@ -187,6 +195,7 @@ def terminal(directory, mode):
                     history += '● RETIRE-DONE-' + event + '\r\n✻ Baked for 37s · done 6:25 PM\r\n'
                 elif mode == 'codex-real-reply-row-late':
                     history += '• RETIRE-DONE-' + event + '\r\n• Worked for 19s • 19:35\r\n'
+                    record_codex_completion('RETIRE-DONE-' + event)
                 else:
                     history += '● RETIRE-DONE-' + event + '\r\n'
                 due = None
@@ -345,12 +354,25 @@ def terminal(directory, mode):
                                 elif mode in ('claude-real-reply-row-late', 'codex-real-reply-row-late'):
                                     due = time.monotonic() + 1
                                 else:
-                                    reply_bullet = '•' if mode == 'codex-real-reply-row' else '●'
+                                    reply_bullet = '•' if mode in ('codex-real-reply-row', 'codex-spoofed-footer-reply',
+                                                                   'codex-bullet-footer-later-turn',
+                                                                   'codex-bullet-footer-malformed-rollout') else '●'
                                     history += reply_bullet + ' RETIRE-' + disposition + '-' + event + '\r\n'
-                                    if mode == 'claude-real-reply-row':
+                                    if mode in ('claude-real-reply-row', 'claude-real-reply-row-status'):
                                         history += '✻ Baked for 37s · done 6:25 PM\r\n'
-                                    if mode == 'codex-real-reply-row':
+                                        if mode == 'claude-real-reply-row-status':
+                                            history += '  globalVersion: 2.1.288 · latestVersion: 2.1.289 ✘ Auto-update failed: no write permission to npm prefix · Run claude doctor\r\n'
+                                    if mode in ('codex-real-reply-row', 'codex-spoofed-footer-reply',
+                                                'codex-bullet-footer-later-turn',
+                                                'codex-bullet-footer-malformed-rollout'):
                                         history += '• Worked for 19s • 19:35\r\n'
+                                        record_codex_completion(
+                                            'Worked for 19s • 19:35' if mode == 'codex-spoofed-footer-reply'
+                                            else 'RETIRE-DONE-' + event,
+                                            later_started=(mode == 'codex-bullet-footer-later-turn'))
+                                        if mode == 'codex-bullet-footer-malformed-rollout':
+                                            native_fd.write('{')
+                                            native_fd.flush()
                                     if mode == 'padded-marker':
                                         history = history[:-2] + '   \t\r\n'
                                     if 'codex-footer' in mode:
@@ -655,6 +677,21 @@ class Tests(unittest.TestCase):
         result = self.invoke()
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(self.observed()['exit_enters'], 1)
+
+    def test_claude_reply_row_with_native_status_suffix(self):
+        self.actor('claude-real-reply-row-status')
+        result = self.invoke()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.observed()['exit_enters'], 1)
+
+    def test_codex_footer_shaped_later_reply_stays_pending(self):
+        self.assert_completion_block_pending('codex-spoofed-footer-reply')
+
+    def test_codex_new_turn_after_footer_stays_pending(self):
+        self.assert_completion_block_pending('codex-bullet-footer-later-turn')
+
+    def test_codex_partial_rollout_after_footer_stays_pending(self):
+        self.assert_completion_block_pending('codex-bullet-footer-malformed-rollout')
 
     def test_claude_real_reply_row_on_resume(self):
         self.actor('claude-real-reply-row-late')

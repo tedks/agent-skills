@@ -397,6 +397,48 @@ class Retirement:
             self.persist()  # Only the exact previous-version offer can be upgraded.
         self.audit('ambiguous-offer-observe-only', phase='offer', status='ambiguous')
 
+    def codex_final_marker(self, marker):
+        """Confirm the pinned rollout's latest turn completed with this exact reply."""
+        try:
+            proof = self.native_binding()
+            observation = proof.get('observation') or {}
+            source = observation.get('rollout_path')
+            if not isinstance(source, str):
+                return False
+            descriptor = os.open(source, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+            with os.fdopen(descriptor, 'rb') as rollout:
+                size = os.fstat(rollout.fileno()).st_size
+                if not stat.S_ISREG(os.fstat(rollout.fileno()).st_mode):
+                    return False
+                start = max(0, size - 8 * 1024 * 1024)
+                rollout.seek(start)
+                content = rollout.read(8 * 1024 * 1024 + 1)
+            if not content.endswith(b'\n') or len(content) > 8 * 1024 * 1024:
+                return False
+            if start:
+                content = content.split(b'\n', 1)[1]
+            latest = None
+            for line in content.splitlines():
+                if len(line) > 1024 * 1024:
+                    return False
+                record = json.loads(line)
+                if not isinstance(record, dict):
+                    return False
+                payload = record.get('payload') or {}
+                if not isinstance(payload, dict):
+                    return False
+                if record.get('type') == 'event_msg':
+                    if payload.get('type') == 'task_started':
+                        latest = ('started', None)
+                    elif payload.get('type') == 'task_complete':
+                        latest = ('complete', payload.get('last_agent_message'))
+                elif (record.get('type') == 'response_item' and payload.get('role') == 'assistant'
+                      and latest and latest[0] == 'complete'):
+                    latest = ('assistant_after_completion', None)
+            return latest == ('complete', marker)
+        except (Stop, OSError, ValueError, TypeError, IndexError, KeyError):
+            return False
+
     def observe(self):
         self.verify_identity()
         try:
@@ -414,15 +456,23 @@ class Retirement:
         codex_footer_row = re.compile(
             r'(?:  |• )(?:Worked for (?:[1-9][0-9]*h )?(?:[1-9][0-9]*m )?[0-5]?[0-9]s [·•] )?'
             r'(?:[01][0-9]|2[0-3]):[0-5][0-9]')
-        # Codex can render its duration footer with a leading bullet. It is
-        # native UI, not a later assistant reply that invalidates the marker.
-        candidates = [i for i, row in enumerate(rows)
-                      if re.match(r'^[●•] ', row)
-                      and not (agent == 'codex' and codex_footer_row.fullmatch(row.rstrip()))]
+        candidates = [i for i, row in enumerate(rows) if re.match(r'^[●•] ', row)]
         if not candidates:
             return None
         position = candidates[-1]
         marker = re.fullmatch(r'[●•] RETIRE-(DONE|DECLINED)-' + event, rows[position].rstrip())
+        # A bullet-shaped Codex duration row is visually indistinguishable
+        # from another assistant reply. Ignore it only when the pinned native
+        # rollout says the latest completed turn ended with this marker.
+        if (not marker and agent == 'codex' and len(candidates) >= 2
+                and codex_footer_row.fullmatch(rows[position].rstrip())):
+            preceding = candidates[-2]
+            native_marker = re.fullmatch(r'[●•] RETIRE-(DONE|DECLINED)-' + event,
+                                         rows[preceding].rstrip())
+            if (native_marker and native_marker[1] == 'DONE'
+                    and self.codex_final_marker('RETIRE-DONE-' + event)):
+                position, marker = preceding, native_marker
+                self.state['native_marker_witness'] = True
         if not marker:
             return None
         tail = [row for row in rows[position + 1:]
@@ -440,7 +490,8 @@ class Retirement:
         claude_footer = (agent == 'claude'
                          and len(tail) in (1, 2)
                          and re.fullmatch(r'✻ (?:Baked|Brewed|Churned|Cogitated|Cooked|Crunched|Sautéed|Worked) for (?:[0-5]?[0-9]s|[1-9][0-9]*m [0-5]?[0-9]s) · done (?:[1-9]|1[0-2]):[0-5][0-9] (?:AM|PM)', tail[0].rstrip())
-                         and (len(tail) == 1 or re.fullmatch(r' +[0-9]+ tokens', tail[1].rstrip())))
+                         and (len(tail) == 1 or re.fullmatch(r' +[0-9]+ tokens', tail[1].rstrip())
+                              or re.fullmatch(r' +globalVersion: [0-9]+(?:\.[0-9]+)+ · latestVersion: [0-9]+(?:\.[0-9]+)+(?: ✘ Auto-update failed: no write permission to npm prefix · Run claude doctor)?', tail[1].rstrip())))
         if tail and not (codex_footer or claude_footer):
             return None
         return marker[1]
@@ -829,6 +880,9 @@ class Retirement:
             if self.ended():
                 raise Stop('handoff verified; original ended before exit request, fresh notice unavailable')
             self.verify_native_session(session_id)
+            if (self.state.get('native_marker_witness')
+                    and not self.codex_final_marker('RETIRE-DONE-' + event)):
+                raise Stop('handoff verified; native final marker no longer current')
             if self.state.get('native_session_id') and session_id != self.state['native_session_id']:
                 raise Stop('handoff verified; shard differs from offered native session ID')
             self.state['exit_notice'] = {'session_id': session_id, 'before': self.exit_notice_count(session_id)}

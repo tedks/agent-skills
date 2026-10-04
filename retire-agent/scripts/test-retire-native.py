@@ -189,13 +189,13 @@ def main():
             assert identity['process']['agent'] == harness, 'native harness identity not established'
             observer.state = {'identity': identity}
             proof = observer.verify_native_session(context['session_id'])
-            context['controller_identity_proof'] = (proof.get('observation', {}).get('rollout_path')
+            context['controller_identity_proof'] = ((proof.get('observation') or {}).get('rollout_path')
                                                     or proof.get('pointer_paths'))
             # Native process binding, not cwd or an inherited UUID, establishes
             # identity. Transcript crosscheck reads only this exact owned file.
             pinned = (identity['process'].get('cores') or [identity['process']])[0]
             if harness == 'codex':
-                assert proof.get('observation', {}).get('cwd') == str(worktree), 'owned rollout cwd differs'
+                assert (proof.get('observation') or {}).get('cwd') == str(worktree), 'owned rollout cwd differs'
             else:
                 env = dict(item.split(b'=', 1) for item in Path(f"/proc/{pinned['pid']}/environ").read_bytes().split(b'\0') if b'=' in item)
                 config = Path(env[b'CLAUDE_CONFIG_DIR'].decode()) if env.get(b'CLAUDE_CONFIG_DIR') else Path(env[b'HOME'].decode()) / '.claude'
