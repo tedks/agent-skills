@@ -29,6 +29,7 @@ mutations = [
     ('Codex reply bullet footer witness', "and self.codex_final_marker('RETIRE-' + native_marker[1] + '-' + event)", 'and True', 'test_codex_footer_shaped_later_reply_stays_pending'),
     ('Codex declined bullet footer', "self.codex_final_marker('RETIRE-' + native_marker[1] + '-' + event)", "self.codex_final_marker('RETIRE-DONE-' + event)", 'test_codex_declined_reply_row_with_bullet_footer'),
     ('Codex cached witness before publication', "                if self.state.get('native_marker_witness'):", '                if False:', 'test_codex_cached_footer_witness_rechecked_before_publication'),
+    ('Codex witness before exit', "            if self.state.get('native_marker_witness'):\n                disposition = self.state.get('disposition')", "            if False:\n                disposition = self.state.get('disposition')", 'test_codex_footer_witness_rechecked_before_exit'),
     ('desktop support server recognized', "if os.readlink(f'/proc/{pid}/exe') == executable:", 'if False:', 'test_desktop_codex_app_server_classifier_is_exact'),
     ('desktop support command exact', "and argv[1:] == [b'app-server', b'--listen', b'stdio://', b'']", 'and True', 'test_desktop_codex_app_server_classifier_is_exact'),
     ('desktop support binary exact', "and re.fullmatch(r'/nix/store/[0-9a-z]{32}-codex-desktop-[^/]+/lib/chatgpt/resources/codex', executable)", 'and True', 'test_desktop_codex_app_server_classifier_is_exact'),

@@ -754,6 +754,20 @@ class Tests(unittest.TestCase):
         self.assertNotIn('handoff_receipt', self.state()[1])
         self.assertFalse((self.repo / 'waiting').exists())
 
+    def test_codex_footer_witness_rechecked_before_exit(self):
+        self.actor('codex-real-reply-row')
+        before = "            self.verify_native_session(session_id)\n"
+        after = ("            self.verify_native_session(session_id)\n"
+                 "            with open(self.native_binding()['observation']['rollout_path'], 'a') as stream:\n"
+                 "                stream.write(json.dumps({'type': 'event_msg', 'payload': {'type': 'task_started', 'turn_id': 'later-turn'}}) + '\\n')\n")
+        entry = self.instrument(before, after)
+        with patch.dict(os.environ, {'RETIRE_TEST_SCRIPT': str(entry)}):
+            result = self.invoke()
+        self.assertEqual(result.returncode, 2, result.stderr)
+        self.assertIn('handoff verified; native final marker no longer current', result.stderr)
+        self.assertTrue(self.state()[1].get('handoff_receipt'))
+        self.assertFalse((self.directory / 'exit-order.json').exists())
+
     def test_claude_real_reply_row_on_resume(self):
         self.actor('claude-real-reply-row-late')
         first = self.invoke('--wait', '.05')
