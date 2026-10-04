@@ -176,6 +176,8 @@ def terminal(directory, mode):
             body = 'Do you trust the contents of this directory?\r\n  1. Yes\r\n  2. No\r\n'
         sys.stdout.write('\x1b[?2004h\x1b[2J\x1b[H' + body)
         row = history.count('\n') + (3 if mode.startswith('claude') else 2)
+        if mode == 'claude-real-reply-row-status-late' and 'globalVersion:' in history and os.get_terminal_size().columns < 125:
+            row += 1  # The synthetic status line occupies two display rows.
         if visible_marker:
             row += 1
         cursor = 3 if mode == 'claude-ghost' and event and not draft else 3 + len(collapsed)
@@ -191,8 +193,10 @@ def terminal(directory, mode):
                 draft = b'human unfinished draft ' + str(typing_tick).encode()
                 draw()
             if due is not None and time.monotonic() >= due:
-                if mode == 'claude-real-reply-row-late':
+                if mode in ('claude-real-reply-row-late', 'claude-real-reply-row-status-late'):
                     history += '● RETIRE-DONE-' + event + '\r\n✻ Baked for 37s · done 6:25 PM\r\n'
+                    if mode == 'claude-real-reply-row-status-late':
+                        history += '  globalVersion: 2.1.288 · latestVersion: 2.1.289 ✘ Auto-update failed: no write permission to npm prefix · Run claude doctor\r\n'
                 elif mode == 'codex-real-reply-row-late':
                     history += '• RETIRE-DONE-' + event + '\r\n• Worked for 19s • 19:35\r\n'
                     record_codex_completion('RETIRE-DONE-' + event)
@@ -297,6 +301,8 @@ def terminal(directory, mode):
                             data = shard_data(event, identity)
                             if mode == 'claude-uppercase':
                                 data['session_id'] = session
+                            if mode == 'codex-real-reply-row-invalid-shard':
+                                data['session_id'] = 'unknown'
                             if mode.endswith('wrong-shard-id'):
                                 data['session_id'] = 'bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb'
                             if mode == 'claude-switched-wrong-shard-id':
@@ -351,10 +357,10 @@ def terminal(directory, mode):
                                     history += '● Shard written.\r\n  RETIRE-DONE-' + event + '\r\n'
                                 elif mode == 'late-done':
                                     due = time.monotonic() + .2
-                                elif mode in ('claude-real-reply-row-late', 'codex-real-reply-row-late'):
+                                elif mode in ('claude-real-reply-row-late', 'claude-real-reply-row-status-late', 'codex-real-reply-row-late'):
                                     due = time.monotonic() + 1
                                 else:
-                                    reply_bullet = '•' if mode in ('codex-real-reply-row', 'codex-spoofed-footer-reply',
+                                    reply_bullet = '•' if mode in ('codex-real-reply-row', 'codex-real-reply-row-invalid-shard', 'decline-codex-real-reply-row', 'codex-spoofed-footer-reply',
                                                                    'codex-bullet-footer-later-turn',
                                                                    'codex-bullet-footer-malformed-rollout') else '●'
                                     history += reply_bullet + ' RETIRE-' + disposition + '-' + event + '\r\n'
@@ -362,13 +368,13 @@ def terminal(directory, mode):
                                         history += '✻ Baked for 37s · done 6:25 PM\r\n'
                                         if mode == 'claude-real-reply-row-status':
                                             history += '  globalVersion: 2.1.288 · latestVersion: 2.1.289 ✘ Auto-update failed: no write permission to npm prefix · Run claude doctor\r\n'
-                                    if mode in ('codex-real-reply-row', 'codex-spoofed-footer-reply',
+                                    if mode in ('codex-real-reply-row', 'codex-real-reply-row-invalid-shard', 'decline-codex-real-reply-row', 'codex-spoofed-footer-reply',
                                                 'codex-bullet-footer-later-turn',
                                                 'codex-bullet-footer-malformed-rollout'):
                                         history += '• Worked for 19s • 19:35\r\n'
                                         record_codex_completion(
                                             'Worked for 19s • 19:35' if mode == 'codex-spoofed-footer-reply'
-                                            else 'RETIRE-DONE-' + event,
+                                            else 'RETIRE-' + disposition + '-' + event,
                                             later_started=(mode == 'codex-bullet-footer-later-turn'))
                                         if mode == 'codex-bullet-footer-malformed-rollout':
                                             native_fd.write('{')
@@ -684,6 +690,30 @@ class Tests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(self.observed()['exit_enters'], 1)
 
+    def test_claude_reply_row_with_wrapped_native_status(self):
+        self.actor('claude-real-reply-row-status-late')
+        first = self.invoke('--wait', '.05')
+        self.assertEqual(first.returncode, 2, first.stderr)
+        path, state = self.state()
+        self.assertEqual(state['offer']['status'], 'delivered')
+        self.command(*self.tmux, 'resize-window', '-t', self.pane, '-x', '80')
+        result = self.invoke('--resume', str(path), '--wait', '3')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.observed()['exit_enters'], 1)
+
+    def test_codex_declined_reply_row_with_bullet_footer(self):
+        self.actor('decline-codex-real-reply-row')
+        result = self.invoke()
+        self.assertEqual(result.returncode, 2, result.stderr)
+        path, state = self.state()
+        self.assertEqual(state['disposition'], 'DECLINED')
+        shard = path.with_suffix('.shard')
+        data = shard_data(state['id'], state['identity'])
+        data.update(author='caller', declined=True, provenance='caller after native declined reply')
+        shard.write_text(json.dumps(data))
+        resumed = self.invoke('--resume', str(path), '--caller-shard')
+        self.assertEqual(resumed.returncode, 0, resumed.stderr)
+
     def test_codex_footer_shaped_later_reply_stays_pending(self):
         self.assert_completion_block_pending('codex-spoofed-footer-reply')
 
@@ -692,6 +722,27 @@ class Tests(unittest.TestCase):
 
     def test_codex_partial_rollout_after_footer_stays_pending(self):
         self.assert_completion_block_pending('codex-bullet-footer-malformed-rollout')
+
+    def test_codex_cached_footer_witness_rechecked_before_publication(self):
+        self.actor('codex-real-reply-row-invalid-shard')
+        first = self.invoke()
+        self.assertEqual(first.returncode, 2, first.stderr)
+        self.assertIn('agent must establish its own session identity', first.stderr)
+        path, state = self.state()
+        self.assertEqual(state['disposition'], 'DONE')
+        self.assertTrue(state['native_marker_witness'])
+        shard = path.with_suffix('.shard')
+        data = json.loads(shard.read_text())
+        data['session_id'] = 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa'
+        shard.write_text(json.dumps(data))
+        rollout = self.directory / 'codex-config/sessions/rollout-fixture-/rollout-aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa.jsonl'
+        with rollout.open('a') as stream:
+            stream.write(json.dumps({'type': 'event_msg', 'payload': {'type': 'task_started', 'turn_id': 'later-turn'}}) + '\n')
+        result = self.invoke('--resume', str(path))
+        self.assertEqual(result.returncode, 2, result.stderr)
+        self.assertIn('native final marker no longer current before handoff publication', result.stderr)
+        self.assertNotIn('handoff_receipt', self.state()[1])
+        self.assertFalse((self.repo / 'waiting').exists())
 
     def test_claude_real_reply_row_on_resume(self):
         self.actor('claude-real-reply-row-late')

@@ -21,12 +21,15 @@ Codex target may also render one measured UI footer `  Worked for 1m 21s · 12:2
 layout is recognized; additional prose, duplicate footers, other status text,
 and that footer on a Claude target still keep completion pending. A bullet-prefixed
 Codex footer is accepted only when the pinned rollout's latest completed turn
-has the exact marker as `last_agent_message`; a later started turn, partial
-rollout or changed final message keeps it pending. This witness is rechecked
-before exit.
+has the exact DONE or DECLINED marker as `last_agent_message`; a later started
+turn, partial rollout or changed final message keeps it pending. This witness
+is rechecked before private handoff publication and before exit.
 A pinned Claude target may render one native duration row, optionally followed by
-one padded integer `tokens` status row or the measured `globalVersion` / `latestVersion`
-auto-update status row: `✻ Baked for 37s · done 6:25 PM`. Claude's
+one padded integer `tokens` status row or the measured Claude 2.1.288
+`globalVersion` / `latestVersion` auto-update status row. A narrow pane may
+wrap that exact status into two or three display rows; only contiguous rows
+that reassemble to the measured status are accepted. The duration row is
+`✻ Baked for 37s · done 6:25 PM`. Claude's
 local renderer verifies the glyph and verb pool Baked, Brewed, Churned,
 Cogitated, Cooked, Crunched, Sautéed, Worked, and seconds/minutes-plus-seconds
 format. Only the measured default 12-hour AM/PM done time and the measured

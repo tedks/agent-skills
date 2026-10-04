@@ -469,8 +469,7 @@ class Retirement:
             preceding = candidates[-2]
             native_marker = re.fullmatch(r'[●•] RETIRE-(DONE|DECLINED)-' + event,
                                          rows[preceding].rstrip())
-            if (native_marker and native_marker[1] == 'DONE'
-                    and self.codex_final_marker('RETIRE-DONE-' + event)):
+            if (native_marker and self.codex_final_marker('RETIRE-' + native_marker[1] + '-' + event)):
                 position, marker = preceding, native_marker
                 self.state['native_marker_witness'] = True
         if not marker:
@@ -487,11 +486,12 @@ class Retirement:
                         and codex_footer_row.fullmatch(tail[0].rstrip()))
         # Claude can render the duration alone or add a padded token row.
         # A token row is UI metadata, never a prerequisite for DONE.
+        claude_status = ''.join(row.rstrip() for row in tail[1:]) if len(tail) > 1 else ''
         claude_footer = (agent == 'claude'
-                         and len(tail) in (1, 2)
+                         and 1 <= len(tail) <= 4
                          and re.fullmatch(r'✻ (?:Baked|Brewed|Churned|Cogitated|Cooked|Crunched|Sautéed|Worked) for (?:[0-5]?[0-9]s|[1-9][0-9]*m [0-5]?[0-9]s) · done (?:[1-9]|1[0-2]):[0-5][0-9] (?:AM|PM)', tail[0].rstrip())
-                         and (len(tail) == 1 or re.fullmatch(r' +[0-9]+ tokens', tail[1].rstrip())
-                              or re.fullmatch(r' +globalVersion: [0-9]+(?:\.[0-9]+)+ · latestVersion: [0-9]+(?:\.[0-9]+)+(?: ✘ Auto-update failed: no write permission to npm prefix · Run claude doctor)?', tail[1].rstrip())))
+                         and (len(tail) == 1 or (len(tail) == 2 and re.fullmatch(r' +[0-9]+ tokens', claude_status))
+                              or re.fullmatch(r' +globalVersion: [0-9]+(?:\.[0-9]+)+ · latestVersion: [0-9]+(?:\.[0-9]+)+(?: ✘ Auto-update failed: no write permission to npm prefix · Run claude doctor)?', claude_status)))
         if tail and not (codex_footer or claude_footer):
             return None
         return marker[1]
@@ -837,6 +837,10 @@ class Retirement:
             self.verify_identity()
             with locked(self.common / 'retirement.lock'):  # Unique session publication.
                 data, content = self.validate_shard(shard)
+                if self.state.get('native_marker_witness'):
+                    disposition = self.state.get('disposition')
+                    if disposition not in ('DONE', 'DECLINED') or not self.codex_final_marker('RETIRE-' + disposition + '-' + event):
+                        raise Stop('native final marker no longer current before handoff publication')
                 waiting = self.repo / 'waiting'
                 waiting.mkdir(mode=0o700, exist_ok=True)
                 if waiting.is_symlink():
@@ -880,9 +884,10 @@ class Retirement:
             if self.ended():
                 raise Stop('handoff verified; original ended before exit request, fresh notice unavailable')
             self.verify_native_session(session_id)
-            if (self.state.get('native_marker_witness')
-                    and not self.codex_final_marker('RETIRE-DONE-' + event)):
-                raise Stop('handoff verified; native final marker no longer current')
+            if self.state.get('native_marker_witness'):
+                disposition = self.state.get('disposition')
+                if disposition not in ('DONE', 'DECLINED') or not self.codex_final_marker('RETIRE-' + disposition + '-' + event):
+                    raise Stop('handoff verified; native final marker no longer current')
             if self.state.get('native_session_id') and session_id != self.state['native_session_id']:
                 raise Stop('handoff verified; shard differs from offered native session ID')
             self.state['exit_notice'] = {'session_id': session_id, 'before': self.exit_notice_count(session_id)}
