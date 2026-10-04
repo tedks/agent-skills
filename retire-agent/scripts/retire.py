@@ -486,12 +486,17 @@ class Retirement:
                         and codex_footer_row.fullmatch(tail[0].rstrip()))
         # Claude can render the duration alone or add a padded token row.
         # A token row is UI metadata, never a prerequisite for DONE.
-        claude_status = ''.join(row.rstrip() for row in tail[1:]) if len(tail) > 1 else ''
+        claude_statuses = {tail[1].rstrip()} if len(tail) > 1 else set()
+        for fragment in tail[2:4]:
+            # tmux may trim a space at a physical wrap boundary. Both joins
+            # must still pass the anchored, measured status-row pattern.
+            claude_statuses = {prefix + separator + fragment.rstrip()
+                               for prefix in claude_statuses for separator in ('', ' ')}
         claude_footer = (agent == 'claude'
                          and 1 <= len(tail) <= 4
                          and re.fullmatch(r'✻ (?:Baked|Brewed|Churned|Cogitated|Cooked|Crunched|Sautéed|Worked) for (?:[0-5]?[0-9]s|[1-9][0-9]*m [0-5]?[0-9]s) · done (?:[1-9]|1[0-2]):[0-5][0-9] (?:AM|PM)', tail[0].rstrip())
-                         and (len(tail) == 1 or (len(tail) == 2 and re.fullmatch(r' +[0-9]+ tokens', claude_status))
-                              or re.fullmatch(r' +globalVersion: [0-9]+(?:\.[0-9]+)+ · latestVersion: [0-9]+(?:\.[0-9]+)+(?: ✘ Auto-update failed: no write permission to npm prefix · Run claude doctor)?', claude_status)))
+                         and (len(tail) == 1 or (len(tail) == 2 and any(re.fullmatch(r' +[0-9]+ tokens', status) for status in claude_statuses))
+                              or any(re.fullmatch(r' +globalVersion: [0-9]+(?:\.[0-9]+)+ · latestVersion: [0-9]+(?:\.[0-9]+)+(?: ✘ Auto-update failed: no write permission to npm prefix · Run claude doctor)?', status) for status in claude_statuses)))
         if tail and not (codex_footer or claude_footer):
             return None
         return marker[1]

@@ -28,7 +28,9 @@ A pinned Claude target may render one native duration row, optionally followed b
 one padded integer `tokens` status row or the measured Claude 2.1.288
 `globalVersion` / `latestVersion` auto-update status row. A narrow pane may
 wrap that exact status into two or three display rows; only contiguous rows
-that reassemble to the measured status are accepted. The duration row is
+that reassemble to the measured status are accepted. Because tmux may trim
+one space at a wrap boundary, each boundary is checked both with and without
+that space against the exact full-row pattern. The duration row is
 `✻ Baked for 37s · done 6:25 PM`. Claude's
 local renderer verifies the glyph and verb pool Baked, Brewed, Churned,
 Cogitated, Cooked, Crunched, Sautéed, Worked, and seconds/minutes-plus-seconds

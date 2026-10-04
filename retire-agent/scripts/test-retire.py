@@ -701,6 +701,16 @@ class Tests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(self.observed()['exit_enters'], 1)
 
+    def test_claude_reply_row_with_space_at_wrap(self):
+        self.actor('claude-real-reply-row-status-late')
+        first = self.invoke('--wait', '.05')
+        self.assertEqual(first.returncode, 2, first.stderr)
+        path, state = self.state()
+        self.assertEqual(state['offer']['status'], 'delivered')
+        self.command(*self.tmux, 'resize-window', '-t', self.pane, '-x', '92')
+        result = self.invoke('--resume', str(path), '--wait', '3')
+        self.assertEqual(result.returncode, 0, result.stderr)
+
     def test_codex_declined_reply_row_with_bullet_footer(self):
         self.actor('decline-codex-real-reply-row')
         result = self.invoke()
