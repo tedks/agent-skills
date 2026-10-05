@@ -37,13 +37,17 @@ class SpawnDeliveryTests(unittest.TestCase):
         for key in ['TMUX','SPAWN_TMUX_SOCKET','SPAWN_TMUX_LABEL','SPAWN_CODEX_BIN','SPAWN_CODEX_MODEL']:
             self.env.pop(key, None)
         # Only --help may run (the --no-daemon probe); a native queue never may.
-        # Help fixtures are option excerpts: 0.160.0 lists --no-daemon, 0.146.0 does not.
+        # Help fixtures are option excerpts: 0.160.0 lists --no-daemon (style
+        # new), 0.146.0 does not (old). TOP_HELP/FORK_HELP pick each style.
         self.write(self.bin/'codex', '''#!/bin/bash
 if [[ "${@: -1}" == --help ]]; then
+    style=${TOP_HELP:-new}; [[ "$1" == fork ]] && style=${FORK_HELP:-$style}
     printf '%s\\n' "      --remote <ADDR>" "          Connect the TUI to a remote app server endpoint."
-    if [[ -z "$OLD_CODEX" ]]; then
-        printf '%s\\n' "      --no-daemon" "          Run without the shared background server, even if it is already running"
-    fi
+    case "$style" in
+        new) printf '%s\\n' "      --no-daemon" "          Run without the shared background server, even if it is already running";;
+        alias) printf '%s\\n' "  -n, --no-daemon" "          Run without the shared background server";;
+        prose) printf '%s\\n' "      --remote-only" "          Incompatible with --no-daemon, which this build lacks";;
+    esac
     exit 0
 fi
 exit 99
@@ -147,17 +151,24 @@ sys.exit(status)
         self.assertEqual(int((self.root/'cursor-out').read_text()),self.rollout.stat().st_size)
         self.assertLess(int((self.root/'startup-out').read_text()),int((self.root/'cursor-out').read_text()))
 
-    def test_cli_without_no_daemon_still_launches_without_it(self):
+    def test_no_daemon_follows_the_launched_subcommands_help(self):
         fork=['--fork-session',PARENT,'--compact-prompt-file',str(self.policy)]
-        for extra in [(),fork]:
-            for old in [True,False]:
-                with self.subTest(fork=bool(extra),old=old):
-                    self.log.unlink(missing_ok=True)
-                    result=self.launch(extra=extra,env={'OLD_CODEX':'1'} if old else {})
-                    self.assertEqual(result.returncode,0,result.stderr)
-                    argv=shlex.split((self.root/'launch').read_text())
-                    self.assertEqual('--no-daemon' in argv,not old)
-                    self.assertIn('--no-alt-screen',argv)
+        cases=[((),{'TOP_HELP':'new'},True),((),{'TOP_HELP':'old'},False),
+               ((),{'TOP_HELP':'alias'},True),((),{'TOP_HELP':'prose'},False),
+               ((),{'TOP_HELP':'new','FORK_HELP':'old'},True),
+               (fork,{'TOP_HELP':'new'},True),(fork,{'TOP_HELP':'old'},False),
+               (fork,{'TOP_HELP':'alias'},True),(fork,{'TOP_HELP':'prose'},False),
+               # A fork that probed top-level help would get these wrong.
+               (fork,{'TOP_HELP':'new','FORK_HELP':'old'},False),
+               (fork,{'TOP_HELP':'old','FORK_HELP':'new'},True)]
+        for extra,env,expected in cases:
+            with self.subTest(fork=bool(extra),**env):
+                self.log.unlink(missing_ok=True)
+                result=self.launch(extra=extra,env=env)
+                self.assertEqual(result.returncode,0,result.stderr)
+                argv=shlex.split((self.root/'launch').read_text())
+                self.assertEqual('--no-daemon' in argv,expected)
+                self.assertIn('--no-alt-screen',argv)
 
     def test_failed_compaction_never_sends_task(self):
         result=self.launch(extra=['--fork-session',PARENT,'--compact-prompt-file',str(self.policy),

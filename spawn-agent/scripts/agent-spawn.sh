@@ -389,7 +389,9 @@ codex_has_no_daemon() {
     # macOS has no coreutils timeout; clap's --help returns at once anyway.
     if command -v timeout >/dev/null; then bound=(timeout 20); fi
     help=$("${bound[@]}" "$codex_bin" "$@" --help 2>/dev/null) || return 1
-    grep -qE '^[[:space:]]*--no-daemon([[:space:],]|$)' <<<"$help"
+    # An option line, optionally after a clap short alias (`-n, --no-daemon`);
+    # a description sentence that mentions the flag never matches.
+    grep -qE '^[[:space:]]*(-[[:alnum:]],[[:space:]]+)?--no-daemon([[:space:],=<[]|$)' <<<"$help"
 }
 agent_command=("$agent")
 if [[ "$agent" == claude && -n "$model" ]]; then agent_command+=(--model "$model"); fi
