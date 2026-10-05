@@ -70,7 +70,7 @@ Record attempts privately without storing pane contents or unfinished human
 text. Before offer, bind the selected peer to its native session UUID. Before
 exit, match the immutable shard UUID to that offered ID and the pinned process:
 Codex uses its unique writable CLI rollout descriptor, which only a session
-running in its own process (`--no-daemon`) holds; Claude uses its
+running in its own process holds (not a client of the app-server daemon); Claude uses its
 per-process session pointer with start/boot identity. Missing or conflicting
 bindings leave the handoff pending without exit input. Verify all pinned
 original processes ended and a fresh native resume notice
@@ -111,7 +111,9 @@ owned processes, and record pending or unknown descendants as blockers.
 Run `scripts/test-retire.py` and `scripts/test-mutations.py` for isolated
 behavior and guard-removal tests. Set `RETIRE_TEST_SHARED_SCRIPTS` to the
 published spawn-agent `scripts` directory to verify a dependency checkout;
-the default is this checkout's sibling spawn-agent.
+the default is this checkout's sibling spawn-agent. The binding readers'
+suites under `mcp/claude-introspect/` import the MCP SDK: run each
+`test_*.py` with `uv run --script`, since plain `python3` cannot import `mcp`.
 
 `scripts/test-retire-native.py` is an opt-in model-token test. Pass `--worktree`
 naming an exclusively owned, clean disposable Git directory, `--evidence`

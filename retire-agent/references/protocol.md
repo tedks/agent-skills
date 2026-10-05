@@ -195,7 +195,10 @@ writes every attached thread, and nothing the process exposes says which one is
 its own. The reader reports `ambiguous_or_missing_live_rollout`, and handoff
 stays pending. Such a client's `/exit` prints `To reconnect, run:` and leaves the
 thread loaded in the daemon, so it is not an exit either. Launch and resume
-lanes with `--no-daemon`; `spawn-agent` does.
+lanes with `--no-daemon` where the CLI offers it; `spawn-agent` passes it when
+the binary's own help lists it. An older CLI without the flag launches without
+it, and nothing here shows such a session runs in its own process: if the
+reader cannot bind it, handoff stays pending.
 If the reader or binding is unavailable, report the blocker; do not search all
 of home or `/nix/store` or infer a session from cwd, environment or newest rollout.
 Claude reads only `current.<pid>` from pinned `CLAUDE_CONFIG_DIR/session-state`
