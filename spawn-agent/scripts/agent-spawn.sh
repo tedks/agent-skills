@@ -378,20 +378,33 @@ fi
 # therefore intentionally does not belong here. Explicit -C avoids Codex's
 # current-vs-saved-directory chooser, which is another modal where an automated
 # Enter would be unsafe.
+# --no-daemon keeps a Codex session in its own process: a client of the shared
+# app-server daemon holds no rollout, so retirement could never bind it. Pass
+# it only when this binary's own help for the subcommand lists it; older CLIs
+# (0.146 has none) reject unknown flags. Without it the launch proceeds as
+# before. That is not shown to be in-process: such a CLI that attaches to a
+# daemon leaves the lane unbindable, and retirement then stays pending.
+codex_has_no_daemon() {
+    local help bound=()
+    # macOS has no coreutils timeout; clap's --help returns at once anyway.
+    if command -v timeout >/dev/null; then bound=(timeout 20); fi
+    help=$("${bound[@]}" "$codex_bin" "$@" --help 2>/dev/null) || return 1
+    grep -qE '^[[:space:]]*--no-daemon([[:space:],]|$)' <<<"$help"
+}
 agent_command=("$agent")
 if [[ "$agent" == claude && -n "$model" ]]; then agent_command+=(--model "$model"); fi
-if [[ "$agent" == "codex" ]]; then
+if [[ "$agent" == "codex" && -z "$fork_session" ]]; then
     # Managed agent windows must not stop at an update chooser. Keep this a
     # process-local override: ordinary Codex launches still perform their
     # normal update check, and no global configuration is changed.
     # Preserve tmux scrollback so long submitted messages remain observable.
-    # --no-daemon keeps the session in this process: a client of the shared
-    # app-server daemon holds no rollout, so retirement could never bind it.
-    agent_command=("$codex_bin" --no-daemon --no-alt-screen -c check_for_update_on_startup=false)
+    no_daemon=(); if codex_has_no_daemon; then no_daemon=(--no-daemon); fi
+    agent_command=("$codex_bin" "${no_daemon[@]}" --no-alt-screen -c check_for_update_on_startup=false)
     if [[ -n "$codex_model" ]]; then agent_command+=(-m "$codex_model"); fi
 fi
 if [[ -n "$fork_session" ]]; then
-    agent_command=("$codex_bin" fork --no-daemon --no-alt-screen -c check_for_update_on_startup=false)
+    no_daemon=(); if codex_has_no_daemon fork; then no_daemon=(--no-daemon); fi
+    agent_command=("$codex_bin" fork "${no_daemon[@]}" --no-alt-screen -c check_for_update_on_startup=false)
     if [[ -n "$codex_model" ]]; then agent_command+=(-m "$codex_model"); fi
     if [[ -n "$compact_prompt_file" ]]; then
         # Pass only the path in argv, never the prompt body. TOML basic-string

@@ -36,7 +36,18 @@ class SpawnDeliveryTests(unittest.TestCase):
                         TEST_ROOT=str(self.root), TEST_ROLLOUT=str(self.rollout))
         for key in ['TMUX','SPAWN_TMUX_SOCKET','SPAWN_TMUX_LABEL','SPAWN_CODEX_BIN','SPAWN_CODEX_MODEL']:
             self.env.pop(key, None)
-        self.write(self.bin/'codex', '#!/bin/bash\nexit 99\n')  # Native queue must never run.
+        # Only --help may run (the --no-daemon probe); a native queue never may.
+        # Help fixtures are option excerpts: 0.160.0 lists --no-daemon, 0.146.0 does not.
+        self.write(self.bin/'codex', '''#!/bin/bash
+if [[ "${@: -1}" == --help ]]; then
+    printf '%s\\n' "      --remote <ADDR>" "          Connect the TUI to a remote app server endpoint."
+    if [[ -z "$OLD_CODEX" ]]; then
+        printf '%s\\n' "      --no-daemon" "          Run without the shared background server, even if it is already running"
+    fi
+    exit 0
+fi
+exit 99
+''')
         self.write(self.bin/'tmux', '''#!/usr/bin/env python3
 import os,sys,json,shlex
 from pathlib import Path
@@ -135,6 +146,18 @@ sys.exit(status)
         self.assertEqual((self.root/'rollout-out').read_text().strip(),str(self.rollout))
         self.assertEqual(int((self.root/'cursor-out').read_text()),self.rollout.stat().st_size)
         self.assertLess(int((self.root/'startup-out').read_text()),int((self.root/'cursor-out').read_text()))
+
+    def test_cli_without_no_daemon_still_launches_without_it(self):
+        fork=['--fork-session',PARENT,'--compact-prompt-file',str(self.policy)]
+        for extra in [(),fork]:
+            for old in [True,False]:
+                with self.subTest(fork=bool(extra),old=old):
+                    self.log.unlink(missing_ok=True)
+                    result=self.launch(extra=extra,env={'OLD_CODEX':'1'} if old else {})
+                    self.assertEqual(result.returncode,0,result.stderr)
+                    argv=shlex.split((self.root/'launch').read_text())
+                    self.assertEqual('--no-daemon' in argv,not old)
+                    self.assertIn('--no-alt-screen',argv)
 
     def test_failed_compaction_never_sends_task(self):
         result=self.launch(extra=['--fork-session',PARENT,'--compact-prompt-file',str(self.policy),
