@@ -187,6 +187,15 @@ the canonical bounded `codex_status.py` reader on the pinned native core (or
 original process): a unique writable CLI rollout descriptor, its first native
 session metadata, and descriptor inode/device checks, with pinned `CODEX_HOME`.
 Require `state: observed` and the same session UUID at each action boundary.
+Only a Codex session running in its own process can be bound. A TUI attached to
+the shared app-server daemon (what plain `codex` and `codex resume` do while the
+daemon runs; some options happen to force a private process, only `--no-daemon`
+guarantees one) holds no rollout descriptor: the daemon
+writes every attached thread, and nothing the process exposes says which one is
+its own. The reader reports `ambiguous_or_missing_live_rollout`, and handoff
+stays pending. Such a client's `/exit` prints `To reconnect, run:` and leaves the
+thread loaded in the daemon, so it is not an exit either. Launch and resume
+lanes with `--no-daemon`; `spawn-agent` does.
 If the reader or binding is unavailable, report the blocker; do not search all
 of home or `/nix/store` or infer a session from cwd, environment or newest rollout.
 Claude reads only `current.<pid>` from pinned `CLAUDE_CONFIG_DIR/session-state`

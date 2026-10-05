@@ -69,7 +69,8 @@ be required to reconstruct the work.
 Record attempts privately without storing pane contents or unfinished human
 text. Before offer, bind the selected peer to its native session UUID. Before
 exit, match the immutable shard UUID to that offered ID and the pinned process:
-Codex uses its unique writable CLI rollout descriptor; Claude uses its
+Codex uses its unique writable CLI rollout descriptor, which only a session
+running in its own process (`--no-daemon`) holds; Claude uses its
 per-process session pointer with start/boot identity. Missing or conflicting
 bindings leave the handoff pending without exit input. Verify all pinned
 original processes ended and a fresh native resume notice
