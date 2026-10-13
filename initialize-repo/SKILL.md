@@ -181,6 +181,13 @@ use the configured projects root throughout. Replace `<github.owner>` with
 the configured GitHub owner, requesting it if unset. Templates live alongside
 this skill and are accessed through the stable `~/.claude/skills/` install.
 
+Use the loader so defaults, `XDG_CONFIG_HOME`, and environment overrides apply:
+
+```bash
+python3 ~/.claude/skills/_shared/agent_skills_config.py get projects_root
+python3 ~/.claude/skills/_shared/agent_skills_config.py get github.owner
+```
+
 ## Instructions
 
 When this skill is invoked, follow the steps in order: Part 1 (base), then Part 2 (type-specific, skip for `bare`), then Part 3 (finalization).
