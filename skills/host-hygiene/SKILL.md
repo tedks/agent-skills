@@ -10,6 +10,9 @@ killing peers, deleting worktrees or peer caches, or changing shared tags.
 
 Use `scripts/hygiene.sh plan HOST PLAN.json --policy POLICY.json`. Linux,
 Python 3, SSH BatchMode, Docker and Nix tools are expected; nothing uses sudo.
+Local configuration uses Python 3.11+ and the [shared configuration](../_shared/configuration.md).
+If the policy omits `projects_root`, it uses the configured local value; verify
+that this absolute path also describes the target host before running.
 The script runs over SSH without installing or creating remote helper files.
 Use a private local state directory, e.g. `~/.local/state/hygiene/YYYYMMDD/HOST/`.
 Plan files are created exclusively with mode 0600. The printed SHA256 binds the
@@ -37,10 +40,10 @@ A small owner-maintained policy looks like this (replace full IDs):
 
 ```json
 {
-  "projects_root": "/home/tedks/Projects",
+  "projects_root": "/absolute/path/to/projects",
   "records": ["/absolute/path/to/current-owner-and-paused-lane-record.md"],
-  "protected": ["chaos-speech-p-ted"],
-  "tmp_owner": "dotfiles:7",
+  "protected": ["peer-service"],
+  "tmp_owner": "peer-lane",
   "builder": "default",
   "claims": [
     {"kind": "container", "id": "FULL_64_HEX_ID", "owner": "my-lane", "idle": true},
@@ -53,8 +56,8 @@ A small owner-maintained policy looks like this (replace full IDs):
 ```
 
 `records` is the explicit, nonempty list of required local ownership/reference
-documents. For the current fleet include Chaos quiescence b/h/u and the actual
-current PureSky checkpoint (the original controller/quiescence.md path has moved).
+documents. Include current ownership and pause records for every project on
+the target host; confirm their paths with the owning lanes.
 The owning lane confirms completeness; missing/unreadable records disable all
 eligibility. Incomplete remote project-root/compose scans disable Docker eligibility
 while independent Nix dead-graph/root checks remain usable.
@@ -115,9 +118,9 @@ Concrete retained classes:
   `/tmp` deletion is implemented: unprivileged access cannot prove complete
   process, mount and socket references across peers. Diagnostics name exact
   `sudo lsof +D PATH` and `sudo findmnt --target PATH` commands; these alone are
-  not a deletion authorization or complete reference proof. Framework's `/tmp`
-  remains owned by dotfiles:7 until an explicit release receipt is recorded in
-  the current policy. Changing a plan's owner or release field cannot enable it;
+  not a deletion authorization or complete reference proof. `/tmp` ownership is
+  unknown unless the current policy names `tmp_owner`; record explicit release
+  receipts with the owning lane. Changing a plan's owner or release field cannot enable it;
   even a released lease still requires a separate implementation of complete
   reference checking before any `/tmp` apply can be supported. Tracked follow-up:
   `host-hygiene-tmp-references`.

@@ -345,8 +345,7 @@ def inventory(policy, record_text, record_errors):
         diagnostics.append(f"/tmp inventory inaccessible; retain: {exc}")
     return dict(version=1, machine=socket.gethostname(), uid=os.getuid(), created=now,
                 entries=entries, diagnostics=diagnostics, reference_ok=reference_ok,
-                tmp_owner=policy.get("tmp_owner", "dotfiles:7" if socket.gethostname().split('.')[0]
-                                     == "framework0" else "unknown"))
+                tmp_owner=policy.get("tmp_owner", "unknown"))
 
 
 def apply(plan, policy, record_text, record_errors, owner):
@@ -466,7 +465,7 @@ def main():
         return
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("mode", choices=("plan", "apply"))
-    parser.add_argument("host", help="SSH host, e.g. framework0.local (no SSH options)")
+    parser.add_argument("host", help="SSH host, e.g. build.local (no SSH options)")
     parser.add_argument("plan", type=Path)
     parser.add_argument("--policy", type=Path, required=True)
     parser.add_argument("--reviewed-sha256")
@@ -474,7 +473,14 @@ def main():
     args = parser.parse_args()
     if not re.fullmatch(r"[a-zA-Z0-9][a-zA-Z0-9@._-]*", args.host):
         parser.error("invalid SSH host")
+    # Only the local controller imports configuration. The SSH --remote payload
+    # remains standalone and receives the resolved policy as JSON.
+    sys.dont_write_bytecode = True
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2] / '_shared'))
+    from agent_skills_config import load_config
+    config = load_config()
     policy = json.loads(args.policy.read_text())
+    policy.setdefault("projects_root", config["projects_root"])
     record_text, record_errors = protections(policy)
     request = dict(mode=args.mode, policy=policy, record_text=record_text, record_errors=record_errors)
     if args.mode == "apply":

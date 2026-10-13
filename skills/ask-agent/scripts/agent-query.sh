@@ -25,7 +25,7 @@
 # rather than forking it, so the yielded id equals the requested one. The
 # non-mutating alternatives -- `codex exec fork`, `claude --fork-session` -- are
 # deliberately not wrapped: a council round wants the seat's history to
-# accumulate. See docs/ask-agent-session-resume.md for the evidence.
+# accumulate. See ../references/session-resume-evidence.md for the evidence.
 #
 # --session-id-file exists because two of the three agents only reveal the id
 # they generated in output the caller cannot reliably parse. The file gets the
@@ -499,6 +499,8 @@ case "$agent" in
         [[ -n "$model" ]] && cmd+=(--model "$model")
         ;;
     codex)
+        source "$(dirname -- "$(readlink -f -- "${BASH_SOURCE[0]}")")/../../_shared/config.sh"
+        codex_bin=$(agent_skills_get harness.codex_bin)
         if [[ -n "$resume" ]]; then
             # `codex exec resume` is NOT `codex exec` plus an id: it rejects
             # -s/--sandbox, -C/--cd, --add-dir, --approve-for-me and -p/--profile.
@@ -508,10 +510,10 @@ case "$agent" in
             # Resume appends to the original rollout in place (14 -> 26 lines of
             # the same file, no new one) and reports the same id back, so there
             # is nothing to capture.
-            cmd=(codex exec resume "$resume" -)
+            cmd=("$codex_bin" exec resume "$resume" -)
             known_sid="$resume"
         else
-            cmd=(codex exec -)
+            cmd=("$codex_bin" exec -)
             # A fresh codex session mints an id we can only learn from codex's
             # own banner, so this is the one path that has to give up `exec`.
             # Only when the caller actually asked for the id: the cost is real
@@ -927,7 +929,7 @@ fi
 # --- codex, starting fresh, with the id requested ---
 # The only path here that cannot exec: codex mints the id and announces it in
 # its banner, so something has to outlive the run to read it. Everything else
-# above keeps exec. See docs/ask-agent-session-resume.md for the case analysis.
+# above keeps exec. See ../references/session-resume-evidence.md for the case analysis.
 #
 # The banner goes to STDERR -- verified: stdout carried the reply and nothing
 # else -- so capturing it cannot contaminate the reply. stdout is not touched

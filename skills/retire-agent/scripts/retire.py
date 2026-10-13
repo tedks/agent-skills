@@ -20,6 +20,10 @@ import uuid
 sys.dont_write_bytecode = True  # Loading the shared API must not modify its installation.
 
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[2] / '_shared'))
+from agent_skills_config import load_config, tmux_command
+
+
 class Stop(Exception):
     pass
 
@@ -158,16 +162,11 @@ def proc(pid):
 class Retirement:
     def __init__(self, args):
         self.args = args
-        self.repo = Path(os.environ.get('RETIRE_REPO', '~/Projects/off-duty')).expanduser().resolve()
+        self.config = load_config()
+        self.repo = Path(os.environ.get('RETIRE_REPO', self.config['off_duty']['path'])).expanduser().resolve()
         sibling = Path(__file__).resolve().parents[2] / 'spawn-agent'
         self.shared = Path(os.environ.get('RETIRE_SPAWN_SKILL', str(sibling))).expanduser() / 'scripts'
-        self.tmux = ['tmux']
-        if os.environ.get('SPAWN_TMUX_SOCKET'):
-            self.tmux += ['-S', os.environ['SPAWN_TMUX_SOCKET']]
-        elif os.environ.get('SPAWN_TMUX_LABEL'):
-            self.tmux += ['-L', os.environ['SPAWN_TMUX_LABEL']]
-        elif os.environ.get('TMUX'):
-            self.tmux += ['-S', os.environ['TMUX'].split(',')[0]]
+        self.tmux = tmux_command(self.config)
         self.state = None
         self.path = None
         self.exit_verified = False
@@ -178,6 +177,9 @@ class Retirement:
     def private(self):
         urls = set(self.git('remote', 'get-url', '--all', 'origin').splitlines())
         urls.update(self.git('remote', 'get-url', '--push', '--all', 'origin').splitlines())
+        expected = self.config['off_duty']['remote']
+        if expected and urls != {expected}:
+            raise Stop('origin does not match configured off_duty.remote')
         for url in urls:
             checker = os.environ.get('RETIRE_PRIVATE_CHECK')
             if checker:
@@ -974,7 +976,11 @@ def main():
     parser.add_argument('--retry-deferred', choices=('offer', 'exit'))
     parser.add_argument('--wait', type=float, default=300)
     parser.add_argument('--poll', type=float, default=60)
-    parser.add_argument('--roles', default='~/Projects/orgs/master/doctrine/ROLES.md')
+    try:
+        config = load_config()
+    except (OSError, ValueError) as error:
+        parser.error('agent-skills config: ' + str(error))
+    parser.add_argument('--roles', default=config['doctrine']['roles_path'])
     args = parser.parse_args()
     if (args.retry_deferred or args.caller_shard) and not args.resume:
         parser.error('caller shard and deferred retry require --resume')
@@ -982,7 +988,7 @@ def main():
         parser.error('stable %pane and wait in (0,1800] required')
     if args.handoff and args.handoff[0] not in ('codex', 'claude'):
         parser.error('published launcher supports explicit model selection for codex/claude only')
-    if args.handoff and (not args.handoff[1].strip() or not Path(args.roles).expanduser().is_file()):
+    if args.handoff and (not args.handoff[1].strip() or not args.roles or not Path(args.roles).expanduser().is_file()):
         parser.error('handoff needs model and readable ROLES.md')
     args.mode = 'handoff:' + ':'.join(args.handoff) if args.handoff else ('waiting' if args.waiting else 'retire')
     retirement = Retirement(args)

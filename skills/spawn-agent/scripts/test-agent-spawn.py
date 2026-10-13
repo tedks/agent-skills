@@ -18,9 +18,10 @@ class SpawnDeliveryTests(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name)
-        self.scripts = self.root / 'scripts'
+        self.scripts = self.root / 'skills/spawn-agent/scripts'
         self.bin = self.root / 'bin'
-        self.scripts.mkdir(); self.bin.mkdir()
+        self.scripts.mkdir(parents=True); self.bin.mkdir()
+        shutil.copytree(SCRIPTS.parents[1] / '_shared', self.root / 'skills/_shared')
         for name in ['agent-spawn.sh', 'tmux-ctx.sh', 'codex-fork-task.py', 'codex-jsonl-watch.py']:
             shutil.copy2(SCRIPTS / name, self.scripts / name)
         self.task = self.root / 'task'
@@ -33,7 +34,11 @@ class SpawnDeliveryTests(unittest.TestCase):
         self.log = self.root / 'messages.jsonl'
         self.addCleanup(self.remove_compact_snapshot)
         self.env = dict(os.environ, PATH=str(self.bin)+':'+os.environ['PATH'],
-                        TEST_ROOT=str(self.root), TEST_ROLLOUT=str(self.rollout))
+                        TEST_ROOT=str(self.root), TEST_ROLLOUT=str(self.rollout),
+                        XDG_CONFIG_HOME=str(self.root / 'config'))
+        for key in list(self.env):
+            if key.startswith('AGENT_SKILLS_'):
+                self.env.pop(key)
         for key in ['TMUX','SPAWN_TMUX_SOCKET','SPAWN_TMUX_LABEL','SPAWN_CODEX_BIN','SPAWN_CODEX_MODEL']:
             self.env.pop(key, None)
         # Only --help may run (the --no-daemon probe); a native queue never may.
@@ -217,6 +222,22 @@ sys.exit(status)
         self.assertEqual(result.returncode,0,result.stderr)
         command=shlex.split((self.root/'launch').read_text())
         self.assertEqual(command[command.index('-m')+1],'cli-model')
+
+    def test_shared_config_binary_and_explicit_overrides(self):
+        binary = self.bin / 'configured codex'
+        shutil.copy2(self.bin / 'codex', binary)
+        config = self.root / 'config/agent-skills/config.toml'
+        config.parent.mkdir(parents=True)
+        config.write_text('[harness]\ncodex_bin = ' + json.dumps(str(binary)) + '\n')
+        result = self.launch()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(shlex.split((self.root / 'launch').read_text())[0], str(binary))
+        result = self.launch(env={'SPAWN_CODEX_BIN': 'codex'})
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(shlex.split((self.root / 'launch').read_text())[0], str(self.bin / 'codex'))
+        result = self.launch(extra=['--codex-bin', str(binary)], env={'SPAWN_CODEX_BIN': 'missing'})
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(shlex.split((self.root / 'launch').read_text())[0], str(binary))
 
     def test_parent_identity_and_partial_metadata_never_send(self):
         for metadata in [json.dumps({'type':'session_meta','payload':{'id':PARENT,'forked_from_id':PARENT}})+'\n',

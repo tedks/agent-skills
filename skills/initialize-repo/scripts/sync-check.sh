@@ -47,7 +47,7 @@ TEMPLATES="$(cd "$TEMPLATES" && pwd)"
 
 # Verbatim templates: every found candidate is diffed against the template.
 # Format: <template-relative-path>|<candidate>[|<candidate>...]
-# Candidates are relative to the repo path; ../ candidates cover Ted's
+# Candidates are relative to the repo path; ../ candidates cover the operator's
 # project layout where loose scripts sit at the project root above the
 # primary worktree.
 VERBATIM=(

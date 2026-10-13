@@ -4,9 +4,7 @@ description: Spawn AI agents in steerable tmux windows for parallel or long-runn
 allowed-tools: Bash(~/.claude/skills/spawn-agent/scripts/*)
 ---
 
-<!-- Codex reads this same file through the .codex/skills/<name> symlink, so the
-     paths below assume install-claude-config ran. Never copy this file into
-     .codex/skills -- see the skills comment in scripts/install/install-codex-config. -->
+
 
 # spawn-agent
 
@@ -18,7 +16,8 @@ waiting for their turn to finish.
 ## Launch
 
 1. Run `scripts/tmux-info.sh` from this skill to confirm the socket and targets.
-   Scripts use `$TMUX`; override with `SPAWN_TMUX_LABEL` or `SPAWN_TMUX_SOCKET`
+   Read the [shared configuration](../_shared/configuration.md) for tmux and Codex defaults.
+   Scripts prefer a valid active `$TMUX` over file configuration; override with `SPAWN_TMUX_LABEL` or `SPAWN_TMUX_SOCKET`
    when operating from outside the intended server.
 2. Use `scripts/agent-spawn.sh SESSION:WINDOW AGENT DIRECTORY [PROMPT]`.
    `AGENT` is `claude`, `codex`, or `agy`. For larger prompts pass
@@ -105,7 +104,7 @@ outgoing message; it is never automatically replayed.
 
 For `needs_review=true`, read the pane and inspect the reported stage. If a new
 receipt is visible, record acceptance. If this attempt's paste is still in the
-input, Ted permits deliberate Enter-only recovery based on sufficient evidence
+input, the operator permits deliberate Enter-only recovery based on sufficient evidence
 including its collapsed paste marker. Preserve unrelated/mixed drafts and
 modals. Do not repaste an ambiguous attempt. Return to other useful work when
 human typing is the blocker; a model call is unnecessary for that case.

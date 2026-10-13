@@ -20,7 +20,7 @@ if [[ -n "${TMUX:-}" ]]; then
     echo "PID:     $server_pid"
     echo "In tmux: yes"
 else
-    echo "In tmux: no (using default socket)"
+    echo "In tmux: no"
 fi
 
 if [[ -n "${SPAWN_TMUX_SOCKET:-}" ]]; then
@@ -28,6 +28,7 @@ if [[ -n "${SPAWN_TMUX_SOCKET:-}" ]]; then
 elif [[ -n "${SPAWN_TMUX_LABEL:-}" ]]; then
     echo "Override: SPAWN_TMUX_LABEL=$SPAWN_TMUX_LABEL"
 fi
+printf 'Selected command:'; printf ' %q' "${TMUX_CMD[@]}"; printf '\n'
 
 echo ""
 echo "=== sessions ==="

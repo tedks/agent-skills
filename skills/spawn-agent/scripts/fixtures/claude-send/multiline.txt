@@ -2,5 +2,5 @@
 ❯ first harmless line
   second harmless line
 ────────────────────────────────────────────────────────────
-  tedks@framework0:~/Projects/dotfiles/control-delivery-u…
+  actor@buildhost0:~/Projects/example1/control-delivery-u…
   ⏵⏵ bypass permissions on (shift+tab to cycle)

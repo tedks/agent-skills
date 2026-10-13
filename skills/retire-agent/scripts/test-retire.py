@@ -310,7 +310,7 @@ def terminal(directory, mode):
                                 fields = pointer.read_text().split()
                                 pointer.write_text(data['session_id'] + ' ' + ' '.join(fields[1:]) + '\n')
                             if mode != 'waiting-bad':
-                                data['waiting'] = {'decision': 'Choose scope', 'owner': 'Ted'}
+                                data['waiting'] = {'decision': 'Choose scope', 'owner': 'Operator'}
                             if mode == 'resource':
                                 data['resources'] = [{'name': 'lease', 'status': 'pending'}]
                             if mode == 'path':
@@ -1563,7 +1563,7 @@ class Tests(unittest.TestCase):
         path, state = self.state()
         shard = path.parent / (state['id'] + '.shard')
         data = json.loads(shard.read_text())
-        data['waiting'] = {'decision': 'Human scope decision', 'owner': 'Ted'}
+        data['waiting'] = {'decision': 'Human scope decision', 'owner': 'Operator'}
         shard.write_text(json.dumps(data))
         self.assertEqual(self.invoke('--waiting', '--resume', str(path)).returncode, 0)
 
@@ -1695,7 +1695,7 @@ class Tests(unittest.TestCase):
         path, state = self.state()
         shard = path.parent / (state['id'] + '.shard')
         data = json.loads(shard.read_text())
-        data['waiting'] = {'decision': 'Human decision', 'owner': 'Ted'}
+        data['waiting'] = {'decision': 'Human decision', 'owner': 'Operator'}
         del data['recovery']['heads']
         shard.write_text(json.dumps(data))
         self.assertIn('recovery requires heads', self.invoke('--waiting', '--resume', str(path)).stderr)
@@ -1722,7 +1722,7 @@ class Tests(unittest.TestCase):
     def test_legacy_index_metadata_preserved(self):
         waiting = self.repo / 'waiting'
         waiting.mkdir()
-        original = '# Steward index\n\n| Session | Provider | Role | State | Last verified |\n| legacy | Anthropic | Lead | parked by Ted | yesterday |\n\nException: keep decision owner.\n'
+        original = '# Steward index\n\n| Session | Provider | Role | State | Last verified |\n| legacy | Anthropic | Lead | parked by the operator | yesterday |\n\nException: keep decision owner.\n'
         (waiting / 'INDEX.md').write_text(original)
         (waiting / '2026-09-25-deadbeef-lead.md').write_text('Legacy shard and its evidence.\n')
         self.git('add', 'waiting')
@@ -1999,7 +1999,7 @@ class Tests(unittest.TestCase):
         self.invoke('--waiting')
         path, state = self.state()
         data = json.loads(path.with_suffix('.shard').read_text())
-        data['waiting'] = {'decision': 'scope', 'owner': 'Ted'}
+        data['waiting'] = {'decision': 'scope', 'owner': 'Operator'}
         path.with_suffix('.shard').write_text(json.dumps(data))
         self.env['SPAWN_TMUX_LABEL'] = 'different-' + uuid.uuid4().hex
         self.env.pop('TMUX', None)
@@ -2091,7 +2091,7 @@ class Tests(unittest.TestCase):
         path, state = self.state()
         self.assertEqual(state['disposition'], 'DONE')
         data = json.loads(path.with_suffix('.shard').read_text())
-        data['waiting'] = {'decision': 'scope', 'owner': 'Ted'}
+        data['waiting'] = {'decision': 'scope', 'owner': 'Operator'}
         path.with_suffix('.shard').write_text(json.dumps(data))
         (self.directory / 'human-cleared-history').touch()
         self.wait_for(lambda: 'RETIRE-DONE' not in self.command(*self.tmux, 'capture-pane', '-p', '-t', self.pane))
@@ -2227,7 +2227,7 @@ class Tests(unittest.TestCase):
         module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(module)
         desktop = '/nix/store/kpmq44z3v3pwammvi1iff193yqim4cg2-codex-desktop-26.911.61220/lib/chatgpt/resources/codex'
-        cli = '/home/tedks/.npm-global/lib/node_modules/@openai/codex/vendor/bin/codex'
+        cli = '/users/actor/.npm-global/lib/node_modules/@openai/codex/vendor/bin/codex'
         cases = (
             (desktop, (b'app-server', b'--listen', b'stdio://'), desktop, True),
             (desktop, (b'resume',), desktop, False),
@@ -2309,7 +2309,7 @@ class Tests(unittest.TestCase):
         self.invoke('--waiting')
         path, state = self.state()
         data = json.loads(path.with_suffix('.shard').read_text())
-        data['waiting'] = {'decision': 'scope', 'owner': 'Ted'}
+        data['waiting'] = {'decision': 'scope', 'owner': 'Operator'}
         path.with_suffix('.shard').write_text(json.dumps(data))
         before = "        self.event_lock = (directory / (self.state['id'] + '.lock')).open('a')\n"
         after = ('        if self.args.resume:\n'
@@ -2443,7 +2443,7 @@ class Tests(unittest.TestCase):
         waiting = self.repo / 'waiting'
         waiting.mkdir(exist_ok=True)
         index = waiting / 'INDEX.md'
-        text = '# Steward record\n\n| Legacy session | Anthropic | Utility | Waiting on Ted |\n'
+        text = '# Steward record\n\n| Legacy session | Anthropic | Utility | Waiting on the operator |\n'
         index.write_text(text)
         self.git('add', '--', 'waiting/INDEX.md')
         self.git('commit', '-m', 'legacy steward index')

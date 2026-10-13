@@ -15,8 +15,11 @@ verification loads `mcp/claude-introspect/session_binding.py`, which uses the
 bounded Codex rollout reader. Claude requires the
 installed `capture-session-state.sh` PreToolUse hook and its per-process pointer.
 The sender must provide stable ordinary draft co-submission and guarded typed
-Codex / literal Claude exits. Defaults: `~/Projects/off-duty` on `master`,
-origin private on GitHub, and `~/Projects/orgs/master/doctrine/ROLES.md`.
+Codex / literal Claude exits. Configure `off_duty.path`, optional expected `off_duty.remote`, and
+`doctrine.roles_path` in the [shared configuration](../_shared/configuration.md).
+The generic handoff path is `<projects_root>/agent-handoffs`; the existing
+repository must use `master` and a verified private `origin`. No remote is
+invented or cloned. Handoff mode requires a configured roles file or `--roles`.
 
 The controller resolves the pinned peer's provider-native session ID before
 sending the offer and supplies that ID with the assigned shard path. The agent

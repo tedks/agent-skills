@@ -5,9 +5,9 @@ argument-hint: <agent> [options] <prompt>
 allowed-tools: Bash(~/.claude/skills/ask-agent/scripts/*)
 ---
 
-<!-- Codex reads this same file through the .codex/skills/<name> symlink, so the
-     paths below assume install-claude-config ran. Never copy this file into
-     .codex/skills -- see the skills comment in scripts/install/install-codex-config. -->
+The Codex branch uses `harness.codex_bin` from the [shared configuration](../_shared/configuration.md) (Python 3.11+).
+
+
 
 # ask-agent
 
@@ -135,7 +135,7 @@ final recap back to a high-level parent, use `spawn-agent --fork-session`; it
 wraps the interactive bare `codex fork` and its tmux lifecycle.
 
 Every claim above was checked rather than inferred; commands, byte counts and
-file counts are in [docs/ask-agent-session-resume.md](../../../docs/ask-agent-session-resume.md).
+file counts are in [historical session-resume evidence](references/session-resume-evidence.md).
 
 ### agy will not tell you a resume failed — the script does
 

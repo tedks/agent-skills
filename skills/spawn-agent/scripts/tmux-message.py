@@ -246,6 +246,10 @@ def paste_evidence(inp, payload):
             and wanted.startswith(before) and wanted.endswith(after))
 
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[2] / '_shared'))
+from agent_skills_config import load_config, tmux_command
+
+
 class DeliveryError(Exception):
     def __init__(self, reason, code=2):
         self.reason, self.code = reason, code
@@ -254,17 +258,14 @@ class DeliveryError(Exception):
 class Tmux:
     def __init__(self, target, *, socket=None):
         resolver_env = None
-        self.base = ["tmux"]
+        try:
+            self.base = tmux_command()
+        except (OSError, ValueError) as error:
+            raise DeliveryError("invalid-configuration") from error
         if socket is not None:
-            self.base += ["-S", socket]
+            self.base = ["tmux", "-S", socket]
             resolver_env = dict(os.environ, SPAWN_TMUX_SOCKET=socket)
             resolver_env.pop("SPAWN_TMUX_LABEL", None)
-        elif os.environ.get("SPAWN_TMUX_SOCKET"):
-            self.base += ["-S", os.environ["SPAWN_TMUX_SOCKET"]]
-        elif os.environ.get("SPAWN_TMUX_LABEL"):
-            self.base += ["-L", os.environ["SPAWN_TMUX_LABEL"]]
-        elif os.environ.get("TMUX"):
-            self.base += ["-S", os.environ["TMUX"].split(",")[0]]
         try:
             self.identity = subprocess.run(
                 [str(Path(__file__).with_name("tmux-resolve.sh")), target],
@@ -459,7 +460,7 @@ class Sender:
                         and re.fullmatch(r'Try "[^\n]*"', inp.text)):
                     return frame, inp
                 if inp.kind == "suggestion" and not probed:
-                    # Ted-authorized probe: real draft text remains; a ghost
+                    # Operator-authorized probe: real draft text remains; a ghost
                     # suggestion should disappear. Never clear actual text.
                     self.tmux.keys("Space", "BSpace")
                     probed = True
