@@ -153,9 +153,17 @@ def protections(policy):
     return "\n".join(texts), errors
 
 
+def policy_root(policy):
+    root = policy.get("projects_root") if isinstance(policy, dict) else None
+    if (not isinstance(root, str) or not Path(root).is_absolute()
+            or any(ord(c) < 32 or ord(c) == 127 for c in root)):
+        raise ValueError("policy requires an absolute remote projects_root; local configuration is not a remote path")
+    return Path(root)
+
+
 def worktrees(policy):
     """Conservatively protect every compose file under the declared project root."""
-    root = Path(policy.get("projects_root", str(Path.home() / "Projects")))
+    root = policy_root(policy)
     if not root.is_absolute() or root.is_symlink() or not root.is_dir():
         raise RuntimeError(f"project root unreadable: {root}")
     texts = []
@@ -454,6 +462,7 @@ def main():
     if len(sys.argv) == 2 and sys.argv[1] == "--remote":
         request = json.load(sys.stdin)
         policy = request["policy"]
+        policy_root(policy)
         if request["mode"] == "plan":
             result = inventory(policy, request["record_text"], request["record_errors"])
         else:
@@ -473,14 +482,8 @@ def main():
     args = parser.parse_args()
     if not re.fullmatch(r"[a-zA-Z0-9][a-zA-Z0-9@._-]*", args.host):
         parser.error("invalid SSH host")
-    # Only the local controller imports configuration. The SSH --remote payload
-    # remains standalone and receives the resolved policy as JSON.
-    sys.dont_write_bytecode = True
-    sys.path.insert(0, str(Path(__file__).resolve().parents[2] / '_shared'))
-    from agent_skills_config import load_config
-    config = load_config()
     policy = json.loads(args.policy.read_text())
-    policy.setdefault("projects_root", config["projects_root"])
+    policy_root(policy)
     record_text, record_errors = protections(policy)
     request = dict(mode=args.mode, policy=policy, record_text=record_text, record_errors=record_errors)
     if args.mode == "apply":

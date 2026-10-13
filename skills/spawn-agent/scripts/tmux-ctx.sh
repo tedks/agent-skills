@@ -47,6 +47,8 @@ _resolve_tmux_cmd() {
             TMUX_CMD=(tmux -S "$socket_path")
             return
         fi
+        echo 'active TMUX socket unavailable; supply an explicit socket override' >&2
+        return 2
     fi
 
     # File configuration is a fallback outside an active tmux server.

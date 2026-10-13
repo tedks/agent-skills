@@ -4,8 +4,6 @@ description: Spawn AI agents in steerable tmux windows for parallel or long-runn
 allowed-tools: Bash(~/.claude/skills/spawn-agent/scripts/*)
 ---
 
-
-
 # spawn-agent
 
 Launch interactive agents and send live messages through the shared tmux

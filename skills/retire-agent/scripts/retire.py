@@ -160,9 +160,9 @@ def proc(pid):
 
 
 class Retirement:
-    def __init__(self, args):
+    def __init__(self, args, config=None):
         self.args = args
-        self.config = load_config()
+        self.config = load_config() if config is None else config
         self.repo = Path(os.environ.get('RETIRE_REPO', self.config['off_duty']['path'])).expanduser().resolve()
         sibling = Path(__file__).resolve().parents[2] / 'spawn-agent'
         self.shared = Path(os.environ.get('RETIRE_SPAWN_SKILL', str(sibling))).expanduser() / 'scripts'
@@ -976,12 +976,14 @@ def main():
     parser.add_argument('--retry-deferred', choices=('offer', 'exit'))
     parser.add_argument('--wait', type=float, default=300)
     parser.add_argument('--poll', type=float, default=60)
+    parser.add_argument('--roles')
+    args = parser.parse_args()
     try:
         config = load_config()
     except (OSError, ValueError) as error:
         parser.error('agent-skills config: ' + str(error))
-    parser.add_argument('--roles', default=config['doctrine']['roles_path'])
-    args = parser.parse_args()
+    if args.roles is None:
+        args.roles = config['doctrine']['roles_path']
     if (args.retry_deferred or args.caller_shard) and not args.resume:
         parser.error('caller shard and deferred retry require --resume')
     if not re.fullmatch(r'%[0-9]+', args.pane) or not 0 < args.wait <= 1800 or not 0 < args.poll <= 90:
@@ -991,7 +993,10 @@ def main():
     if args.handoff and (not args.handoff[1].strip() or not args.roles or not Path(args.roles).expanduser().is_file()):
         parser.error('handoff needs model and readable ROLES.md')
     args.mode = 'handoff:' + ':'.join(args.handoff) if args.handoff else ('waiting' if args.waiting else 'retire')
-    retirement = Retirement(args)
+    try:
+        retirement = Retirement(args, config=config)
+    except (OSError, ValueError) as error:
+        parser.error('agent-skills config: ' + str(error))
     try:
         retirement.execute()
     except (Stop, OSError, ValueError, KeyError, subprocess.TimeoutExpired) as error:

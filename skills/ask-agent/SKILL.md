@@ -7,8 +7,6 @@ allowed-tools: Bash(~/.claude/skills/ask-agent/scripts/*)
 
 The Codex branch uses `harness.codex_bin` from the [shared configuration](../_shared/configuration.md) (Python 3.11+).
 
-
-
 # ask-agent
 
 Query another AI agent non-interactively and get the response back. Use this

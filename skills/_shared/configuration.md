@@ -45,14 +45,17 @@ with its upper-case underscored environment name, for example
 `AGENT_SKILLS_TMUX_SOCKET`, `AGENT_SKILLS_HARNESS_CODEX_BIN`, and
 `AGENT_SKILLS_GITHUB_OWNER`. `AGENT_SKILLS_FLEET_HOSTS` is a JSON array of strings.
 The file is validated even when environment overrides are supplied. Paths expand
-`~`; project, handoff and roles paths must be absolute. No `$VARIABLE` expansion
+`~`; project, handoff and roles paths must be absolute. The Codex executable is
+a command name or an absolute path, never a cwd-relative path. Bare tmux labels
+such as `~label` remain literal labels. No `$VARIABLE` expansion
 occurs. Empty strings are allowed only for remote, roles, tmux and GitHub owner.
 
 Explicit command options take precedence over legacy `RETIRE_*` / `SPAWN_*`
 variables, which take precedence over shared configuration. Without an explicit environment
 socket override, a valid active `$TMUX` server takes precedence over the file
 configuration; the configured socket is a fallback outside tmux. If neither is
-available, the default server is used.
+available, the default server is used. A nonempty `$TMUX` naming an unavailable
+socket fails closed; explicitly select a different socket to override it.
 Pinned targets in an ongoing delivery or retirement continue to use their
 recorded socket. Setting configuration never grants permission to create a
 repository, publish a shard, or operate on a host.
@@ -68,12 +71,14 @@ python3 ~/.claude/skills/_shared/agent_skills_config.py  # resolved JSON
 Install the whole `skills/` tree, including `_shared/`, and retain sibling
 relationships. `_shared` is a library, not an independently discoverable skill.
 Shell tmux consumers share `config.sh` through `tmux-ctx.sh`. The Python tmux
-transport and retirement script import the same loader directly. Hygiene loads
-configuration only in its local controller and sends the resolved policy over
-SSH; its `--remote` source payload has no checkout dependency. A hygiene policy's
-explicit project root wins, and `/tmp` ownership remains explicit policy data
-(default `unknown`), never inferred from a hostname. Verify that the configured
-project root is also correct on the selected remote host.
+transport and retirement script import the same loader directly. Hygiene
+requires a complete per-host policy with an explicit absolute remote
+`projects_root`, and its `--remote` source payload has no checkout dependency.
+It does not read unused local configuration: a local user's home-expanded path
+is not evidence of the remote user's project root. Operators may intentionally
+copy `get projects_root` into a policy after confirming the target host path.
+`/tmp` ownership remains explicit policy data (default `unknown`), never inferred
+from a hostname.
 
 Ask-agent uses the configured Codex executable in its Codex branch.
 The transcript readers, screen parsers, trust helper and

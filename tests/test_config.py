@@ -106,7 +106,7 @@ class ConfigTests(unittest.TestCase):
         socket_path = str(self.root / 'active.sock')
         sock.bind(socket_path)
         env = self.env | {'TMUX': socket_path + ',123,0'}
-        shell = ['bash', '-c', 'source "$1"; printf "%s\\n" "${TMUX_CMD[@]}"',
+        shell = ['bash', '-c', 'set -e; source "$1"; printf "%s\\n" "${TMUX_CMD[@]}"',
                  'test', str(ROOT / 'skills/spawn-agent/scripts/tmux-ctx.sh')]
         python = [sys.executable, '-c',
                   'import sys;sys.path.insert(0,' + repr(str(LOADER.parent)) + ');'
@@ -118,7 +118,9 @@ class ConfigTests(unittest.TestCase):
             result = subprocess.run(command, env=env | {'AGENT_SKILLS_TMUX_SOCKET': 'explicit'}, text=True, capture_output=True)
             self.assertEqual(result.stdout.splitlines(), ['tmux', '-L', 'explicit'])
             result = subprocess.run(command, env=self.env | {'TMUX': '/missing/socket,123,0'}, text=True, capture_output=True)
-            self.assertEqual(result.stdout.splitlines(), ['tmux', '-L', 'configured'])
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn('active TMUX socket unavailable', result.stderr)
+            self.assertEqual(result.stdout, '')
 
     def test_delivery_resolution_pins_server_across_config_change(self):
         script = ROOT / 'skills/spawn-agent/scripts/tmux-message.py'
@@ -153,6 +155,19 @@ class ConfigTests(unittest.TestCase):
                 selector = ['-S' if '/' in initial else '-L', initial] if initial else []
                 self.assertEqual(calls[0][:len(selector) + 1], selector + ['list-panes'])
                 self.assertEqual(calls[-1][:len(selector) + 1], selector + ['send-keys'])
+
+    def test_explicit_observation_socket_wins_over_stale_tmux(self):
+        spec = importlib.util.spec_from_file_location('explicit_socket_delivery', ROOT / 'skills/spawn-agent/scripts/tmux-message.py')
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[spec.name] = module
+        self.addCleanup(sys.modules.pop, spec.name, None)
+        spec.loader.exec_module(module)
+        with patch.dict(os.environ, self.env | {'TMUX': '/missing/socket,123,0'}, clear=True), patch.object(module.subprocess, 'run') as run:
+            run.return_value.stdout = '101:%7'
+            delivery = module.Tmux('%7', socket='/tmp/pinned.sock')
+            self.assertEqual(delivery.base, ['tmux', '-S', '/tmp/pinned.sock'])
+            self.assertEqual(run.call_args.kwargs['env']['SPAWN_TMUX_SOCKET'], '/tmp/pinned.sock')
+            self.assertNotIn('TMUX', run.call_args.kwargs['env'])
 
     def test_retirement_config_and_legacy_repo(self):
         script = ROOT / 'skills/retire-agent/scripts/retire.py'
@@ -217,7 +232,7 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.stdout, 'configured: exec -\nfixture prompt')
 
-    def test_hygiene_local_policy_uses_config_and_explicit_policy_wins(self):
+    def test_hygiene_requires_explicit_remote_projects_root(self):
         binary_dir = self.root / 'bin'
         binary_dir.mkdir()
         ssh = binary_dir / 'ssh'
@@ -229,17 +244,45 @@ class ConfigTests(unittest.TestCase):
         ssh.chmod(0o700)
         policy = self.root / 'policy.json'
         script = ROOT / 'skills/host-hygiene/scripts/hygiene.py'
-        for index, value in enumerate([{}, {'projects_root': '/remote/projects'}]):
-            policy.write_text(json.dumps(value))
-            result = subprocess.run([sys.executable, str(script), 'plan', 'build.local',
-                                     str(self.root / f'plan-{index}.json'), '--policy', str(policy)],
-                                    env=self.env | {'PATH': str(binary_dir) + ':' + self.env['PATH'],
-                                                    'CAPTURE': str(capture),
-                                                    'AGENT_SKILLS_PROJECTS_ROOT': '/configured/projects'},
-                                    text=True, capture_output=True)
-            self.assertEqual(result.returncode, 0, result.stderr)
-            sent = json.loads(capture.read_text())
-            self.assertEqual(sent['policy']['projects_root'], value.get('projects_root', '/configured/projects'))
+        values = [{}, {'projects_root': ''}, {'projects_root': '~/Projects'},
+                  {'projects_root': 1}, {'projects_root': '/remote/projects'}]
+        for index, value in enumerate(values):
+            with self.subTest(policy=value):
+                policy.write_text(json.dumps(value))
+                result = subprocess.run([sys.executable, str(script), 'plan', 'build.local',
+                                         str(self.root / f'plan-{index}.json'), '--policy', str(policy)],
+                                        env=self.env | {'PATH': str(binary_dir) + ':' + self.env['PATH'],
+                                                        'CAPTURE': str(capture),
+                                                        'AGENT_SKILLS_PROJECTS_ROOT': '/local/projects'},
+                                        text=True, capture_output=True)
+                if value.get('projects_root') == '/remote/projects':
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    self.assertEqual(json.loads(capture.read_text())['policy']['projects_root'], '/remote/projects')
+                else:
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertIn('policy requires an absolute remote projects_root', result.stderr)
+                    self.assertFalse(capture.exists())
+
+    def test_executable_paths_and_tmux_labels_preserve_intent(self):
+        self.config.write_text('[harness]\ncodex_bin = "./codex"\n')
+        result = self.cli()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('absolute path or executable name', result.stderr)
+        self.config.write_text('[tmux]\nsocket = "~root"\n')
+        self.assertEqual(self.load()['tmux']['socket'], '~root')
+
+    def test_retirement_help_does_not_read_config_and_execution_reads_once(self):
+        script = ROOT / 'skills/retire-agent/scripts/retire.py'
+        self.config.write_text('[broken')
+        result = subprocess.run([sys.executable, str(script), '--help'], env=self.env, text=True, capture_output=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        spec = importlib.util.spec_from_file_location('retire_snapshot_test', script)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        self.config.write_text('')
+        with patch.dict(os.environ, self.env, clear=True), patch.object(sys, 'argv', ['retire', '%1']), patch.object(module.Retirement, 'execute'), patch.object(module, 'load_config', wraps=module.load_config) as load:
+            self.assertEqual(module.main(), 0)
+            self.assertEqual(load.call_count, 1)
 
     def test_hygiene_remote_source_stays_standalone(self):
         # Exercise --remote using source only: no checkout or import path remotely.
@@ -248,11 +291,17 @@ class ConfigTests(unittest.TestCase):
                                       'result = {"policy": policy}')
         self.assertNotEqual(source, instrumented)
         result = subprocess.run([sys.executable, '-I', '-c', instrumented, '--remote'],
-                                input=json.dumps({'mode': 'plan', 'policy': {'tmp_owner': 'lane'},
+                                input=json.dumps({'mode': 'plan', 'policy': {'tmp_owner': 'lane', 'projects_root': '/remote/projects'},
                                                   'record_text': '', 'record_errors': []}),
                                 env=self.env, text=True, capture_output=True)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(json.loads(result.stdout)['policy']['tmp_owner'], 'lane')
+        rejected = subprocess.run([sys.executable, '-I', '-c', instrumented, '--remote'],
+                                  input=json.dumps({'mode': 'plan', 'policy': {},
+                                                    'record_text': '', 'record_errors': []}),
+                                  env=self.env, text=True, capture_output=True)
+        self.assertNotEqual(rejected.returncode, 0)
+        self.assertIn('policy requires an absolute remote projects_root', rejected.stderr)
 
 
 if __name__ == '__main__':

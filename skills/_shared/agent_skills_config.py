@@ -39,6 +39,8 @@ def _validate(key, value):
         raise ValueError('github.owner: expected GitHub user or organization')
     if key in PATHS and value and not Path(value).expanduser().is_absolute():
         raise ValueError(f'{key}: expected absolute path or ~/path')
+    if key == 'harness.codex_bin' and '/' in value and not Path(value).expanduser().is_absolute():
+        raise ValueError('harness.codex_bin: expected absolute path or executable name')
     if key == 'tmux.socket' and '/' in value and not Path(value).expanduser().is_absolute():
         raise ValueError('tmux.socket: expected label or absolute socket path')
     return value
@@ -92,7 +94,7 @@ def load_config():
                 'fleet.hosts': [], 'harness.codex_bin': 'codex', 'github.owner': ''}
     values = defaults | flat
     for key in PATHS | {'harness.codex_bin', 'tmux.socket'}:
-        if values[key]:
+        if values[key] and (key in PATHS or '/' in values[key]):
             values[key] = os.path.expanduser(values[key])
     result = {}
     for key, value in values.items():
@@ -121,6 +123,7 @@ def tmux_command(config=None):
                 return ['tmux', '-S', active]
         except OSError:
             pass
+        raise ValueError('active TMUX socket unavailable; supply an explicit socket override')
     if socket:
         return ['tmux', '-S' if '/' in socket else '-L', socket]
     return ['tmux']

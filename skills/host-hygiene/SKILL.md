@@ -10,9 +10,10 @@ killing peers, deleting worktrees or peer caches, or changing shared tags.
 
 Use `scripts/hygiene.sh plan HOST PLAN.json --policy POLICY.json`. Linux,
 Python 3, SSH BatchMode, Docker and Nix tools are expected; nothing uses sudo.
-Local configuration uses Python 3.11+ and the [shared configuration](../_shared/configuration.md).
-If the policy omits `projects_root`, it uses the configured local value; verify
-that this absolute path also describes the target host before running.
+The per-host policy must specify an absolute `projects_root` on the remote host.
+Do not substitute the local user's home-expanded root: another host or SSH user
+may keep projects elsewhere. The [shared configuration](../_shared/configuration.md)
+CLI can supply a candidate only after you confirm that path on the target host.
 The script runs over SSH without installing or creating remote helper files.
 Use a private local state directory, e.g. `~/.local/state/hygiene/YYYYMMDD/HOST/`.
 Plan files are created exclusively with mode 0600. The printed SHA256 binds the
@@ -136,3 +137,6 @@ remote work may still be running: inspect it and reconcile the exact saved list
 before retrying. Never force Docker removal. After three
 failed attempts at a repair approach, report the evidence and escalate. Preserve
 the plan and partial results, measure again, and review a new plan for any retry.
+
+Run `scripts/test-host-hygiene.sh` for the disposable SSH/CLI fixture suite and
+guard-removal mutations. The suite never connects to a real host.

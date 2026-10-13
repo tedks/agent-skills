@@ -258,11 +258,9 @@ class DeliveryError(Exception):
 class Tmux:
     def __init__(self, target, *, socket=None):
         try:
-            self.base = tmux_command()
+            self.base = ["tmux", "-S", socket] if socket is not None else tmux_command()
         except (OSError, ValueError) as error:
             raise DeliveryError("invalid-configuration") from error
-        if socket is not None:
-            self.base = ["tmux", "-S", socket]
         # Resolve and lock on the same selected server used for subsequent input.
         # A config edit between this selection and the child resolver cannot
         # redirect pane identity to another server with the same pane ID.
