@@ -1,0 +1,7 @@
+# App-managed skill sync cache; never version it.
+skills/synced/
+# Local Python and issue-tracker runtime state.
+__pycache__/
+*.pyc
+.pytest_cache/
+.ditz-worktree/
