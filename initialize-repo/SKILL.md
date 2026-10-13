@@ -73,7 +73,7 @@ When "landing the plane" in a repo that was scaffolded by this skill, it's worth
 ├── .git/                          # Bare git repo
 ├── create-worktree                # Worktree helper (from templates/)
 └── master/                        # Primary worktree
-    ├── .claude/skills/            # Agent skills (copied from dotfiles)
+    ├── .claude/skills/            # Pointers to installed agent skills
     ├── .gitignore                 # Standard ignores
     ├── .planning/
     │   └── PLANS.md               # ExecPlan format guide (from templates/)
@@ -173,6 +173,14 @@ so no per-worktree wiring is needed.
     └── main_test.go
 ```
 
+## Configuration
+
+Read `projects_root` and `github.owner` from the shared agent-skills config
+before starting. Paths shown as `~/Projects` illustrate the generic default;
+use the configured projects root throughout. Replace `<github.owner>` with
+the configured GitHub owner, requesting it if unset. Templates live alongside
+this skill and are accessed through the stable `~/.claude/skills/` install.
+
 ## Instructions
 
 When this skill is invoked, follow the steps in order: Part 1 (base), then Part 2 (type-specific, skip for `bare`), then Part 3 (finalization).
@@ -262,15 +270,29 @@ cp ~/.claude/skills/initialize-repo/templates/PLANS.md \
 
 (The template originally came from the OpenAI cookbook's ExecPlan article; the copy in `templates/` is canonical now.)
 
-### Step B5: Copy skills from dotfiles
+### Step B5: Reference installed skills
 
-Copy the skill directories from `~/Projects/dotfiles/.claude/skills/` into the repo's `.claude/skills/`:
-- `stacked-prs/`
-- `ask-agent/`
-- `spawn-agent/`
-- `initialize-repo/` (this skill)
+Create a small `SKILL.md` pointer for each shared skill; do not copy the skill
+implementation into the new repository. The installed paths remain stable when
+the separate agent-skills checkout moves or updates.
 
-Preserve executable permissions on scripts.
+```bash
+for skill in stacked-prs ask-agent spawn-agent initialize-repo; do
+    test -f "$HOME/.claude/skills/$skill/SKILL.md" || {
+        echo "Missing installed skill: $skill; run dotfiles install-claude-config first" >&2
+        exit 1
+    }
+done
+for skill in stacked-prs ask-agent spawn-agent initialize-repo; do
+    mkdir -p ".claude/skills/$skill"
+    printf 'Read and follow the installed skill at `~/.claude/skills/%s/SKILL.md`.\n' "$skill" \
+        > ".claude/skills/$skill/SKILL.md"
+done
+```
+
+These are text pointers because Git symlink targets do not expand `~` or `$HOME`.
+A new checkout needs the shared skills installed through dotfiles before using
+the pointers. Scripts and templates continue to use `~/.claude/skills/`.
 
 ### Step B6: Copy scaffold files from templates
 
@@ -655,7 +677,7 @@ Include these in the AGENTS.md written during Part 3:
 
 ```bash
 cd ~/Projects/<project-name>/master
-nix develop --command go mod init github.com/tedks/<project-name>
+nix develop --command go mod init github.com/<github.owner>/<project-name>
 ```
 
 #### Step G2: Write main.go
@@ -762,21 +784,21 @@ git commit -m "Initial project scaffold: <project-name>
 ### Step F6: Create GitHub repo and push
 
 ```bash
-gh repo create tedks/<project-name> --private --description "<description>"
+gh repo create <github.owner>/<project-name> --private --description "<description>"
 ```
 
 New GitHub repos start with Actions enabled, and anything in `.github/workflows/` would run on the first push. So **before pushing**, turn Actions off, unless this scaffold intentionally includes a deploy or release workflow (the templates here add none):
 
 ```bash
-gh api -X PUT repos/tedks/<project-name>/actions/permissions -F enabled=false
-gh api repos/tedks/<project-name>/actions/permissions --jq .enabled   # must print false
+gh api -X PUT repos/<github.owner>/<project-name>/actions/permissions -F enabled=false
+gh api repos/<github.owner>/<project-name>/actions/permissions --jq .enabled   # must print false
 ```
 
 If the read-back does not print `false`, stop and resolve that before pushing. Don't push and plan to fix it afterwards.
 
 ```bash
 cd ~/Projects/<project-name>/master
-git remote add origin git@github.com:tedks/<project-name>.git
+git remote add origin git@github.com:<github.owner>/<project-name>.git
 git push -u origin master
 ```
 
@@ -822,7 +844,7 @@ Create a GitHub ruleset requiring PRs for the master branch:
 
 ```bash
 cd ~/Projects/<project-name>/master
-gh api repos/tedks/<project-name>/rulesets -X POST --input - <<'RULES'
+gh api repos/<github.owner>/<project-name>/rulesets -X POST --input - <<'RULES'
 {
   "name": "protect-master",
   "target": "branch",
@@ -870,7 +892,7 @@ Report the results to the user.
 ## Notes
 
 - The Sui binary version and hashes will need updating as new releases come out. Check `gh api repos/MystenLabs/sui/releases/latest` for the current version.
-- The skill assumes the user's GitHub username is `tedks`. Adjust the `gh repo create` and remote URL if needed.
-- Skills are copied into the repo (not symlinked) so the repo is self-contained. Check `~/Projects/dotfiles/.claude/skills/` for upstream updates periodically.
+- Read `github.owner` from the shared agent-skills configuration for repository creation and module/remote URLs. If unset, ask the operator; never infer an owner. Replace `<github.owner>` placeholders before running commands.
+- Shared skills live in the separate agent-skills repository. Project-local `SKILL.md` files point to the installed `~/.claude/skills/` contract; update the shared checkout rather than maintaining embedded copies.
 - To add a new project type: add a new section under Part 2, define its AGENTS.md sections, and add verification checks to Step F9.
 - To fix a bug in a scaffold file: fix it in `templates/` first, then use `scripts/sync-check.sh` on the repos that carry copies to see where the fix needs to propagate.

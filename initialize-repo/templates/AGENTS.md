@@ -80,6 +80,13 @@ failed mutation, and do not mistake Nix startup output for ditz JSON.
 ExecPlans for non-trivial work follow the format in
 [.planning/PLANS.md](.planning/PLANS.md).
 
+## Shared agent skills
+
+The files under `.claude/skills/<name>/SKILL.md` are pointers to shared skills
+installed at `~/.claude/skills/<name>/SKILL.md`. Install them through dotfiles;
+the implementation lives in the separate agent-skills checkout. Follow the
+installed skill's instructions rather than copying its scripts into this repo.
+
 ## Repo specifics
 
 <!-- TODO: anything an agent must know that is unique to this repo:
