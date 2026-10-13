@@ -257,15 +257,21 @@ class DeliveryError(Exception):
 
 class Tmux:
     def __init__(self, target, *, socket=None):
-        resolver_env = None
         try:
             self.base = tmux_command()
         except (OSError, ValueError) as error:
             raise DeliveryError("invalid-configuration") from error
         if socket is not None:
             self.base = ["tmux", "-S", socket]
-            resolver_env = dict(os.environ, SPAWN_TMUX_SOCKET=socket)
-            resolver_env.pop("SPAWN_TMUX_LABEL", None)
+        # Resolve and lock on the same selected server used for subsequent input.
+        # A config edit between this selection and the child resolver cannot
+        # redirect pane identity to another server with the same pane ID.
+        resolver_env = dict(os.environ, AGENT_SKILLS_TMUX_SOCKET="")
+        for name in ("SPAWN_TMUX_SOCKET", "SPAWN_TMUX_LABEL", "TMUX"):
+            resolver_env.pop(name, None)
+        if len(self.base) == 3:
+            name = "SPAWN_TMUX_SOCKET" if self.base[1] == "-S" else "SPAWN_TMUX_LABEL"
+            resolver_env[name] = self.base[2]
         try:
             self.identity = subprocess.run(
                 [str(Path(__file__).with_name("tmux-resolve.sh")), target],

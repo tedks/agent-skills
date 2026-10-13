@@ -239,6 +239,34 @@ sys.exit(status)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(shlex.split((self.root / 'launch').read_text())[0], str(binary))
 
+    def test_launch_pins_child_helpers_across_configuration_change(self):
+        config = self.root / 'config/agent-skills/config.toml'
+        config.parent.mkdir(parents=True)
+        self.write(self.bin / 'tmux', '#!/usr/bin/env python3\n' +
+                   'import os,sys,json\nfrom pathlib import Path\n' +
+                   'root=Path(os.environ["TEST_ROOT"]); args=sys.argv[1:]\n' +
+                   'with (root/"selection.jsonl").open("a") as out: out.write(json.dumps(args)+"\\n")\n' +
+                   'if "new-window" in args:\n' +
+                   ' (root/"config/agent-skills/config.toml").write_text(' + repr('[tmux]\nsocket = "beta"\n') + ')\n' +
+                   ' print("%88")\n')
+        selection = 'source "$(dirname -- "$0")/tmux-ctx.sh"\nprintf "%s\\n" "${TMUX_CMD[@]}"'
+        self.write(self.scripts / 'tmux-message.sh', '#!/bin/bash\nset -e\n' + selection + ' > "$TEST_ROOT/message-selection"\n')
+        self.write(self.scripts / 'codex-rollout-path.sh', '#!/bin/bash\nset -e\n' + selection +
+                   ' > "$TEST_ROOT/rollout-selection"\nprintf "%s\\n" "$TEST_ROLLOUT"\n')
+        cases = [('alpha', {}, ['-L', 'alpha']), ('/tmp/alpha.sock', {}, ['-S', '/tmp/alpha.sock']),
+                 ('', {}, []), ('alpha', {'SPAWN_TMUX_LABEL': 'legacy'}, ['-L', 'legacy']),
+                 ('alpha', {'SPAWN_TMUX_SOCKET': '/tmp/legacy.sock'}, ['-S', '/tmp/legacy.sock'])]
+        for initial, env, selector in cases:
+            with self.subTest(initial=initial, env=env):
+                config.write_text('[tmux]\nsocket = ' + json.dumps(initial) + '\n')
+                (self.root / 'selection.jsonl').write_text('')
+                result = self.launch(extra=['--fork-session', PARENT], env=env)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                calls = [json.loads(line) for line in (self.root / 'selection.jsonl').read_text().splitlines()]
+                self.assertEqual(calls[-1][:len(selector) + 1], selector + ['new-window'])
+                self.assertEqual((self.root / 'message-selection').read_text().splitlines(), ['tmux', *selector])
+                self.assertEqual((self.root / 'rollout-selection').read_text().splitlines(), ['tmux', *selector])
+
     def test_parent_identity_and_partial_metadata_never_send(self):
         for metadata in [json.dumps({'type':'session_meta','payload':{'id':PARENT,'forked_from_id':PARENT}})+'\n',
                          '{"type":"session_meta"']:

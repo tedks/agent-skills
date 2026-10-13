@@ -120,6 +120,40 @@ class ConfigTests(unittest.TestCase):
             result = subprocess.run(command, env=self.env | {'TMUX': '/missing/socket,123,0'}, text=True, capture_output=True)
             self.assertEqual(result.stdout.splitlines(), ['tmux', '-L', 'configured'])
 
+    def test_delivery_resolution_pins_server_across_config_change(self):
+        script = ROOT / 'skills/spawn-agent/scripts/tmux-message.py'
+        spec = importlib.util.spec_from_file_location('config_race_delivery', script)
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[spec.name] = module
+        self.addCleanup(sys.modules.pop, spec.name, None)
+        spec.loader.exec_module(module)
+        bin_dir = self.root / 'bin'
+        bin_dir.mkdir()
+        log = self.root / 'tmux.jsonl'
+        stub = bin_dir / 'tmux'
+        stub.write_text('#!' + sys.executable + '\nimport json,os,sys\n'
+                        'with open(os.environ["TMUX_LOG"], "a") as out: out.write(json.dumps(sys.argv[1:])+"\\n")\n'
+                        'if "list-panes" in sys.argv: print(("202" if "beta" in sys.argv else "101") + ":%7:1:target")\n')
+        stub.chmod(0o700)
+        original_command = module.tmux_command
+        def change_after_selection():
+            selected = original_command()
+            self.config.write_text('[tmux]\nsocket = "beta"\n')
+            return selected
+        for initial in ('alpha', '/tmp/selected.sock', ''):
+            with self.subTest(initial=initial):
+                self.config.write_text('[tmux]\nsocket = ' + json.dumps(initial) + '\n')
+                log.write_text('')
+                env = self.env | {'PATH': str(bin_dir) + ':' + self.env['PATH'], 'TMUX_LOG': str(log)}
+                with patch.dict(os.environ, env, clear=True), patch.object(module, 'tmux_command', side_effect=change_after_selection):
+                    delivery = module.Tmux('%7')
+                    delivery.keys('Enter')
+                calls = [json.loads(line) for line in log.read_text().splitlines()]
+                self.assertEqual(delivery.identity, '101:%7')
+                selector = ['-S' if '/' in initial else '-L', initial] if initial else []
+                self.assertEqual(calls[0][:len(selector) + 1], selector + ['list-panes'])
+                self.assertEqual(calls[-1][:len(selector) + 1], selector + ['send-keys'])
+
     def test_retirement_config_and_legacy_repo(self):
         script = ROOT / 'skills/retire-agent/scripts/retire.py'
         source = ('import importlib.util,json; from types import SimpleNamespace; '

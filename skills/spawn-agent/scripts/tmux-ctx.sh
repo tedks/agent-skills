@@ -64,3 +64,13 @@ _resolve_tmux_cmd() {
 }
 
 _resolve_tmux_cmd
+
+# Child resolvers, delivery, and rollout readers inherit this selection, not a
+# later file configuration. A bare default must also suppress later selection.
+unset SPAWN_TMUX_SOCKET SPAWN_TMUX_LABEL
+export AGENT_SKILLS_TMUX_SOCKET=""
+case "${TMUX_CMD[1]:-}" in
+    -S) export SPAWN_TMUX_SOCKET="${TMUX_CMD[2]}";;
+    -L) export SPAWN_TMUX_LABEL="${TMUX_CMD[2]}";;
+    *) unset TMUX;;
+esac
