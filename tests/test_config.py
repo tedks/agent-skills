@@ -8,6 +8,7 @@ import subprocess
 import socket
 import sys
 import tempfile
+from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
@@ -169,6 +170,35 @@ class ConfigTests(unittest.TestCase):
             self.assertEqual(run.call_args.kwargs['env']['SPAWN_TMUX_SOCKET'], '/tmp/pinned.sock')
             self.assertNotIn('TMUX', run.call_args.kwargs['env'])
 
+    def test_tmux_info_reports_only_supplied_legacy_overrides(self):
+        stub = self.root / 'tmux'
+        stub.write_text('#!/bin/sh\nexit 0\n')
+        stub.chmod(0o700)
+        self.config.write_text('[tmux]\nsocket = "configured"\n')
+        script = ROOT / 'skills/spawn-agent/scripts/tmux-info.sh'
+        env = self.env | {'PATH': str(self.root) + ':' + self.env['PATH']}
+        result = subprocess.run([str(script)], env=env, text=True, capture_output=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn('Override:', result.stdout)
+        self.assertIn('Selected command: tmux -L configured', result.stdout)
+        for key, value, selector in [('SPAWN_TMUX_LABEL', 'legacy', '-L legacy'),
+                                     ('SPAWN_TMUX_SOCKET', '/tmp/explicit.sock', '-S /tmp/explicit.sock')]:
+            result = subprocess.run([str(script)], env=env | {key: value}, text=True, capture_output=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn('Override: ' + key + '=' + value, result.stdout)
+            self.assertIn('Selected command: tmux ' + selector, result.stdout)
+
+    def test_tmux_selection_error_reports_unavailable_context(self):
+        spec = importlib.util.spec_from_file_location('context_error_delivery', ROOT / 'skills/spawn-agent/scripts/tmux-message.py')
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[spec.name] = module
+        self.addCleanup(sys.modules.pop, spec.name, None)
+        spec.loader.exec_module(module)
+        with patch.dict(os.environ, self.env | {'TMUX': '/missing/controller.sock,123,0'}, clear=True), patch.object(module.subprocess, 'run') as run:
+            with self.assertRaisesRegex(module.DeliveryError, 'tmux-context-unavailable'):
+                module.Tmux('%7')
+            run.assert_not_called()
+
     def test_retirement_config_and_legacy_repo(self):
         script = ROOT / 'skills/retire-agent/scripts/retire.py'
         source = ('import importlib.util,json; from types import SimpleNamespace; '
@@ -283,6 +313,50 @@ class ConfigTests(unittest.TestCase):
         with patch.dict(os.environ, self.env, clear=True), patch.object(sys, 'argv', ['retire', '%1']), patch.object(module.Retirement, 'execute'), patch.object(module, 'load_config', wraps=module.load_config) as load:
             self.assertEqual(module.main(), 0)
             self.assertEqual(load.call_count, 1)
+
+    def test_retirement_resume_uses_validated_recorded_socket_with_stale_tmux(self):
+        spec = importlib.util.spec_from_file_location('retire_resume_test', ROOT / 'skills/retire-agent/scripts/retire.py')
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        repo = self.root / 'repo'
+        common = repo / '.git'
+        directory = common / 'retirements'
+        directory.mkdir(parents=True)
+        event = 'a' * 32
+        path = directory / (event + '.json')
+        state = {'id': event, 'pane': '%7', 'mode': 'retire', 'status': 'requesting',
+                 'socket': '/tmp/recorded.sock',
+                 'identity': {'pane_pid': '42', 'session': 'fixture', 'directory': '/fixture',
+                              'process': {'pid': 43, 'start': 'start', 'boot': 'boot', 'agent': 'codex'}}}
+        env = self.env | {'RETIRE_REPO': str(repo), 'TMUX': '/missing/old-controller.sock,123,0'}
+        cases = [('valid', path, state, 'fixture reached publication'),
+                 ('bad socket', path, state | {'socket': 'relative'}, 'socket identity'),
+                 ('wrong pane', path, state | {'pane': '%8'}, 'pane/mode differs'),
+                 ('outside repo', self.root / (event + '.json'), state, 'private state path')]
+        for label, requested, record, reason in cases:
+            with self.subTest(label=label):
+                requested.write_text(json.dumps(record))
+                args = SimpleNamespace(pane='%7', mode='retire', resume=str(requested), caller_shard=False)
+                with patch.dict(os.environ, env, clear=True), patch.object(module, 'checked') as checked:
+                    retirement = module.Retirement(args)
+                    retirement.private = lambda: None
+                    retirement.load_screen_helper = lambda: None
+                    retirement.git = lambda *args: str(common)
+                    with patch.object(retirement, 'publish', side_effect=module.Stop('fixture reached publication')), patch.object(module.os, 'access', return_value=True):
+                        try:
+                            with self.assertRaisesRegex(module.Stop, reason):
+                                retirement.execute()
+                            if label == 'valid':
+                                self.assertEqual(retirement.tmux, ['tmux', '-S', '/tmp/recorded.sock'])
+                            else:
+                                self.assertIsNone(retirement.tmux)
+                            checked.assert_not_called()
+                        finally:
+                            if hasattr(retirement, 'event_lock'):
+                                retirement.event_lock.close()
+        with patch.dict(os.environ, env, clear=True):
+            with self.assertRaisesRegex(ValueError, 'active TMUX socket unavailable'):
+                module.Retirement(SimpleNamespace(resume=None))
 
     def test_hygiene_remote_source_stays_standalone(self):
         # Exercise --remote using source only: no checkout or import path remotely.

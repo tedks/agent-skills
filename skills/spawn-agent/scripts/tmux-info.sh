@@ -9,6 +9,8 @@
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+requested_tmux_socket=${SPAWN_TMUX_SOCKET:-}
+requested_tmux_label=${SPAWN_TMUX_LABEL:-}
 source "$SCRIPT_DIR/tmux-ctx.sh"
 
 echo "=== tmux context ==="
@@ -23,10 +25,10 @@ else
     echo "In tmux: no"
 fi
 
-if [[ -n "${SPAWN_TMUX_SOCKET:-}" ]]; then
-    echo "Override: SPAWN_TMUX_SOCKET=$SPAWN_TMUX_SOCKET"
-elif [[ -n "${SPAWN_TMUX_LABEL:-}" ]]; then
-    echo "Override: SPAWN_TMUX_LABEL=$SPAWN_TMUX_LABEL"
+if [[ -n "$requested_tmux_socket" ]]; then
+    echo "Override: SPAWN_TMUX_SOCKET=$requested_tmux_socket"
+elif [[ -n "$requested_tmux_label" ]]; then
+    echo "Override: SPAWN_TMUX_LABEL=$requested_tmux_label"
 fi
 printf 'Selected command:'; printf ' %q' "${TMUX_CMD[@]}"; printf '\n'
 

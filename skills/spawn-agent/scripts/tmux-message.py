@@ -260,7 +260,7 @@ class Tmux:
         try:
             self.base = ["tmux", "-S", socket] if socket is not None else tmux_command()
         except (OSError, ValueError) as error:
-            raise DeliveryError("invalid-configuration") from error
+            raise DeliveryError("tmux-context-unavailable") from error
         # Resolve and lock on the same selected server used for subsequent input.
         # A config edit between this selection and the child resolver cannot
         # redirect pane identity to another server with the same pane ID.

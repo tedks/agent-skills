@@ -166,7 +166,9 @@ class Retirement:
         self.repo = Path(os.environ.get('RETIRE_REPO', self.config['off_duty']['path'])).expanduser().resolve()
         sibling = Path(__file__).resolve().parents[2] / 'spawn-agent'
         self.shared = Path(os.environ.get('RETIRE_SPAWN_SKILL', str(sibling))).expanduser() / 'scripts'
-        self.tmux = tmux_command(self.config)
+        # Resume selects only the socket from its validated private state.
+        # Ambient tmux discovery is for fresh operations, never recovery.
+        self.tmux = None if getattr(args, 'resume', None) else tmux_command(self.config)
         self.state = None
         self.path = None
         self.exit_verified = False
