@@ -34,7 +34,7 @@ class NativeHelpers(unittest.TestCase):
         code = '''import importlib.util,json,sys,types
 from pathlib import Path
 from types import SimpleNamespace
-script=Path(sys.argv[1]);native=Path(sys.argv[2])
+script=Path(sys.argv[1]);native=Path(sys.argv[2]).resolve()
 spec=importlib.util.spec_from_file_location('isolated_retire',script)
 m=importlib.util.module_from_spec(spec);spec.loader.exec_module(m)
 r=m.Retirement(SimpleNamespace(resume=None))
