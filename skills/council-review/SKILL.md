@@ -85,6 +85,14 @@ Rules — these are not style preferences, they are what makes the council a cou
    are one opinion twice, and a summary that hides the gap overstates the
    consensus.
 
+4. **Seats run at the Lead tier, never Frontier unless the CEO asks.** Councils
+   burn Frontier quota when a seat inherits the host's model. Pin the model on
+   every seat: the Claude native seat is spawned with `model: opus`; the Codex
+   seat with `/ask-agent codex -m gpt-6-sol`; from a Codex host the Claude seat
+   with `/ask-agent claude -m opus`; agy as its default. A Frontier model (Fable,
+   Astra) sits a seat only when the CEO asks for it on that review, and the
+   record says so (CEO ruling, 2026-10-13).
+
 ## Instructions
 
 When this skill is invoked, follow these steps:
@@ -207,8 +215,8 @@ Then, per seat:
 
 | Seat | If this is **your own** provider | If this is **foreign** to you |
 |------|----------------------------------|-------------------------------|
-| Claude | native subagent (Claude Code: `Agent` tool) given `$PROMPT_FILE`, told it has tools and project context and should read the post-change files (and the PR number, for a PR target) | `/ask-agent claude --prompt-file "$FOREIGN_FILE"` |
-| Codex | native subagent (Codex CLI: `multi_agent`) given `$PROMPT_FILE`, same instruction | `/ask-agent codex --prompt-file "$FOREIGN_FILE"` — **from a trusted directory**: any git repo (the worktree), or a directory trusted in Codex's config. `codex exec` refuses to start anywhere else — `-d /tmp`, or a non-repo scratch dir, fails with "Not inside a trusted directory" and you get no review |
+| Claude | native subagent (Claude Code: `Agent` tool, `model: opus`) given `$PROMPT_FILE`, told it has tools and project context and should read the post-change files (and the PR number, for a PR target) | `/ask-agent claude --prompt-file "$FOREIGN_FILE"` |
+| Codex | native subagent (Codex CLI: `multi_agent`) given `$PROMPT_FILE`, same instruction | `/ask-agent codex -m gpt-6-sol --prompt-file "$FOREIGN_FILE"` — **from a trusted directory**: any git repo (the worktree), or a directory trusted in Codex's config. `codex exec` refuses to start anywhere else — `-d /tmp`, or a non-repo scratch dir, fails with "Not inside a trusted directory" and you get no review |
 | agy | in-process delegation if it has one, else inline (see Rule 1) — given `$PROMPT_FILE` | `/ask-agent agy -d /tmp --prompt-file "$FOREIGN_FILE"` — `-d /tmp` is **required** here and only here, see below |
 
 `-d` is a plain working-directory option in `agent-query.sh`, valid for every
@@ -245,9 +253,9 @@ so leave it off.
 
 Concurrently: (1) own seat — `Agent` tool with `$PROMPT_FILE` and the
 "you have project context, read the files" instruction; (2) foreign —
-`/ask-agent codex --prompt-file "$FOREIGN_FILE"` from the worktree; (3)
+`/ask-agent codex -m gpt-6-sol --prompt-file "$FOREIGN_FILE"` from the worktree; (3)
 foreign — `/ask-agent agy -d /tmp --prompt-file "$FOREIGN_FILE"`. A Codex host
-swaps (1) for its built-in subagent and (2) for `/ask-agent claude
+swaps (1) for its built-in subagent and (2) for `/ask-agent claude -m opus
 --prompt-file "$FOREIGN_FILE"`; any other host applies the matrix.
 
 Reading the staged prompt file is the *one* tool agy is permitted (that is
