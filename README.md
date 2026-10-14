@@ -21,8 +21,9 @@ contents remain intact. These installed paths remain the stable interface
 for skill scripts, allowed-tools declarations, and global instructions.
 The app-managed `synced/` cache is ignored and preserved during migration.
 
-Project repositories contain small `SKILL.md` pointers to these installed
-paths. They require the shared installation; they do not carry skill copies.
+Project repositories may use the stable installed paths or carry a reviewed,
+commit-pinned vendor snapshot when they must remain self-contained. Vendored
+copies record their source commit and retain this repository's license.
 
 ## Configuration
 
@@ -44,6 +45,12 @@ subtree. A separate rename commit placed it under `skills/`, preserving the
 extracted commit graph. The ignored sync cache was never part of that history.
 
 Current-tree cleanup does not remove former setup-specific values from
-historical commits. Publication visibility remains a separate decision.
+historical commits. The repository is initially private so its installation
+and historical disclosure can be reviewed before a deliberate public release.
+
+## License
+
+Agent skills is free software licensed under the
+[GNU Affero General Public License, version 3](LICENSE).
 
 See [AGENTS.md](AGENTS.md) for contribution and verification instructions.
