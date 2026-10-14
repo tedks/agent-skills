@@ -254,16 +254,24 @@ class Retirement:
         self.verify_identity()
         process = self.state['identity']['process']
         actor = (process.get('cores') or [process])[0]
-        helper = Path(__file__).resolve().parents[4] / 'mcp/claude-introspect/session_binding.py'
-        if not helper.is_file():
-            raise Stop('native session binding reader unavailable at ' + str(helper))
-        try:
-            if str(helper.parent) not in sys.path:
-                sys.path.insert(0, str(helper.parent))
-            from session_binding import ProcessPin, observe_native_session
-            import session_binding
-            if Path(session_binding.__file__).resolve() != helper.resolve():
+        directory = Path(__file__).resolve().parents[2] / '_shared/native'
+        names = ('harness_identity', 'codex_status', 'session_binding')
+        for name in names:
+            helper = directory / (name + '.py')
+            if not helper.resolve().is_relative_to(directory):
                 raise Stop('native session binding reader path changed')
+            if not helper.is_file():
+                raise Stop('native session binding reader unavailable at ' + str(helper))
+            cached = sys.modules.get(name)
+            if cached is not None and Path(getattr(cached, '__file__', '')).resolve() != helper.resolve():
+                raise Stop('native session binding reader path changed')
+        try:
+            sys.path.insert(0, str(directory))
+            from session_binding import ProcessPin, observe_native_session
+            import harness_identity, codex_status, session_binding
+            for module in (harness_identity, codex_status, session_binding):
+                if Path(module.__file__).resolve() != (directory / (module.__name__ + '.py')).resolve():
+                    raise Stop('native session binding reader path changed')
             pin = ProcessPin(actor['pid'], actor['start'], actor['boot'])
             proof = observe_native_session(process['agent'], pin)
         except Exception as error:

@@ -574,12 +574,9 @@ class Tests(unittest.TestCase):
     def instrument(self, before, after):
         stage = self.directory / ('instrumented-' + uuid.uuid4().hex)
         stage.mkdir()
-        helper_dir = stage / 'mcp/claude-introspect'
-        helper_dir.mkdir(parents=True)
-        for name in ('harness_identity.py', 'codex_status.py', 'session_binding.py'):
-            shutil.copyfile(HERE.parents[3] / 'mcp/claude-introspect' / name, helper_dir / name)
-        stage = stage / '.claude/skills/retire-agent/scripts'
+        stage = stage / 'skills/retire-agent/scripts'
         stage.mkdir(parents=True)
+        shutil.copytree(HERE.parents[1] / '_shared', stage.parents[1] / '_shared')
         source = self.source()
         if before not in source:
             self.fail('INVALID-INSTRUMENTATION: missing stable anchor')
@@ -906,17 +903,17 @@ class Tests(unittest.TestCase):
     def test_missing_codex_reader_blocks_before_offer(self):
         self.actor()
         entry = self.instrument("        process = self.state['identity']['process']", "        process = self.state['identity']['process']")
-        (entry.resolve().parents[4] / 'mcp/claude-introspect/codex_status.py').unlink()
+        (entry.resolve().parents[2] / '_shared/native/codex_status.py').unlink()
         with patch.dict(os.environ, {'RETIRE_TEST_SCRIPT': str(entry)}):
             result = self.invoke()
         self.assertEqual(result.returncode, 2, result.stderr)
-        self.assertIn('native session binding reader failed for pinned PID', result.stderr)
+        self.assertIn('native session binding reader unavailable', result.stderr)
         self.assertNotIn('offer', self.state()[1])
 
     def test_missing_shared_binding_blocks_before_offer(self):
         self.actor()
         entry = self.instrument("        process = self.state['identity']['process']", "        process = self.state['identity']['process']")
-        (entry.resolve().parents[4] / 'mcp/claude-introspect/session_binding.py').unlink()
+        (entry.resolve().parents[2] / '_shared/native/session_binding.py').unlink()
         with patch.dict(os.environ, {'RETIRE_TEST_SCRIPT': str(entry)}):
             result = self.invoke()
         self.assertEqual(result.returncode, 2, result.stderr)
@@ -1161,8 +1158,8 @@ class Tests(unittest.TestCase):
         self.assertFalse((self.directory / 'exit-order.json').exists())
 
     def test_native_preflight_rejects_source_common_dir_and_remotes(self):
-        source = HERE.parents[3]
-        candidates = [source / '.claude', self.repo]
+        source = HERE.parents[2]
+        candidates = [source / 'skills', self.repo]
         master = source.parent / 'master'
         if master.exists():
             candidates.append(master)
@@ -1191,8 +1188,9 @@ class Tests(unittest.TestCase):
             self.assertEqual(result.returncode, code, result.stderr)
             self.assertFalse(evidence.exists())
         fake = self.directory / 'fake-source'
-        fake_scripts = fake / '.claude/skills/retire-agent/scripts'
+        fake_scripts = fake / 'skills/retire-agent/scripts'
         fake_scripts.mkdir(parents=True)
+        shutil.copytree(HERE.parents[1] / '_shared', fake_scripts.parents[1] / '_shared')
         for name in ('test-retire-native.py', 'retire.py'):
             shutil.copyfile(HERE / name, fake_scripts / name)
         nested = fake / 'owned-nested'
@@ -1202,8 +1200,9 @@ class Tests(unittest.TestCase):
                                  '--shared-skill', str(SHARED.parent)], text=True, capture_output=True, timeout=5)
         self.assertEqual(result.returncode, 2, result.stderr)
         self.assertFalse((self.directory / 'nested-evidence').exists())
-        descendant_scripts = cwd / 'fake-source/.claude/skills/retire-agent/scripts'
+        descendant_scripts = cwd / 'fake-source/skills/retire-agent/scripts'
         descendant_scripts.mkdir(parents=True)
+        shutil.copytree(HERE.parents[1] / '_shared', descendant_scripts.parents[1] / '_shared')
         for name in ('test-retire-native.py', 'retire.py'):
             shutil.copyfile(HERE / name, descendant_scripts / name)
         result = subprocess.run([sys.executable, str(descendant_scripts / 'test-retire-native.py'), '--preflight-only',

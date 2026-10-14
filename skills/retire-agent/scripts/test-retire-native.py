@@ -70,7 +70,7 @@ def main():
     parser.add_argument('--claude-model', default='haiku')
     args = parser.parse_args()
     worktree = args.worktree.resolve()
-    source_root = HERE.parents[3]
+    source_root = HERE.parents[2]
     top = Path(require(run(['git', '-C', worktree, 'rev-parse', '--show-toplevel']))).resolve()
     if top == source_root or source_root in top.parents or top in source_root.parents or top != worktree:
         parser.error('--worktree must be the top of an exclusively owned disposable Git directory, separate from source')

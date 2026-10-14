@@ -178,7 +178,7 @@ session IDs preserve the handoff pending exit verification. If the original
 ended before any exit request, leave pending without sending into its shell.
 
 Before offering retirement, the controller observes the pinned peer through
-`mcp/claude-introspect/session_binding.py` and puts its verified provider-native
+the canonical `skills/_shared/native/session_binding.py` and puts its verified provider-native
 session UUID in the offer beside the assigned shard path. The retiring agent
 copies that exact ID into the shard; it does not find a helper or rediscover
 its session. The controller rechecks the pinned peer just before sending the

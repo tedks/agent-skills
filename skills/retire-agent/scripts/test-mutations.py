@@ -117,12 +117,9 @@ for label, before, after, test in mutations:
         mutated = mutated.replace(before, after, 2 if label == 'commit ownership' else 1)
     with tempfile.TemporaryDirectory(prefix='retire-mutation-') as directory:
         directory = Path(directory)
-        helper_dir = directory / 'mcp/claude-introspect'
-        helper_dir.mkdir(parents=True)
-        for name in ('harness_identity.py', 'codex_status.py', 'session_binding.py'):
-            shutil.copyfile(HERE.parents[3] / 'mcp/claude-introspect' / name, helper_dir / name)
-        directory = directory / '.claude/skills/retire-agent/scripts'
+        directory = directory / 'skills/retire-agent/scripts'
         directory.mkdir(parents=True)
+        shutil.copytree(HERE.parents[1] / '_shared', directory.parents[1] / '_shared')
         (directory / 'retire.py').write_text(mutated)
         entry = directory / 'retire.sh'
         entry.write_bytes((HERE / 'retire.sh').read_bytes())

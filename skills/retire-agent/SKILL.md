@@ -10,9 +10,9 @@ A saved handoff and an ended agent process are separate receipts. Preserve
 human input and leave a session open when either receipt cannot be established.
 Read [the shard and recovery contract](references/protocol.md) before invoking
 the script. Linux `/proc`, tmux, Git, Python 3.11+ and the installed spawn-agent
-skill are required. Keep the canonical dotfiles repository layout: native
-verification loads `mcp/claude-introspect/session_binding.py`, which uses the
-bounded Codex rollout reader. Claude requires the
+skill are required. Native verification loads the canonical sibling readers in
+`../_shared/native/`, including the bounded Codex rollout reader; preserve the
+installed skills tree layout. Claude requires the
 installed `capture-session-state.sh` PreToolUse hook and its per-process pointer.
 The sender must provide stable ordinary draft co-submission and guarded typed
 Codex / literal Claude exits. Configure `off_duty.path`, optional expected `off_duty.remote`, and
@@ -115,8 +115,9 @@ Run `scripts/test-retire.py` and `scripts/test-mutations.py` for isolated
 behavior and guard-removal tests. Set `RETIRE_TEST_SHARED_SCRIPTS` to the
 published spawn-agent `scripts` directory to verify a dependency checkout;
 the default is this checkout's sibling spawn-agent. The binding readers'
-suites under `mcp/claude-introspect/` import the MCP SDK: run each
-`test_*.py` with `uv run --script`, since plain `python3` cannot import `mcp`.
+standalone suites live under `../_shared/native/tests/`; run each `test-*.py`
+with Python, plus `--mutation-check`. Dotfiles' MCP wiring tests remain in
+that repository and require the MCP SDK.
 
 `scripts/test-retire-native.py` is an opt-in model-token test. Pass `--worktree`
 naming an exclusively owned, clean disposable Git directory, `--evidence`
