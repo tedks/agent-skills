@@ -23,6 +23,8 @@ class NativeHelpers(unittest.TestCase):
         installed.parent.mkdir()
         installed.symlink_to(self.skills, target_is_directory=True)
         self.script = installed / 'retire-agent/scripts/retire.py'
+        if os.environ.get('NATIVE_HELPERS_TEST_RETIRE'):
+            self.script.write_bytes(Path(os.environ['NATIVE_HELPERS_TEST_RETIRE']).read_bytes())
         self.native = self.skills / '_shared/native'
         self.env = {k: v for k, v in os.environ.items()
                     if not k.startswith(('AGENT_SKILLS_', 'RETIRE_', 'SPAWN_')) and k != 'TMUX'}
@@ -53,11 +55,24 @@ except m.Stop as error:
 import session_binding,harness_identity,codex_status
 assert all(Path(module.__file__).parent==native for module in (session_binding,harness_identity,codex_status))
 session_binding.observe_native_session=lambda *args:{'state':'observed','session_id':'11111111-1111-1111-1111-111111111111'}
+assert not (script.resolve().parents[4]/'mcp/claude-introspect').exists()
+r.native_binding(); r.native_binding()
+assert sys.path.count(str(native)) == 1
 ''')
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(json.loads(result.stdout)['state'], 'observed')
+        self.assertEqual(list(self.native.rglob('*.pyc')), [])
+
+    def test_symlinked_shared_directory_loads_canonical_helpers(self):
+        shared = self.skills / '_shared'
+        target = self.root / 'shared-target'
+        shared.rename(target)
+        shared.symlink_to(target, target_is_directory=True)
+        self.native = target / 'native'
+        self.test_standalone_installed_layout_loads_canonical_helpers()
 
     def test_missing_helper_never_falls_back(self):
+        # Contract test; the positive standalone-layout test distinguishes old code.
         for name in ('session_binding', 'harness_identity', 'codex_status'):
             with self.subTest(name=name):
                 path = self.native / (name + '.py')
@@ -92,5 +107,40 @@ sys.modules[{name!r}]=fake
                 self.assertIn('native session binding reader path changed', result.stderr)
 
 
+def mutation_check():
+    source = (ROOT / 'skills/retire-agent/scripts/retire.py').read_text()
+    cases = [
+        ('containment', 'if not helper.resolve().is_relative_to(directory):', 'if False:',
+         'test_escaping_helper_never_runs'),
+        ('presence', 'if not helper.is_file():', 'if False:',
+         'test_missing_helper_never_falls_back'),
+        ('cached_origin', "if cached is not None and Path(getattr(cached, '__file__', '')).resolve() != helper.resolve():", 'if False:',
+         'test_wrong_cached_helper_never_runs'),
+        ('path_dedup', 'if str(directory) not in sys.path:', 'if True:',
+         'test_standalone_installed_layout_loads_canonical_helpers'),
+        ('symlink_base', "directory = (Path(__file__).resolve().parents[2] / '_shared/native').resolve()",
+         "directory = Path(__file__).resolve().parents[2] / '_shared/native'",
+         'test_symlinked_shared_directory_loads_canonical_helpers'),
+    ]
+    failed = []
+    with tempfile.TemporaryDirectory(prefix='native-guard-mutants-') as temporary:
+        target = Path(temporary) / 'retire.py'
+        for name, before, after, test in cases:
+            if source.count(before) != 1:
+                raise AssertionError('mutation anchor drift: ' + name)
+            target.write_text(source.replace(before, after, 1))
+            result = subprocess.run([sys.executable, __file__, 'NativeHelpers.' + test],
+                                    env=os.environ | {'NATIVE_HELPERS_TEST_RETIRE': str(target)},
+                                    text=True, capture_output=True, timeout=30)
+            killed = result.returncode != 0 and 'FAIL:' in result.stderr and 'ERROR:' not in result.stderr
+            print(('KILLED ' if killed else 'INVALID OR SURVIVED ') + name)
+            if not killed:
+                failed.append(name)
+                print(result.stdout + result.stderr)
+    return bool(failed)
+
+
 if __name__ == '__main__':
+    if sys.argv[1:] == ['--mutation-check']:
+        raise SystemExit(mutation_check())
     unittest.main()

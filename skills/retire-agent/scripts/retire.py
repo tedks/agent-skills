@@ -254,7 +254,7 @@ class Retirement:
         self.verify_identity()
         process = self.state['identity']['process']
         actor = (process.get('cores') or [process])[0]
-        directory = Path(__file__).resolve().parents[2] / '_shared/native'
+        directory = (Path(__file__).resolve().parents[2] / '_shared/native').resolve()
         names = ('harness_identity', 'codex_status', 'session_binding')
         for name in names:
             helper = directory / (name + '.py')
@@ -266,7 +266,8 @@ class Retirement:
             if cached is not None and Path(getattr(cached, '__file__', '')).resolve() != helper.resolve():
                 raise Stop('native session binding reader path changed')
         try:
-            sys.path.insert(0, str(directory))
+            if str(directory) not in sys.path:
+                sys.path.insert(0, str(directory))
             from session_binding import ProcessPin, observe_native_session
             import harness_identity, codex_status, session_binding
             for module in (harness_identity, codex_status, session_binding):

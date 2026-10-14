@@ -8,6 +8,7 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
+sys.dont_write_bytecode = True
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 if os.environ.get('SESSION_BINDING_TEST_MODULE'):
     sys.path.insert(0, str(Path(os.environ['SESSION_BINDING_TEST_MODULE']).parent))
