@@ -37,12 +37,14 @@ code, and should not contain secrets.
 
 ## History
 
-The source snapshot is dotfiles commit
-`c9eaba9e7630dc732ec092220a32478f09199171`. `git subtree split -P .claude/skills`
-produced `8c6a04d5b86fc95ce2faed19e7c86be64850fb75`, retaining 263 commits.
-Its tree `9049dd69e812c9febd229ca6d6315f4a6486a1b2` exactly matched the source
-subtree. A separate rename commit placed it under `skills/`, preserving the
-extracted commit graph. The ignored sync cache was never part of that history.
+The current source snapshot is dotfiles commit
+`63f99171a1a0a9f28788abe0c6b8514e2d4124bf`. `git subtree split -P .claude/skills`
+produced `7b212b1dc61d3bc948612c56209f66ec6ca914de`, retaining 264 commits.
+Its tree `754c0a3c7fe6d3415ddfe863186c1b3e92eb9ba6` exactly matched the source
+subtree. A separate rename commit placed the original extraction under
+`skills/`; the current branch merges the updated extraction so both source
+histories remain reachable. The ignored sync cache was never part of that
+history.
 
 Current-tree cleanup does not remove former setup-specific values from
 historical commits. The repository is initially private so its installation
