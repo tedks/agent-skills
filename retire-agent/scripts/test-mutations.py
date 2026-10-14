@@ -119,7 +119,7 @@ for label, before, after, test in mutations:
         directory = Path(directory)
         helper_dir = directory / 'mcp/claude-introspect'
         helper_dir.mkdir(parents=True)
-        for name in ('harness_identity.py', 'codex_status.py', 'session_binding.py'):
+        for name in ('_skills_native.py', 'harness_identity.py', 'codex_status.py', 'session_binding.py'):
             shutil.copyfile(HERE.parents[3] / 'mcp/claude-introspect' / name, helper_dir / name)
         directory = directory / '.claude/skills/retire-agent/scripts'
         directory.mkdir(parents=True)

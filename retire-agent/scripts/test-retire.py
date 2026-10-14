@@ -576,7 +576,7 @@ class Tests(unittest.TestCase):
         stage.mkdir()
         helper_dir = stage / 'mcp/claude-introspect'
         helper_dir.mkdir(parents=True)
-        for name in ('harness_identity.py', 'codex_status.py', 'session_binding.py'):
+        for name in ('_skills_native.py', 'harness_identity.py', 'codex_status.py', 'session_binding.py'):
             shutil.copyfile(HERE.parents[3] / 'mcp/claude-introspect' / name, helper_dir / name)
         stage = stage / '.claude/skills/retire-agent/scripts'
         stage.mkdir(parents=True)
