@@ -38,9 +38,9 @@ code, and should not contain secrets.
 ## History
 
 The current source snapshot is dotfiles commit
-`63f99171a1a0a9f28788abe0c6b8514e2d4124bf`. `git subtree split -P .claude/skills`
-produced `7b212b1dc61d3bc948612c56209f66ec6ca914de`, retaining 264 commits.
-Its tree `754c0a3c7fe6d3415ddfe863186c1b3e92eb9ba6` exactly matched the source
+`53159f2b203c7e2e72ff523dc114b29bb90d202a`. `git subtree split -P .claude/skills` produced
+`df7982e3750fc48c2eaf1ba11cad9fcfea4ee3d7`, retaining 270 commits.
+Its tree `7efbbf9cdff6279cbfee350a32e99bc36d439922` exactly matched the source
 subtree. A separate rename commit placed the original extraction under
 `skills/`; the current branch merges the updated extraction so both source
 histories remain reachable. The ignored sync cache was never part of that
