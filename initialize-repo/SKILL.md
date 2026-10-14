@@ -181,6 +181,11 @@ use the configured projects root throughout. Replace `<github.owner>` with
 the configured GitHub owner, requesting it if unset. Templates live alongside
 this skill and are accessed through the stable `~/.claude/skills/` install.
 
+If the loader is missing (including a pre-cutover legacy installation), stop
+and ask the operator to install shared skills or provide `projects_root` and
+`github.owner` explicitly. Do not guess these values or silently bypass the
+loader.
+
 Use the loader so defaults, `XDG_CONFIG_HOME`, and environment overrides apply:
 
 ```bash
