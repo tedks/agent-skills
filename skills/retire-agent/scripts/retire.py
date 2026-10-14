@@ -266,8 +266,7 @@ class Retirement:
             if cached is not None and Path(getattr(cached, '__file__', '')).resolve() != helper.resolve():
                 raise Stop('native session binding reader path changed')
         try:
-            if str(directory) not in sys.path:
-                sys.path.insert(0, str(directory))
+            sys.path[:] = [str(directory)] + [entry for entry in sys.path if entry != str(directory)]
             from session_binding import ProcessPin, observe_native_session
             import harness_identity, codex_status, session_binding
             for module in (harness_identity, codex_status, session_binding):

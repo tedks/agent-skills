@@ -106,6 +106,19 @@ sys.modules[{name!r}]=fake
                 self.assertEqual(result.returncode, 2, result.stderr)
                 self.assertIn('native session binding reader path changed', result.stderr)
 
+    def test_native_directory_is_promoted_before_import(self):
+        marker = self.skills.parent / 'outside-helper-ran'
+        result = self.run_reader(f'''native.joinpath('session_binding.py').write_text("class ProcessPin:\\n    def __init__(self,*args): pass\\ndef observe_native_session(*args): return {{'state':'observed','session_id':'11111111-1111-1111-1111-111111111111'}}\\n")
+outside=native.parents[2]/'outside'
+outside.mkdir()
+outside.joinpath('session_binding.py').write_text("from pathlib import Path\\nPath({str(marker)!r}).write_text('ran')\\nraise RuntimeError('outside helper executed')\\n")
+sys.path.append(str(native))
+sys.path.insert(0,str(outside))
+''')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertFalse(marker.exists())
+        self.assertEqual(json.loads(result.stdout)['state'], 'observed')
+
 
 def mutation_check():
     source = (ROOT / 'skills/retire-agent/scripts/retire.py').read_text()
@@ -116,8 +129,12 @@ def mutation_check():
          'test_missing_helper_never_falls_back'),
         ('cached_origin', "if cached is not None and Path(getattr(cached, '__file__', '')).resolve() != helper.resolve():", 'if False:',
          'test_wrong_cached_helper_never_runs'),
-        ('path_dedup', 'if str(directory) not in sys.path:', 'if True:',
+        ('path_dedup', "sys.path[:] = [str(directory)] + [entry for entry in sys.path if entry != str(directory)]",
+         'sys.path.insert(0, str(directory))',
          'test_standalone_installed_layout_loads_canonical_helpers'),
+        ('path_priority', "sys.path[:] = [str(directory)] + [entry for entry in sys.path if entry != str(directory)]",
+         "sys.path[:] = [entry for entry in sys.path if entry != str(directory)] + [str(directory)]",
+         'test_native_directory_is_promoted_before_import'),
         ('symlink_base', "directory = (Path(__file__).resolve().parents[2] / '_shared/native').resolve()",
          "directory = Path(__file__).resolve().parents[2] / '_shared/native'",
          'test_symlinked_shared_directory_loads_canonical_helpers'),
