@@ -355,7 +355,7 @@ _MAX_AGE = timedelta(days=8)
 
 
 def _rollout_candidates(sessions: Path, now: datetime, max_files: int):
-    """Regular rollout-*.jsonl files modified in the last 8 days, newest mtime first."""
+    """(mtime, path) of regular rollout-*.jsonl files modified in the last 8 days, newest first."""
     cutoff = (now - _MAX_AGE).timestamp()
     found = []
     for directory, _, names in os.walk(sessions, onerror=_raise, followlinks=False):
@@ -372,7 +372,7 @@ def _rollout_candidates(sessions: Path, now: datetime, max_files: int):
                 continue
             found.append((info.st_mtime, path))
     found.sort(key=lambda item: item[0], reverse=True)
-    return [path for _, path in found[:max_files]]
+    return found[:max_files]
 
 
 def _raise(error):
@@ -434,8 +434,8 @@ def _file_quota(path: Path, tail_bytes: int, max_line_bytes: int):
     return provider, newest
 
 
-def newest_account_quota(codex_home: Path, *, now: datetime | None = None, max_files: int = 64,
-                         tail_bytes: int = 4 * 1024 * 1024,
+def newest_account_quota(codex_home: Path, *, now: datetime | None = None, max_files: int = 32,
+                         tail_bytes: int = 1024 * 1024,
                          max_line_bytes: int = 4 * 1024 * 1024) -> dict:
     """Newest rate_limits observation per bucket across this CODEX_HOME's rollouts.
 
@@ -443,7 +443,9 @@ def newest_account_quota(codex_home: Path, *, now: datetime | None = None, max_f
     event, so an idle session's meter goes stale. This searches the most recently
     modified rollouts (at most ``max_files``, modified within 8 days) and picks
     per bucket the record with the greatest valid timestamp; mtime only orders
-    candidates. Reads the first line (provider) and the last ``tail_bytes`` of
+    candidates and bounds the scan: a record cannot be newer than its file's
+    mtime, so scanning stops once every bucket found so far has a best
+    timestamp at or after the next candidate's mtime (``stopped_early``). Reads the first line (provider) and the last ``tail_bytes`` of
     each file, ignoring partial/unfinished/malformed lines. Returns no paths,
     session ids, cwd or content, and never the credit balance.
     """
@@ -463,7 +465,11 @@ def newest_account_quota(codex_home: Path, *, now: datetime | None = None, max_f
         return unavailable("sessions_unreadable")
     best = {}
     scanned = 0
-    for path in paths:
+    stopped_early = False
+    for mtime, path in paths:
+        if best and min(entry[0] for entry in best.values()).timestamp() >= mtime:
+            stopped_early = True
+            break
         try:
             found = _file_quota(path, tail_bytes, max_line_bytes)
         except (OSError, ValueError, UnicodeError):
@@ -481,4 +487,5 @@ def newest_account_quota(codex_home: Path, *, now: datetime | None = None, max_f
     for key, (_, stamp, quota, provider) in best.items():
         buckets[key] = _quota_bucket(quota, stamp, provider, now)[1]
     return {"state": "observed", "source": "codex_rollouts_newest", "scope": "account",
-            "quota_buckets": buckets, "files_scanned": scanned, "evaluated_at": now.isoformat()}
+            "quota_buckets": buckets, "files_scanned": scanned,
+            "stopped_early": stopped_early, "evaluated_at": now.isoformat()}

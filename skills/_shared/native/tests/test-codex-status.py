@@ -501,7 +501,8 @@ class AccountQuotaTests(unittest.TestCase):
         self.assertEqual(status._file_quota(target, 1024, 1024)[1].keys(), {'codex'})
         with self.assertRaises(OSError):
             status._file_quota(link, 1024, 1024)
-        self.assertEqual(status._rollout_candidates(self.sessions.resolve(), ACCOUNT_NOW, 10), [target.resolve()])
+        self.assertEqual(status._rollout_candidates(self.sessions.resolve(), ACCOUNT_NOW, 10),
+                         [(target.stat().st_mtime, target.resolve())])
 
     def test_resolved_path_must_stay_under_sessions(self):
         outside = Path(self.tmp.name) / 'outside'
@@ -517,6 +518,33 @@ class AccountQuotaTests(unittest.TestCase):
         tail = len(record.encode()) - 1  # the tail read starts at the record's own brace, inside the JUNK line
         self.assertEqual(self.newest(tail_bytes=tail).get('reason'), 'no_recent_rate_limits')
         self.assertEqual(self.newest().get('reason'), 'no_recent_rate_limits')  # whole line is malformed
+
+    def test_stops_early_when_bound_reached(self):
+        # Newest-mtime file's record is at/after the next file's mtime: the older
+        # file (which holds an even newer record) is never read.
+        self.add('rollout-a.jsonl', rollout_text([quota_event(at(10, 11), 1)]), age_hours=1)
+        self.add('rollout-b.jsonl', rollout_text([quota_event(at(10, 11).replace('11:00', '11:30'), 2)]), age_hours=2)
+        result = self.newest()
+        self.assertEqual((result['files_scanned'], result['stopped_early'], self.primary(result)), (1, True, 1))
+        # Normal case: the older file's mtime is after the record, so it is read.
+        self.add('rollout-b.jsonl', rollout_text([quota_event(at(10, 10), 2)]), age_hours=0.5)
+        self.add('rollout-a.jsonl', rollout_text([quota_event(at(10, 1), 1)]), age_hours=1)
+        result = self.newest()
+        self.assertEqual((result['files_scanned'], result['stopped_early']), (2, False))
+
+    def test_multi_bucket_bound_uses_oldest_bucket(self):
+        self.add('rollout-a.jsonl', rollout_text([quota_event(at(9, 9), 1)]), age_hours=1)
+        self.add('rollout-b.jsonl', rollout_text([quota_event(at(10, 9), 2, bucket='other')]), age_hours=2)
+        result = self.newest()
+        self.assertEqual((result['files_scanned'], result['stopped_early']), (2, False))
+        self.assertEqual(set(result['quota_buckets']), {'codex', 'other'})
+        # Once both buckets are at/after the next mtime, the scan stops.
+        self.add('rollout-c.jsonl', rollout_text([quota_event(at(10, 9), 3, bucket='other')]), age_hours=2.5)
+        self.add('rollout-d.jsonl', rollout_text([quota_event(at(10, 11), 4, bucket='other')]), age_hours=40)
+        self.add('rollout-b.jsonl', rollout_text([quota_event(at(10, 9), 2, bucket='other')]), age_hours=1.5)
+        self.add('rollout-a.jsonl', rollout_text([quota_event(at(10, 10), 1)]), age_hours=1)
+        result = self.newest()
+        self.assertEqual((result['files_scanned'], result['stopped_early']), (3, True))
 
     def test_age_cutoff_boundary(self):
         self.add('rollout-edge.jsonl', rollout_text([quota_event(at(10, 1), 21)]), age_hours=8 * 24 - 1)
@@ -680,7 +708,7 @@ def mutation_check():
          'if key not in best:', 'AccountQuotaTests.test_newest_timestamp_wins_over_newest_mtime'),
         ('newest-in-file', 'if key not in newest or when >= newest[key][0]:',
          'if True:', 'AccountQuotaTests.test_within_file_newest_record_and_per_bucket'),
-        ('age-cutoff', 'or info.st_mtime < cutoff:', 'or False:', 'AccountQuotaTests.test_skips_unusable_files_and_lines'),
+        ('age-cutoff', 'or info.st_mtime < cutoff:', 'or False:', 'AccountQuotaTests.test_age_cutoff_boundary'),
         ('age-cutoff-boundary', 'cutoff = (now - _MAX_AGE).timestamp()',
          'cutoff = (now - _MAX_AGE * 2).timestamp()', 'AccountQuotaTests.test_age_cutoff_boundary'),
         ('symlink-rejection', 'if not stat.S_ISREG(info.st_mode) or info.st_mtime < cutoff:',
@@ -701,6 +729,9 @@ def mutation_check():
         ('codex-home-relative', 'return codex_home if codex_home.is_absolute() else None',
          'return codex_home', 'CodexHomeTests.test_resolution_order'),
         ('no-recent', 'return unavailable("no_recent_rate_limits")', 'return {"state": "observed"}', 'AccountQuotaTests.test_unavailable_states'),
+        ('stop-comparison', '.timestamp() >= mtime:', '.timestamp() > mtime + 86400 * 365:', 'AccountQuotaTests.test_stops_early_when_bound_reached'),
+        ('stop-removed', 'if best and min(', 'if False and min(', 'AccountQuotaTests.test_stops_early_when_bound_reached'),
+        ('stop-bound-min', 'min(entry[0] for entry in best.values())', 'max(entry[0] for entry in best.values())', 'AccountQuotaTests.test_multi_bucket_bound_uses_oldest_bucket'),
     ]
     source = MODULE.read_text()
     failed = []
