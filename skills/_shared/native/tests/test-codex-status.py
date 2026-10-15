@@ -618,11 +618,61 @@ class AccountQuotaTests(unittest.TestCase):
             self.add(f'rollout-{number}.jsonl', rollout_text([quota_event(at(10, number), number)]))
         full = self.newest()
         self.assertFalse(full['incomplete'])
-        with patch.object(status, '_MAX_ENTRIES', 3):
+        with patch.object(status, '_MAX_ENTRIES', 6):
             result = self.newest()
         self.assertEqual((result.get('incomplete'), result.get('reason_incomplete')), (True, 'too_many_rollouts'))
         with patch.object(status, '_MAX_ENTRIES', 0):
             self.assertEqual(self.newest().get('reason'), 'too_many_rollouts')
+
+    def test_huge_directory_is_pulled_lazily_up_to_the_cap(self):
+        for number in range(60):
+            (self.sessions / f'rollout-{number}.jsonl').write_text('')
+        pulled = []
+        original = os.scandir
+        class Spy:
+            def __init__(self, inner):
+                self.inner = inner
+            def __enter__(self):
+                self.inner.__enter__()
+                return self
+            def __exit__(self, *exc):
+                return self.inner.__exit__(*exc)
+            def __iter__(self):
+                return self
+            def __next__(self):
+                entry = next(self.inner)
+                pulled.append(entry.name)
+                return entry
+        with patch.object(status, '_MAX_ENTRIES', 10), patch.object(os, 'scandir', lambda p: Spy(original(p))):
+            result = self.newest()
+        self.assertEqual(result.get('reason'), 'too_many_rollouts')
+        self.assertLessEqual(len(pulled), 11)
+        self.assertGreaterEqual(len(pulled), 10)
+
+    def test_old_dirs_budget(self):
+        for number in range(40):
+            (self.home / 'sessions' / f'junk-{number}').write_text('')
+        pulled = []
+        original = os.scandir
+        def spy(path):
+            inner = original(path)
+            class Wrapped:
+                def __enter__(self_):
+                    inner.__enter__()
+                    return self_
+                def __exit__(self_, *exc):
+                    return inner.__exit__(*exc)
+                def __iter__(self_):
+                    return self_
+                def __next__(self_):
+                    entry = next(inner)
+                    pulled.append(entry.name)
+                    return entry
+            return Wrapped()
+        with patch.object(status, '_MAX_ENTRIES', 10), patch.object(os, 'scandir', spy):
+            result = self.newest()
+        self.assertLessEqual(len(pulled), 11)
+        self.assertEqual(result.get('reason'), 'too_many_rollouts')
 
     def test_long_lived_session_in_old_day_directory_is_found(self):
         old_day = self.home / 'sessions/2025/11/11'  # 60 days before ACCOUNT_NOW
@@ -885,7 +935,9 @@ def mutation_check():
         ('bucket-coverage', 'if start == 0 or (newest and expected <= newest.keys()):', 'if start == 0 or newest:', 'AccountQuotaTests.test_partial_bucket_coverage_continues_backwards_in_file'),
         ('missing-buckets', 'missing = sorted(expected - best.keys())', 'missing = []', 'AccountQuotaTests.test_missing_expected_bucket_marks_incomplete'),
         ('read-new-chunk-only', 'raw = stream.read(hi - lo) + raw', 'raw = stream.read(size - lo)', 'AccountQuotaTests.test_backward_search_reads_each_byte_once'),
-        ('entry-cap', 'if examined >= _MAX_ENTRIES:', 'if False:', 'AccountQuotaTests.test_entry_cap_marks_incomplete'),
+        ('entry-cap', 'if self.examined >= _MAX_ENTRIES:', 'if False:', 'AccountQuotaTests.test_entry_cap_marks_incomplete'),
+        ('day-listing-budget', 'if not budget.spend():\n                                return', 'if False:\n                                return', 'AccountQuotaTests.test_huge_directory_is_pulled_lazily_up_to_the_cap'),
+        ('dir-listing-budget', 'if not budget.spend():\n                    break', 'if False:\n                    break', 'AccountQuotaTests.test_old_dirs_budget'),
         ('day-validation', 'date(year, month, day)\n                except ValueError:\n                    continue', 'date(year, 1, 1)\n                except ValueError:\n                    continue', 'AccountQuotaTests.test_only_valid_day_directories_are_listed'),
         ('cap-uncertain', 'return provider, newest, False  # expected buckets may lie in unread bytes', 'return provider, newest, bool(newest)', 'AccountQuotaTests.test_expected_bucket_beyond_search_cap_is_uncertain'),
     ]

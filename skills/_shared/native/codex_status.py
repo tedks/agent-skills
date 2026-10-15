@@ -360,12 +360,32 @@ _HEADER_BYTES = 64 * 1024  # only model_provider is needed from the first line
 _SEARCH_BYTES = 8 * 1024 * 1024  # per-file backward-search cap
 
 
-def _numbered_dirs(parent: Path, width: int):
-    """Real (non-symlink) subdirectories named by a fixed-width integer, descending."""
+class _Budget:
+    """Global count of directory entries pulled; the cap is _MAX_ENTRIES."""
+
+    def __init__(self):
+        self.examined = 0
+        self.truncated = False
+
+    def spend(self) -> bool:
+        if self.examined >= _MAX_ENTRIES:
+            self.truncated = True
+            return False
+        self.examined += 1
+        return True
+
+
+def _numbered_dirs(parent: Path, width: int, budget: _Budget):
+    """Real (non-symlink) subdirectories named by a fixed-width integer, descending.
+
+    Entries are pulled lazily and counted against ``budget``.
+    """
     found = []
     try:
         with os.scandir(parent) as entries:
             for entry in entries:
+                if not budget.spend():
+                    break
                 if (len(entry.name) == width and entry.name.isascii() and entry.name.isdigit()
                         and entry.is_dir(follow_symlinks=False)):
                     found.append((int(entry.name), Path(entry.path)))
@@ -374,26 +394,34 @@ def _numbered_dirs(parent: Path, width: int):
     return sorted(found, reverse=True)
 
 
-def _day_files(sessions: Path):
+def _day_files(sessions: Path, budget: _Budget):
     """(directory, name) of entries in valid sessions/YYYY/MM/DD dirs, newest day first.
 
     Walks only that layout (names are validated as real calendar dates); files
-    outside it are ignored. Directories are not pruned by date.
+    outside it are ignored. Directories are not pruned by date. Every entry is
+    pulled lazily and counted against ``budget``; iteration stops at the cap.
     """
-    for year, year_dir in _numbered_dirs(sessions, 4):
-        for month, month_dir in _numbered_dirs(year_dir, 2):
-            for day, day_dir in _numbered_dirs(month_dir, 2):
+    for year, year_dir in _numbered_dirs(sessions, 4, budget):
+        for month, month_dir in _numbered_dirs(year_dir, 2, budget):
+            for day, day_dir in _numbered_dirs(month_dir, 2, budget):
                 try:
                     date(year, month, day)
                 except ValueError:
                     continue
                 try:
                     with os.scandir(day_dir) as entries:
-                        names = [entry.name for entry in entries]
+                        for entry in entries:
+                            if not budget.spend():
+                                return
+                            yield day_dir, entry.name
                 except OSError:
                     continue
-                for name in names:
-                    yield day_dir, name
+                if budget.truncated:
+                    return
+            if budget.truncated:
+                return
+        if budget.truncated:
+            return
 
 
 def _rollout_candidates(sessions: Path, now: datetime, max_files: int):
@@ -403,13 +431,8 @@ def _rollout_candidates(sessions: Path, now: datetime, max_files: int):
     """
     cutoff = (now - _MAX_AGE).timestamp()
     found = []
-    examined = 0
-    truncated = False
-    for directory, name in _day_files(sessions):
-        if examined >= _MAX_ENTRIES:
-            truncated = True
-            break
-        examined += 1
+    budget = _Budget()
+    for directory, name in _day_files(sessions, budget):
         if not name.startswith("rollout-") or not name.endswith(".jsonl"):
             continue
         path = directory / name
@@ -422,7 +445,7 @@ def _rollout_candidates(sessions: Path, now: datetime, max_files: int):
             continue
         found.append((info.st_mtime, path))
     found.sort(key=lambda item: item[0], reverse=True)
-    return found[:max_files], truncated
+    return found[:max_files], budget.truncated
 
 
 def _stamp_value(value):
