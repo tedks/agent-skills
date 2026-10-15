@@ -1158,7 +1158,7 @@ def live_integration():
     with tempfile.TemporaryDirectory(prefix='harness-control-live-') as temporary:
         root = Path(temporary)
         socket = root / 'tmux.sock'
-        tmux = ['tmux', '-S', str(socket)]
+        tmux = ['tmux', '-S', str(socket), '-f', '/dev/null']
         repo = root / 'repo'
         repo.mkdir()
         def git(*args):
@@ -1175,11 +1175,16 @@ def live_integration():
         fixture = Path(__file__).with_name('fixtures') / 'harness-control-terminal.py'
         try:
             command = 'exec ' + shlex.join([sys.executable, str(fixture), str(root)])
-            pane = subprocess.check_output(tmux + ['new-session', '-d', '-P', '-F', '#{pane_id}', '-x', '90', '-y', '24', command], text=True).strip()
+            pane = subprocess.check_output(
+                tmux + ['new-session', '-d', '-P', '-F', '#{pane_id}', '-x', '90', '-y', '24', command],
+                text=True,
+                timeout=10,
+            ).strip()
             ready = root / 'terminal.json'
             deadline = time.monotonic() + 5
             while not ready.exists() and time.monotonic() < deadline:
                 time.sleep(.05)
+            assert ready.exists(), 'stand-in terminal did not become ready within 5 seconds'
             from harness_identity import discover
             identity = discover(json.loads(ready.read_text())['pid'])
             assert identity.pane == pane and identity.socket == str(socket)

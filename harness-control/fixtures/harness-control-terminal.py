@@ -97,7 +97,7 @@ try:
                     accepted.append(text)
                     draft = b''
                     if text == '/compact':
-                        compact_at = time.monotonic() + 1
+                        compact_at = time.monotonic() + 3
                     if not text.startswith('/'):
                         native_row('user', message={'content': text})
                         turn_at = time.monotonic() + 1

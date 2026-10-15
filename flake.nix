@@ -88,13 +88,13 @@
 
       checks.${system} = {
         harness-control-unit = pkgs.runCommand "harness-control-unit" {
-          nativeBuildInputs = [ runtimePython pkgs.tmux ];
+          nativeBuildInputs = [ runtimePython ];
         } ''
           export AGENT_SKILLS_ROOT=${runtimeSkillsSource}/skills
           export HARNESS_TEST_SLEEP=${lib.getExe' pkgs.coreutils "sleep"}
           export PYTHONDONTWRITEBYTECODE=1
           export PYTHONPATH=${./harness-control}
-          export PATH=${lib.makeBinPath (runtimeInputs ++ [ pkgs.tmux ])}
+          export PATH=${runtimePath}:${lib.getBin pkgs.tmux}/bin
           ${runtimePython}/bin/python3 ${./harness-control}/test_session_id.py
           ${runtimePython}/bin/python3 ${./harness-control}/test_harness_tools.py
           ${runtimePython}/bin/python3 ${./harness-control}/test_harness_lifecycle.py
