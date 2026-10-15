@@ -599,8 +599,8 @@ class AccountQuotaTests(unittest.TestCase):
         self.assertEqual(self.primary(result), 16)
 
     def test_old_day_directories_are_never_listed(self):
-        now = datetime(2026, 3, 20, 12, tzinfo=timezone.utc)  # cutoff 03-12, so 03-11 is the oldest listed
-        layout = {'2026/03/11': True, '2026/03/10': False, '2026/02/28': False, '2025/12/31': False}
+        now = datetime(2026, 3, 20, 12, tzinfo=timezone.utc)  # 31-day horizon: 02-17, so 02-16 is the oldest listed
+        layout = {'2026/02/16': True, '2026/02/15': False, '2026/01/31': False, '2025/12/31': False}
         for name in layout:
             directory = self.home / 'sessions' / name
             directory.mkdir(parents=True, exist_ok=True)
@@ -613,9 +613,57 @@ class AccountQuotaTests(unittest.TestCase):
             return original(path)
         with patch.object(os, 'scandir', spy):
             status.newest_account_quota(self.home, now=now)
-        layout.update({'2025': False, '2026/02': False, '2026/03': True})
+        layout.update({'2025': False, '2026/01': False, '2026/02': True})
         for name, expected in layout.items():
             self.assertEqual(str(self.home / 'sessions' / name) in listed, expected, name)
+
+    def test_long_lived_session_in_old_day_directory_is_found(self):
+        old_day = self.home / 'sessions/2025/12/21'  # 20 days before ACCOUNT_NOW
+        old_day.mkdir(parents=True)
+        self.add('rollout-long.jsonl', rollout_text([quota_event(at(10, 9), 19)]), directory=old_day, age_hours=1)
+        self.add('rollout-today.jsonl', rollout_text([quota_event(at(10, 1), 20)]), age_hours=2)
+        self.assertEqual(self.primary(self.newest()), 19)
+
+    def test_partial_bucket_coverage_continues_backwards_in_file(self):
+        filler = event('response_item', {'type': 'message', 'content': 'x' * 3000})
+        self.add('rollout-new.jsonl', rollout_text([
+            quota_event(at(10, 5), 21, bucket='B'), filler, filler, quota_event(at(10, 6), 22, bucket='A')]), age_hours=1)
+        self.add('rollout-old.jsonl', rollout_text([quota_event(at(9, 5), 99, bucket='B')]), age_hours=40)
+        result = self.newest(tail_bytes=1000, expected_buckets=['A', 'B'])
+        self.assertEqual((self.primary(result, 'A'), self.primary(result, 'B')), (22, 21))
+        self.assertFalse(result['incomplete'])
+        self.assertNotIn('missing_buckets', result)
+
+    def test_backward_search_reads_each_byte_once(self):
+        filler = event('response_item', {'type': 'message', 'content': 'x' * 3000})
+        content = rollout_text([quota_event(at(10, 1), 24)] + [filler] * 20)
+        self.add('rollout-a.jsonl', content)
+        counted = []
+        original = os.fdopen
+        class Counting:
+            def __init__(self, stream):
+                self.stream = stream
+            def __enter__(self):
+                return self
+            def __exit__(self, *exc):
+                self.stream.close()
+            def read(self, *args):
+                data = self.stream.read(*args)
+                counted.append(len(data))
+                return data
+            def __getattr__(self, name):
+                return getattr(self.stream, name)
+        with patch.object(os, 'fdopen', lambda *a, **k: Counting(original(*a, **k))):
+            result = self.newest(tail_bytes=1000)
+        self.assertEqual(self.primary(result), 24)
+        self.assertLessEqual(sum(counted), len(content.encode()) + 16)
+
+    def test_missing_expected_bucket_marks_incomplete(self):
+        self.add('rollout-a.jsonl', rollout_text([quota_event(at(10, 1), 23)]))
+        result = self.newest(expected_buckets=['codex', 'ghost'])
+        self.assertEqual((result.get('missing_buckets'), result.get('incomplete'), result.get('reason_incomplete')),
+                         (['ghost'], True, 'expected_buckets_missing'))
+        self.assertEqual(set(result['quota_buckets']), {'codex'})
 
     def test_header_over_64k_has_no_provider(self):
         big = event('session_meta', {'id': SID, 'source': 'cli', 'cwd': 'c' * 70000, 'model_provider': 'openai'})
@@ -813,13 +861,17 @@ def mutation_check():
         ('expected-buckets', 'expected <= best.keys()', 'True', 'AccountQuotaTests.test_expected_bucket_only_in_older_file'),
         ('backward-search', 'if window >= limit:', 'if True:', 'AccountQuotaTests.test_meterless_tail_searches_backwards'),
         ('search-cap', 'limit = max(tail_bytes, search_bytes)', 'limit = 10**12', 'AccountQuotaTests.test_meterless_window_is_incomplete_not_stale'),
-        ('incomplete-flag', 'return provider, newest, False', 'return provider, newest, True', 'AccountQuotaTests.test_meterless_window_is_incomplete_not_stale'),
-        ('incomplete-full-read', 'if newest or start == 0:', 'if newest:', 'AccountQuotaTests.test_meterless_window_is_incomplete_not_stale'),
+        ('incomplete-flag', 'return provider, newest, bool(newest)', 'return provider, newest, True', 'AccountQuotaTests.test_meterless_window_is_incomplete_not_stale'),
+        ('incomplete-full-read', 'if start == 0 or (newest and expected <= newest.keys()):', 'if newest and expected <= newest.keys():', 'AccountQuotaTests.test_meterless_window_is_incomplete_not_stale'),
         ('recursion-line', 'except (ValueError, RuntimeError):  # RecursionError on deeply nested input', 'except ValueError:', 'AccountQuotaTests.test_deeply_nested_line_is_skipped'),
         ('year-prune', 'if year < oldest.year:', 'if False:', 'AccountQuotaTests.test_old_day_directories_are_never_listed'),
         ('month-prune', 'if (year, month) < (oldest.year, oldest.month):', 'if False:', 'AccountQuotaTests.test_old_day_directories_are_never_listed'),
         ('day-prune', 'if when < oldest:', 'if False:', 'AccountQuotaTests.test_old_day_directories_are_never_listed'),
         ('header-cap', '_HEADER_BYTES = 64 * 1024', '_HEADER_BYTES = 640 * 1024', 'AccountQuotaTests.test_header_over_64k_has_no_provider'),
+        ('dir-horizon', '_DIR_HORIZON = timedelta(days=31)', '_DIR_HORIZON = timedelta(days=8)', 'AccountQuotaTests.test_long_lived_session_in_old_day_directory_is_found'),
+        ('bucket-coverage', 'if start == 0 or (newest and expected <= newest.keys()):', 'if start == 0 or newest:', 'AccountQuotaTests.test_partial_bucket_coverage_continues_backwards_in_file'),
+        ('missing-buckets', 'missing = sorted(expected - best.keys())', 'missing = []', 'AccountQuotaTests.test_missing_expected_bucket_marks_incomplete'),
+        ('read-new-chunk-only', 'raw = stream.read(hi - lo) + raw', 'raw = stream.read(size - lo)', 'AccountQuotaTests.test_backward_search_reads_each_byte_once'),
     ]
     source = MODULE.read_text()
     failed = []

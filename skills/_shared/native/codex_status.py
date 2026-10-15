@@ -354,6 +354,7 @@ def read_codex_status(pid: int, home: Path | None = None, *, proc: Path = Path("
 
 
 _MAX_AGE = timedelta(days=8)
+_DIR_HORIZON = timedelta(days=31)  # day directories older than this are never listed
 _SKEW_SECONDS = 120  # clock/mtime skew margin for the early-stop bound
 _HEADER_BYTES = 64 * 1024  # only model_provider is needed from the first line
 _SEARCH_BYTES = 8 * 1024 * 1024  # per-file backward-search cap
@@ -405,7 +406,9 @@ def _rollout_candidates(sessions: Path, now: datetime, max_files: int):
     """(mtime, path) of regular rollout-*.jsonl files modified in the last 8 days, newest first."""
     cutoff_time = now - _MAX_AGE
     cutoff = cutoff_time.timestamp()
-    oldest = cutoff_time.astimezone(timezone.utc).date() - timedelta(days=1)
+    # A session keeps appending to the file under its start day's directory, so
+    # directories are pruned only far beyond the 8-day mtime cutoff.
+    oldest = (now - _DIR_HORIZON).astimezone(timezone.utc).date() - timedelta(days=1)
     found = []
     for directory, name in _day_files(sessions, oldest):
         if not name.startswith("rollout-") or not name.endswith(".jsonl"):
@@ -451,12 +454,14 @@ def _scan_tail(data: bytes, max_line_bytes: int, newest: dict):
             newest[key] = (when, stamp, quota)
 
 
-def _file_quota(path: Path, tail_bytes: int, max_line_bytes: int, search_bytes: int = _SEARCH_BYTES):
+def _file_quota(path: Path, tail_bytes: int, max_line_bytes: int, search_bytes: int = _SEARCH_BYTES,
+                expected: frozenset = frozenset()):
     """(provider, {bucket: (when, stamp, quota)}, covered) from one rollout; None if unreadable.
 
-    Reads the last ``tail_bytes``; when they hold no valid meter the window doubles
-    backwards up to ``search_bytes``. ``covered`` is False when no meter was found
-    although earlier, unread bytes remain.
+    Reads the last ``tail_bytes``; when they hold no valid meter, or lack some
+    ``expected`` bucket, the window doubles backwards up to ``search_bytes`` (only
+    the newly exposed earlier bytes are read each round). ``covered`` is False
+    when no meter was found although earlier, unread bytes remain.
     """
     flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
     descriptor = os.open(path, flags)
@@ -477,20 +482,24 @@ def _file_quota(path: Path, tail_bytes: int, max_line_bytes: int, search_bytes: 
         size = info.st_size
         window = tail_bytes
         limit = max(tail_bytes, search_bytes)
+        raw, hi = b"", size  # raw holds bytes [lo, size)
         while True:
             start = max(0, size - window)
-            stream.seek(max(0, start - 1))
-            data = stream.read(size - max(0, start - 1))
+            lo = max(0, start - 1)
+            stream.seek(lo)
+            raw = stream.read(hi - lo) + raw
+            hi = lo
+            data = raw
             if start > 0:
                 # Drop a leading partial line unless the tail begins on a boundary.
                 data = data[1:] if data[:1] == b"\n" else data[data.find(b"\n") + 1:] if b"\n" in data else b""
             data = data[:data.rfind(b"\n") + 1]  # an unfinished trailing line is not a record
             newest = {}
             _scan_tail(data, max_line_bytes, newest)
-            if newest or start == 0:
+            if start == 0 or (newest and expected <= newest.keys()):
                 return provider, newest, True
             if window >= limit:
-                return provider, newest, False
+                return provider, newest, bool(newest)
             window = min(window * 2, limit)
 
 
@@ -508,15 +517,21 @@ def newest_account_quota(codex_home: Path, *, now: datetime | None = None, max_f
     account per CODEX_HOME (rollouts carry no account id) and follows a symlinked
     ``sessions`` root (same user, as ``read_codex_status`` does).
 
-    Only ``sessions/YYYY/MM/DD/rollout-*.jsonl`` is read (day directories older
-    than the cutoff are never listed; files elsewhere are ignored). Each file's
+    Only ``sessions/YYYY/MM/DD/rollout-*.jsonl`` is read. Files must have been
+    modified within 8 days, but a long-lived session keeps appending under its
+    start day's directory, so day directories are skipped only beyond 31 days
+    (a session started more than 31 days ago is missed); files elsewhere are
+    ignored. Each file's
     first line (at most 64 KiB) supplies model_provider only. Its last
     ``tail_bytes`` are parsed; if they hold no valid meter the window grows
     backwards up to ``search_bytes`` (default 8 MiB). A file whose window still
     holds no meter although earlier bytes remain makes the result
     ``"incomplete": true`` with ``reason_incomplete``
     ``"file_without_meter_in_window"``; an older file's meter must then not be
-    taken as complete. Partial/unfinished/malformed (including too deeply
+    taken as complete. When ``expected_buckets`` is given and a file's window
+    holds only some of them, the backward search in that file continues (same
+    cap); buckets still unfound after the whole scan are listed in
+    ``missing_buckets`` and mark the result incomplete. Partial/unfinished/malformed (including too deeply
     nested) lines are ignored.
 
     mtime only orders candidates and bounds the scan: a record cannot be newer
@@ -539,7 +554,7 @@ def newest_account_quota(codex_home: Path, *, now: datetime | None = None, max_f
            for value in (max_files, tail_bytes, max_line_bytes, search_bytes)):
         return unavailable("invalid_read_limits")
     try:
-        expected = set(expected_buckets) if expected_buckets is not None else set()
+        expected = frozenset(expected_buckets) if expected_buckets is not None else set()
         if not all(isinstance(name, str) for name in expected):
             return unavailable("invalid_expected_buckets")
     except TypeError:
@@ -561,7 +576,7 @@ def newest_account_quota(codex_home: Path, *, now: datetime | None = None, max_f
             stopped_early = True
             break
         try:
-            found = _file_quota(path, tail_bytes, max_line_bytes, search_bytes)
+            found = _file_quota(path, tail_bytes, max_line_bytes, search_bytes, expected)
         except (OSError, ValueError, UnicodeError, RuntimeError):
             continue
         if found is None:
@@ -581,6 +596,11 @@ def newest_account_quota(codex_home: Path, *, now: datetime | None = None, max_f
               "quota_buckets": buckets, "files_scanned": scanned,
               "stopped_early": stopped_early, "incomplete": incomplete,
               "evaluated_at": now.isoformat()}
+    missing = sorted(expected - best.keys())
+    if missing:
+        result.update(incomplete=True, missing_buckets=missing)
     if incomplete:
         result["reason_incomplete"] = "file_without_meter_in_window"
+    elif missing:
+        result["reason_incomplete"] = "expected_buckets_missing"
     return result

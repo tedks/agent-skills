@@ -333,24 +333,26 @@ def _observed(bucket):
 def _mark_superseded(session_buckets, account_latest):
     """Flag session buckets against account_latest.
 
-    True/False only when both observations are comparable; None (unknown) when
-    account_latest is not observed or a timestamp is unparseable.
+    True when account_latest holds a strictly newer observation of the bucket
+    (a real observation, valid even if the account result is incomplete). False
+    only when account_latest is observed and complete, holds the bucket and the
+    timestamps are comparable. Otherwise None (unknown): account_latest not
+    observed, incomplete, bucket absent, or unparseable timestamps.
     """
     if not isinstance(session_buckets, dict):
         return session_buckets
-    account = account_latest.get('quota_buckets') if isinstance(account_latest, dict) \
-        and account_latest.get('state') == 'observed' else None
+    observed = isinstance(account_latest, dict) and account_latest.get('state') == 'observed'
+    account = account_latest.get('quota_buckets') if observed else None
+    complete = observed and account_latest.get('incomplete') is not True
     marked = {}
     for key, bucket in session_buckets.items():
         if isinstance(bucket, dict):
             flag = None
             mine = _observed(bucket)
-            if isinstance(account, dict) and mine is not None:
-                if key not in account:
-                    flag = False
-                else:
-                    latest = _observed(account[key]) if isinstance(account[key], dict) else None
-                    flag = None if latest is None else latest > mine
+            theirs = account.get(key) if isinstance(account, dict) else None
+            latest = _observed(theirs) if isinstance(theirs, dict) else None
+            if mine is not None and latest is not None:
+                flag = True if latest > mine else (False if complete else None)
             bucket = {**bucket, 'superseded': flag}
         marked[key] = bucket
     return marked
@@ -367,8 +369,10 @@ async def get_usage() -> dict:
     session is idle) plus ``account_latest``, the newest account-wide meter seen
     in any recent rollout of this CODEX_HOME (no paths or session ids). A session
     bucket carries ``superseded``: true when account_latest holds a strictly
-    newer observation of the same limit_id, false when not, null (unknown) when
-    account_latest is not observed or timestamps are unparseable. account_latest
+    newer observation of the same limit_id; false only when account_latest is
+    observed, complete and holds that bucket without a newer record; null
+    (unknown) when it is not observed or is incomplete, lacks the bucket, or
+    timestamps are unparseable. account_latest
     is returned even when the session binding failed; it assumes one OpenAI
     account per CODEX_HOME, may be ``incomplete`` (see newest_account_quota), and
     covers only the session's buckets when the session has any (else only the
