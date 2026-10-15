@@ -354,7 +354,7 @@ def read_codex_status(pid: int, home: Path | None = None, *, proc: Path = Path("
 
 
 _MAX_AGE = timedelta(days=8)
-_DIR_HORIZON = timedelta(days=31)  # day directories older than this are never listed
+_MAX_ENTRIES = 100000  # hard cap on rollout entries examined per call
 _SKEW_SECONDS = 120  # clock/mtime skew margin for the early-stop bound
 _HEADER_BYTES = 64 * 1024  # only model_provider is needed from the first line
 _SEARCH_BYTES = 8 * 1024 * 1024  # per-file backward-search cap
@@ -374,25 +374,19 @@ def _numbered_dirs(parent: Path, width: int):
     return sorted(found, reverse=True)
 
 
-def _day_files(sessions: Path, oldest: date):
-    """(directory, name) of entries in sessions/YYYY/MM/DD dirs dated >= ``oldest``.
+def _day_files(sessions: Path):
+    """(directory, name) of entries in valid sessions/YYYY/MM/DD dirs, newest day first.
 
-    Walks only that layout, newest first; older day directories are never listed
-    and files outside the layout are ignored.
+    Walks only that layout (names are validated as real calendar dates); files
+    outside it are ignored. Directories are not pruned by date.
     """
     for year, year_dir in _numbered_dirs(sessions, 4):
-        if year < oldest.year:
-            break
         for month, month_dir in _numbered_dirs(year_dir, 2):
-            if (year, month) < (oldest.year, oldest.month):
-                break
             for day, day_dir in _numbered_dirs(month_dir, 2):
                 try:
-                    when = date(year, month, day)
+                    date(year, month, day)
                 except ValueError:
                     continue
-                if when < oldest:
-                    break
                 try:
                     with os.scandir(day_dir) as entries:
                         names = [entry.name for entry in entries]
@@ -403,14 +397,19 @@ def _day_files(sessions: Path, oldest: date):
 
 
 def _rollout_candidates(sessions: Path, now: datetime, max_files: int):
-    """(mtime, path) of regular rollout-*.jsonl files modified in the last 8 days, newest first."""
-    cutoff_time = now - _MAX_AGE
-    cutoff = cutoff_time.timestamp()
-    # A session keeps appending to the file under its start day's directory, so
-    # directories are pruned only far beyond the 8-day mtime cutoff.
-    oldest = (now - _DIR_HORIZON).astimezone(timezone.utc).date() - timedelta(days=1)
+    """((mtime, path) of regular rollout-*.jsonl modified in the last 8 days, newest first, truncated).
+
+    ``truncated`` is True when the _MAX_ENTRIES examination cap was hit.
+    """
+    cutoff = (now - _MAX_AGE).timestamp()
     found = []
-    for directory, name in _day_files(sessions, oldest):
+    examined = 0
+    truncated = False
+    for directory, name in _day_files(sessions):
+        if examined >= _MAX_ENTRIES:
+            truncated = True
+            break
+        examined += 1
         if not name.startswith("rollout-") or not name.endswith(".jsonl"):
             continue
         path = directory / name
@@ -423,7 +422,7 @@ def _rollout_candidates(sessions: Path, now: datetime, max_files: int):
             continue
         found.append((info.st_mtime, path))
     found.sort(key=lambda item: item[0], reverse=True)
-    return found[:max_files]
+    return found[:max_files], truncated
 
 
 def _stamp_value(value):
@@ -499,7 +498,7 @@ def _file_quota(path: Path, tail_bytes: int, max_line_bytes: int, search_bytes: 
             if start == 0 or (newest and expected <= newest.keys()):
                 return provider, newest, True
             if window >= limit:
-                return provider, newest, bool(newest)
+                return provider, newest, False  # expected buckets may lie in unread bytes
             window = min(window * 2, limit)
 
 
@@ -517,15 +516,17 @@ def newest_account_quota(codex_home: Path, *, now: datetime | None = None, max_f
     account per CODEX_HOME (rollouts carry no account id) and follows a symlinked
     ``sessions`` root (same user, as ``read_codex_status`` does).
 
-    Only ``sessions/YYYY/MM/DD/rollout-*.jsonl`` is read. Files must have been
-    modified within 8 days, but a long-lived session keeps appending under its
-    start day's directory, so day directories are skipped only beyond 31 days
-    (a session started more than 31 days ago is missed); files elsewhere are
-    ignored. Each file's
+    Only ``sessions/YYYY/MM/DD/rollout-*.jsonl`` (valid calendar-date names) is
+    read; files elsewhere are ignored. A long-lived session keeps appending
+    under its start day's directory, so directories are not pruned by date:
+    every rollout entry is lstat'd (newest day first) and filtered by the 8-day
+    mtime. At most ``_MAX_ENTRIES`` entries are examined; hitting that cap makes
+    the result incomplete with reason ``too_many_rollouts``. Each file's
     first line (at most 64 KiB) supplies model_provider only. Its last
     ``tail_bytes`` are parsed; if they hold no valid meter the window grows
     backwards up to ``search_bytes`` (default 8 MiB). A file whose window still
-    holds no meter although earlier bytes remain makes the result
+    lacks the meter (or, with ``expected_buckets``, any expected bucket) although
+    earlier bytes remain makes the result
     ``"incomplete": true`` with ``reason_incomplete``
     ``"file_without_meter_in_window"``; an older file's meter must then not be
     taken as complete. When ``expected_buckets`` is given and a file's window
@@ -563,7 +564,7 @@ def newest_account_quota(codex_home: Path, *, now: datetime | None = None, max_f
         sessions = (Path(codex_home) / "sessions").resolve()
         if not sessions.is_dir():
             return unavailable("sessions_unreadable")
-        paths = _rollout_candidates(sessions, now, max_files)
+        paths, truncated = _rollout_candidates(sessions, now, max_files)
     except (OSError, ValueError, UnicodeError, RuntimeError):
         return unavailable("sessions_unreadable")
     best = {}
@@ -588,18 +589,21 @@ def newest_account_quota(codex_home: Path, *, now: datetime | None = None, max_f
             if key not in best or when > best[key][0]:
                 best[key] = (when, stamp, quota, provider)
     if not best:
-        return unavailable("file_without_meter_in_window" if incomplete else "no_recent_rate_limits")
+        return unavailable("too_many_rollouts" if truncated else "file_without_meter_in_window"
+                           if incomplete else "no_recent_rate_limits")
     buckets = {}
     for key, (_, stamp, quota, provider) in best.items():
         buckets[key] = _quota_bucket(quota, stamp, provider, now)[1]
     result = {"state": "observed", "source": "codex_rollouts_newest", "scope": "account",
               "quota_buckets": buckets, "files_scanned": scanned,
-              "stopped_early": stopped_early, "incomplete": incomplete,
+              "stopped_early": stopped_early, "incomplete": incomplete or truncated,
               "evaluated_at": now.isoformat()}
     missing = sorted(expected - best.keys())
     if missing:
         result.update(incomplete=True, missing_buckets=missing)
-    if incomplete:
+    if truncated:
+        result["reason_incomplete"] = "too_many_rollouts"
+    elif incomplete:
         result["reason_incomplete"] = "file_without_meter_in_window"
     elif missing:
         result["reason_incomplete"] = "expected_buckets_missing"

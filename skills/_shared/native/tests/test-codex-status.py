@@ -502,7 +502,7 @@ class AccountQuotaTests(unittest.TestCase):
         with self.assertRaises(OSError):
             status._file_quota(link, 1024, 1024)
         self.assertEqual(status._rollout_candidates((self.home / 'sessions').resolve(), ACCOUNT_NOW, 10),
-                         [(target.stat().st_mtime, target.resolve())])
+                         ([(target.stat().st_mtime, target.resolve())], False))
 
     def test_resolved_path_must_stay_under_sessions(self):
         outside = Path(self.tmp.name) / 'outside'
@@ -598,31 +598,48 @@ class AccountQuotaTests(unittest.TestCase):
         self.assertEqual(result.get('state'), 'observed')
         self.assertEqual(self.primary(result), 16)
 
-    def test_old_day_directories_are_never_listed(self):
-        now = datetime(2026, 3, 20, 12, tzinfo=timezone.utc)  # 31-day horizon: 02-17, so 02-16 is the oldest listed
-        layout = {'2026/02/16': True, '2026/02/15': False, '2026/01/31': False, '2025/12/31': False}
-        for name in layout:
-            directory = self.home / 'sessions' / name
-            directory.mkdir(parents=True, exist_ok=True)
-            self.add('rollout-a.jsonl', rollout_text([quota_event('2026-03-19T00:00:00Z', 17)]), directory=directory)
-        self.add('rollout-flat.jsonl', rollout_text([]), directory=self.home / 'sessions')
+    def test_only_valid_day_directories_are_listed(self):
+        for name, valid in {'2026/01/09': True, '2026/13/01': False, '2026/02/30': False, '2026/1/05': False,
+                            '20x6/01/01': False}.items():
+            (self.home / 'sessions' / name).mkdir(parents=True)
         listed = []
         original = os.scandir
         def spy(path):
             listed.append(str(path))
             return original(path)
         with patch.object(os, 'scandir', spy):
-            status.newest_account_quota(self.home, now=now)
-        layout.update({'2025': False, '2026/01': False, '2026/02': True})
-        for name, expected in layout.items():
+            self.newest()
+        for name, expected in {'2026/01/09': True, '2026/13/01': False, '2026/02/30': False,
+                               '2026/1/05': False, '20x6/01/01': False}.items():
             self.assertEqual(str(self.home / 'sessions' / name) in listed, expected, name)
 
+    def test_entry_cap_marks_incomplete(self):
+        for number in range(5):
+            self.add(f'rollout-{number}.jsonl', rollout_text([quota_event(at(10, number), number)]))
+        full = self.newest()
+        self.assertFalse(full['incomplete'])
+        with patch.object(status, '_MAX_ENTRIES', 3):
+            result = self.newest()
+        self.assertEqual((result.get('incomplete'), result.get('reason_incomplete')), (True, 'too_many_rollouts'))
+        with patch.object(status, '_MAX_ENTRIES', 0):
+            self.assertEqual(self.newest().get('reason'), 'too_many_rollouts')
+
     def test_long_lived_session_in_old_day_directory_is_found(self):
-        old_day = self.home / 'sessions/2025/12/21'  # 20 days before ACCOUNT_NOW
+        old_day = self.home / 'sessions/2025/11/11'  # 60 days before ACCOUNT_NOW
         old_day.mkdir(parents=True)
         self.add('rollout-long.jsonl', rollout_text([quota_event(at(10, 9), 19)]), directory=old_day, age_hours=1)
         self.add('rollout-today.jsonl', rollout_text([quota_event(at(10, 1), 20)]), age_hours=2)
         self.assertEqual(self.primary(self.newest()), 19)
+
+    def test_expected_bucket_beyond_search_cap_is_uncertain(self):
+        filler = event('response_item', {'type': 'message', 'content': 'x' * 3000})
+        self.add('rollout-new.jsonl', rollout_text([
+            quota_event(at(10, 5), 21, bucket='B'), filler, filler, filler, quota_event(at(10, 6), 22, bucket='A')]), age_hours=1)
+        self.add('rollout-old.jsonl', rollout_text([quota_event(at(9, 5), 99, bucket='B')]), age_hours=40)
+        result = self.newest(tail_bytes=1000, search_bytes=4000, expected_buckets=['A', 'B'])
+        self.assertEqual((self.primary(result, 'A'), self.primary(result, 'B')), (22, 99))
+        self.assertEqual((result.get('incomplete'), result.get('reason_incomplete')),
+                         (True, 'file_without_meter_in_window'))
 
     def test_partial_bucket_coverage_continues_backwards_in_file(self):
         filler = event('response_item', {'type': 'message', 'content': 'x' * 3000})
@@ -834,8 +851,8 @@ def mutation_check():
         ('newest-in-file', 'if key not in newest or when >= newest[key][0]:',
          'if True:', 'AccountQuotaTests.test_within_file_newest_record_and_per_bucket'),
         ('age-cutoff', 'or info.st_mtime < cutoff:', 'or False:', 'AccountQuotaTests.test_age_cutoff_boundary'),
-        ('age-cutoff-boundary', 'cutoff_time = now - _MAX_AGE',
-         'cutoff_time = now - _MAX_AGE * 2', 'AccountQuotaTests.test_age_cutoff_boundary'),
+        ('age-cutoff-boundary', 'cutoff = (now - _MAX_AGE).timestamp()',
+         'cutoff = (now - _MAX_AGE * 2).timestamp()', 'AccountQuotaTests.test_age_cutoff_boundary'),
         ('symlink-rejection', 'if not stat.S_ISREG(info.st_mode) or info.st_mtime < cutoff:',
          'if info.st_mtime < cutoff:', 'AccountQuotaTests.test_symlink_not_opened'),
         ('no-follow', 'getattr(os, "O_NOFOLLOW", 0) | ', '', 'AccountQuotaTests.test_symlink_not_opened'),
@@ -861,17 +878,16 @@ def mutation_check():
         ('expected-buckets', 'expected <= best.keys()', 'True', 'AccountQuotaTests.test_expected_bucket_only_in_older_file'),
         ('backward-search', 'if window >= limit:', 'if True:', 'AccountQuotaTests.test_meterless_tail_searches_backwards'),
         ('search-cap', 'limit = max(tail_bytes, search_bytes)', 'limit = 10**12', 'AccountQuotaTests.test_meterless_window_is_incomplete_not_stale'),
-        ('incomplete-flag', 'return provider, newest, bool(newest)', 'return provider, newest, True', 'AccountQuotaTests.test_meterless_window_is_incomplete_not_stale'),
+        ('incomplete-flag', 'return provider, newest, False  # expected buckets may lie in unread bytes', 'return provider, newest, True', 'AccountQuotaTests.test_meterless_window_is_incomplete_not_stale'),
         ('incomplete-full-read', 'if start == 0 or (newest and expected <= newest.keys()):', 'if newest and expected <= newest.keys():', 'AccountQuotaTests.test_meterless_window_is_incomplete_not_stale'),
         ('recursion-line', 'except (ValueError, RuntimeError):  # RecursionError on deeply nested input', 'except ValueError:', 'AccountQuotaTests.test_deeply_nested_line_is_skipped'),
-        ('year-prune', 'if year < oldest.year:', 'if False:', 'AccountQuotaTests.test_old_day_directories_are_never_listed'),
-        ('month-prune', 'if (year, month) < (oldest.year, oldest.month):', 'if False:', 'AccountQuotaTests.test_old_day_directories_are_never_listed'),
-        ('day-prune', 'if when < oldest:', 'if False:', 'AccountQuotaTests.test_old_day_directories_are_never_listed'),
         ('header-cap', '_HEADER_BYTES = 64 * 1024', '_HEADER_BYTES = 640 * 1024', 'AccountQuotaTests.test_header_over_64k_has_no_provider'),
-        ('dir-horizon', '_DIR_HORIZON = timedelta(days=31)', '_DIR_HORIZON = timedelta(days=8)', 'AccountQuotaTests.test_long_lived_session_in_old_day_directory_is_found'),
         ('bucket-coverage', 'if start == 0 or (newest and expected <= newest.keys()):', 'if start == 0 or newest:', 'AccountQuotaTests.test_partial_bucket_coverage_continues_backwards_in_file'),
         ('missing-buckets', 'missing = sorted(expected - best.keys())', 'missing = []', 'AccountQuotaTests.test_missing_expected_bucket_marks_incomplete'),
         ('read-new-chunk-only', 'raw = stream.read(hi - lo) + raw', 'raw = stream.read(size - lo)', 'AccountQuotaTests.test_backward_search_reads_each_byte_once'),
+        ('entry-cap', 'if examined >= _MAX_ENTRIES:', 'if False:', 'AccountQuotaTests.test_entry_cap_marks_incomplete'),
+        ('day-validation', 'date(year, month, day)\n                except ValueError:\n                    continue', 'date(year, 1, 1)\n                except ValueError:\n                    continue', 'AccountQuotaTests.test_only_valid_day_directories_are_listed'),
+        ('cap-uncertain', 'return provider, newest, False  # expected buckets may lie in unread bytes', 'return provider, newest, bool(newest)', 'AccountQuotaTests.test_expected_bucket_beyond_search_cap_is_uncertain'),
     ]
     source = MODULE.read_text()
     failed = []
