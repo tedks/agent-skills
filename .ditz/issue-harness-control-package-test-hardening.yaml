@@ -28,3 +28,12 @@ log_events:
   who: Ted Smith
   what: created
   comment: ""
+- time: 2026-10-15T01:26:40-00:00
+  who: Ted Smith
+  what: commented
+  comment: 'Council convergence round 3 assigned two additional non-blocking test-depth
+    items here: (1) cover the detached observer through the executable wrapper/server''s
+    own sys.executable rather than invoking the installed library file directly; (2)
+    retain an explicit hostile-PATH package probe. Item (2) was cheap and was fixed
+    immediately in PR #2; keep the observer end-to-end coverage with the existing
+    send-smoke and stronger negative-control work.'
