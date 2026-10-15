@@ -132,9 +132,9 @@
           for attempt in {1..50}; do
             output=$(AGENT_SKILLS_ROOT=${runtimeSkillsSource}/skills \
               SPAWN_TMUX_SOCKET="$socket" \
-              ${runtimeSkillsSource}/skills/spawn-agent/scripts/tmux-message.sh read "$pane")
+              ${runtimeSkillsSource}/skills/spawn-agent/scripts/tmux-message.sh read "$pane" || true)
             [[ "$output" == *transport-ready* ]] && break
-            ${lib.getExe' pkgs.coreutils "sleep"} 0.02
+            ${lib.getExe' pkgs.coreutils "sleep"} 0.1
           done
           [[ "$output" == *transport-ready* ]]
           ${lib.getExe pkgs.tmux} -S "$socket" kill-server

@@ -90,9 +90,19 @@ class RuntimeTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             project = Path(directory)
             index = project / "sessions-index.json"
-            for content in ("not json", "[]", '{"sessions": {}}'):
+            for content in (
+                "not json",
+                "[]",
+                '{"sessions": {}}',
+                '{"sessions": [null, "bad", 1]}',
+            ):
                 index.write_text(content)
                 self.assertEqual([], server._read_sessions_index(project))
+
+            index.write_text('{"sessions": [{"sessionId": "valid"}, null]}')
+            self.assertEqual(
+                [{"sessionId": "valid"}], server._read_sessions_index(project)
+            )
 
 
 if __name__ == "__main__":

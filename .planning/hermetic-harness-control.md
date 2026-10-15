@@ -16,6 +16,7 @@ The active deployment scope is the three x86_64 Linux workstations that have Nix
 - [x] (2026-10-15 01:24Z) Proved the packaged MCP handshake under hostile Python variables and PATH, with no mutable checkout reference or test-only scientific packages in its runtime closure.
 - [x] (2026-10-15 01:50Z) Addressed council round 1 findings with isolated Python launch, packaged Git, isolated observer re-entry, commit-addressed installation, and session-id path validation; convergence review remains.
 - [x] (2026-10-15 02:35Z) Addressed convergence round 2 findings by scrubbing every ambient `PYTHON*` variable plus `NIX_PYTHONPATH`, preserving source and installed observer entry through its exact file, and expanding malformed-state and package isolation tests; the next fix-delta round remains.
+- [x] (2026-10-15 03:00Z) Convergence round 3 found no Critical issues; filtered malformed session-index entries, normalized their sort key, restored the hostile-PATH package proof, and made the private-tmux readiness poll tolerate transient reads. A final narrow fix-delta round remains.
 - [ ] Land the agent-skills PR, then pin that merged commit in dotfiles.
 - [ ] Add the dedicated-profile installer and change Claude/Codex registration to the stable packaged command.
 - [ ] Remove the superseded dotfiles runtime copy, update docs/tests, and prove install, upgrade, refusal, and rollback behavior.

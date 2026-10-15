@@ -246,7 +246,7 @@ def _read_sessions_index(project_dir: Path) -> list[dict]:
         return []
     if not isinstance(data, dict) or not isinstance(data.get("sessions"), list):
         return []
-    return data["sessions"]
+    return [session for session in data["sessions"] if isinstance(session, dict)]
 
 
 # Self tools intentionally ignore the legacy CLAUDE_SESSION_ID testing override:
@@ -549,7 +549,10 @@ async def list_sessions(limit: int = 10) -> list[dict]:
     sessions = _read_sessions_index(project_dir)
 
     # Sort by modified date descending
-    sessions.sort(key=lambda s: s.get("modified", ""), reverse=True)
+    sessions.sort(
+        key=lambda s: s.get("modified") if isinstance(s.get("modified"), str) else "",
+        reverse=True,
+    )
 
     results = []
     for s in sessions[:limit]:
@@ -595,7 +598,8 @@ async def branch_session(
     # Determine working directory
     if not working_dir:
         state = _read_session_state(sid)
-        working_dir = state.get("launch_dir", os.getcwd())
+        launch_dir = state.get("launch_dir")
+        working_dir = launch_dir if isinstance(launch_dir, str) and launch_dir else os.getcwd()
 
     # Determine tmux target
     if not tmux_target:
@@ -674,22 +678,24 @@ async def get_launch_dir(session_id: str | None = None) -> dict:
         return {"error": f"Invalid session ID format: {sid}"}
 
     state = _read_session_state(sid)
-    if state.get("launch_dir"):
+    launch_dir = state.get("launch_dir")
+    if isinstance(launch_dir, str) and launch_dir:
         return {
             "session_id": sid,
-            "launch_dir": state["launch_dir"],
+            "launch_dir": launch_dir,
             "cwd": os.getcwd(),
-            "changed": state["launch_dir"] != os.getcwd(),
+            "changed": launch_dir != os.getcwd(),
         }
 
     # Fall back to sessions-index
     project_dir = _find_project_dir()
     if project_dir:
         for s in _read_sessions_index(project_dir):
-            if s.get("sessionId") == sid:
+            project_path = s.get("projectPath")
+            if s.get("sessionId") == sid and isinstance(project_path, str) and project_path:
                 return {
                     "session_id": sid,
-                    "launch_dir": s.get("projectPath"),
+                    "launch_dir": project_path,
                     "cwd": os.getcwd(),
                     "source": "sessions-index",
                 }

@@ -47,6 +47,7 @@ async def probe(command: str) -> None:
         )
         env = {
             "HOME": str(home),
+            "PATH": "/ambient-path-must-not-be-required",
             "PYTHONHOME": str(hostile),
             "PYTHONPATH": str(hostile),
             "PYTHONPLATLIBDIR": "lib64",
