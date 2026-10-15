@@ -50,6 +50,25 @@ Current-tree cleanup does not remove former setup-specific values from
 historical commits. The repository is initially private so its installation
 and historical disclosure can be reviewed before a deliberate public release.
 
+## harness-control Nix package
+
+The `harness-control` MCP server is available as the default Nix package for
+`x86_64-linux`. The package pins Python and the MCP library and captures the
+canonical identity readers, configuration loader, and tmux transport from the
+same source revision. It intentionally uses the host's configured tmux client
+to communicate with the already-running tmux server.
+
+Build and test it with:
+
+```sh
+nix flake check
+nix build .#harness-control
+```
+
+Production installers should install the package into a dedicated Nix profile
+and register its stable profile link with the MCP client. Starting the service
+does not evaluate the flake or resolve Python dependencies.
+
 ## License
 
 Agent skills is free software licensed under the

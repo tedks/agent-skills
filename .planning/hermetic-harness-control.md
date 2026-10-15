@@ -6,36 +6,42 @@ This ExecPlan is a living document. The sections `Progress`, `Surprises & Discov
 
 After this change, every active Linux workstation can run the `harness-control` MCP server from a dedicated Nix profile without installing `uv`, resolving Python dependencies at agent startup, or importing executable code from a mutable checkout. The operator can run `~/.local/bin/harness-control`; Claude and Codex use that same stable path; Nix supplies a pinned Python and MCP dependency through its content-addressed store and can roll the profile back independently of Home Manager.
 
-The active deployment scope is framework0, tower0, and splinter1. Each is x86_64 Linux with Nix. Drynwyn and splinter0 are outside this runtime rollout.
+The active deployment scope is the three x86_64 Linux workstations that have Nix. Legacy and offline hosts are outside this runtime rollout.
 
 ## Progress
 
 - [x] (2026-10-15 01:00Z) Confirmed the active hosts have Nix and selected a dedicated profile instead of Home Manager, the general user profile, PEX, or `nix run` at every startup.
 - [x] (2026-10-15 01:00Z) Created isolated `feat/hermetic-harness-control` worktrees in agent-skills and dotfiles and started the cross-repository tracker issue.
-- [ ] Add the canonical harness-control runtime, offline tests, and locked Nix package to agent-skills.
-- [ ] Prove the package starts without `uv`, ambient Python modules, a mutable checkout, or network access.
+- [x] (2026-10-15 01:24Z) Added the canonical runtime, protocol smoke test, mutation-tested behavior suites, and a locked `nixos-25.11` Nix package.
+- [x] (2026-10-15 01:24Z) Proved the packaged MCP handshake under hostile Python variables and PATH, with no mutable checkout reference or test-only scientific packages in its runtime closure.
 - [ ] Land the agent-skills PR, then pin that merged commit in dotfiles.
 - [ ] Add the dedicated-profile installer and change Claude/Codex registration to the stable packaged command.
 - [ ] Remove the superseded dotfiles runtime copy, update docs/tests, and prove install, upgrade, refusal, and rollback behavior.
-- [ ] Reach council-review fixpoint, merge both PRs normally, and deploy the exact merged revisions to framework0, tower0, and splinter1.
+- [ ] Reach council-review fixpoint, merge both PRs normally, and deploy the exact merged revisions to the three active workstations.
 
 ## Surprises & Discoveries
 
-- Observation: framework0 and tower0 expose system Python 3.12, while splinter1 exposes Python 3.14.
+- Observation: two active hosts expose system Python 3.12, while the third exposes Python 3.14.
   Evidence: the 2026-10-15 fleet probe printed `/usr/bin/python3` versions 3.12.3, 3.12.3, and 3.14.4 respectively. An ambient interpreter cannot provide one hermetic dependency closure across the fleet.
 
 - Observation: the server currently spans two mutable repositories.
   Evidence: dotfiles contains `mcp/claude-introspect/server.py` and its lifecycle modules, while `_skills_native.py` loads identity readers and `tmux-message.sh` from the installed agent-skills checkout. A package must pin both halves together.
 
+- Observation: nixpkgs' MCP package enables its complete upstream test suite for every consumer, and its test-only dependency graph reaches SciPy through `inline-snapshot`, `isort`, `pylama`, `vulture`, `pint`, and `uncertainties`.
+  Evidence: `nix why-depends --derivation` showed that exact chain after the first `nix flake check` began compiling SciPy. The MCP expression lists the first link under `nativeCheckInputs`; SciPy is not a runtime dependency.
+
+- Observation: the inherited real-`/proc` parsing test assumed `/bin/sleep`, which does not exist in a pure Nix build sandbox.
+  Evidence: the first stable-branch check failed at `subprocess.Popen` before the child started. The test now accepts a test-only sleep path, and the flake supplies coreutils' immutable executable.
+
 ## Decision Log
 
 - Decision: Use a normal Nix package, installed once, rather than PEX/scie or `nix bundle`.
   Rationale: Ted prefers Nix and does not want another embedded CPython copy. Nix keeps the interpreter as a shared store closure and deduplicates exact paths across packages.
-  Date/Author: 2026-10-15, Ted and Codex.
+  Date/Author: 2026-10-15, operator and Codex.
 
 - Decision: Install into `~/.local/state/nix/profiles/harness-control` and expose `~/.local/bin/harness-control`.
-  Rationale: A dedicated profile has atomic generations and rollback without coupling the service to tower0's stale Home Manager checkout or unrelated user packages. The stable link gives MCP clients one registration path.
-  Date/Author: 2026-10-15, Ted and Codex.
+  Rationale: A dedicated profile has atomic generations and rollback without coupling the service to a stale Home Manager checkout or unrelated user packages. The stable link gives MCP clients one registration path.
+  Date/Author: 2026-10-15, operator and Codex.
 
 - Decision: agent-skills owns the runtime and Nix package; dotfiles owns checkout resolution, profile installation, and client registration.
   Rationale: agent-skills already owns the canonical identity readers, shared configuration loader, and messaging transport used by the service. Dotfiles already owns machine installation and Claude/Codex configuration.
@@ -45,9 +51,13 @@ The active deployment scope is framework0, tower0, and splinter1. Each is x86_64
   Rationale: tmux clients must speak the running server's protocol. The package pins its Python code and command wrappers, while the configured tmux command deliberately addresses the host server.
   Date/Author: 2026-10-15, Codex.
 
+- Decision: Pin the package to the cached `nixos-25.11` nixpkgs branch rather than a four-day-old unstable revision or a local MCP override.
+  Rationale: the stable branch provides MCP 1.15, satisfying the declared API range, entirely from the binary cache with a 26.4 MiB unpacked dependency set on the development host. The unstable revision required local builds whose test-only dependency graphs reached SciPy. Consuming the cached upstream MCP output avoids both those build inputs and the maintenance risk of overriding dependency checks.
+  Date/Author: 2026-10-15, Codex.
+
 ## Outcomes & Retrospective
 
-Implementation is in progress. No runtime or fleet installation has changed yet.
+The agent-skills package implementation is complete and its local gates pass. Its current closure is about 212 MiB on a clean host, dominated by a shared Nix Python/MCP runtime; the package itself does not embed a private interpreter archive. Cold MCP initialization and tool listing completed in 0.329 seconds on the development host. No runtime or fleet installation has changed yet.
 
 ## Context and Orientation
 
@@ -71,7 +81,7 @@ Change `scripts/install/install-claude-introspect` and the Codex registration in
 
 ## Concrete Steps
 
-In `/home/tedks/Projects/agent-skills/hermetic-harness-control`, add the runtime and flake, add all new paths to Git so flake source filtering includes them, then run:
+In the agent-skills feature worktree, add the runtime and flake, add all new paths to Git so flake source filtering includes them, then run:
 
     nix flake check
     nix build .#harness-control
@@ -81,7 +91,7 @@ The bare executable blocks waiting for MCP input; the automated smoke test will 
 
 Run the Python and shell tests named by the package README and this plan. Run mutation checks where the migrated tests provide them. Commit, push, create a draft PR early, run council review to fixpoint, and merge normally after exact-head local gates pass.
 
-In `/home/tedks/Projects/dotfiles/hermetic-harness-control`, update the pin only after the first PR merges. Implement and test the installer and registration changes, then repeat the draft PR, exact-head gates, council fixpoint, and normal merge workflow.
+In the dotfiles feature worktree, update the pin only after the first PR merges. Implement and test the installer and registration changes, then repeat the draft PR, exact-head gates, council fixpoint, and normal merge workflow.
 
 Finally, on each active host, fast-forward clean dotfiles and agent-skills master worktrees, run the narrow harness-control and Claude/Codex installers, restart no live harness automatically, and verify both clients report the stable executable registration. Existing sessions load the new registration only after their next normal restart.
 
@@ -89,7 +99,7 @@ Finally, on each active host, fast-forward clean dotfiles and agent-skills maste
 
 The agent-skills change is accepted when `nix flake check` and the runtime test suites pass, the built executable completes a real MCP initialize/list-tools exchange, and that exchange still passes with `uv` absent and a hostile `PYTHONPATH`. `nix-store --query --references` or `nix path-info -r` must show the pinned Python/MCP closure, and the wrapper must not reference the mutable checkout path.
 
-The dotfiles change is accepted when isolated installer tests prove first install, no-op reinstall, failed-upgrade preservation, custom-registration refusal, legacy `uv run --script` migration, and stable-path registration. The live fleet is accepted when framework0, tower0, and splinter1 have the same agent-skills Git commit, the dedicated profile resolves to the expected package output, `~/.local/bin/harness-control` is executable, and Claude/Codex list the same stable command without `uv` arguments.
+The dotfiles change is accepted when isolated installer tests prove first install, no-op reinstall, failed-upgrade preservation, custom-registration refusal, legacy `uv run --script` migration, and stable-path registration. The live fleet is accepted when all three active workstations have the same agent-skills Git commit, the dedicated profile resolves to the expected package output, `~/.local/bin/harness-control` is executable, and Claude/Codex list the same stable command without `uv` arguments.
 
 The final runtime should start without network access. Startup duration is measured from process creation through MCP initialization on a cold process and a second warm process; unexpected delay must be diagnosed before rollout rather than hidden by increasing client timeouts.
 
@@ -101,7 +111,7 @@ Worktree cleanup happens only after both PRs merge and fleet verification succee
 
 ## Artifacts and Notes
 
-The cross-repository tracker is `harness-codex-installer-followups` in dotfiles. The original public agent-skills repository is `git@github.com:tedks/agent-skills.git`; dotfiles selects its production checkout through `.agent-skills.ref`.
+The cross-repository tracker is `harness-codex-installer-followups` in dotfiles. Dotfiles selects the production agent-skills checkout through `.agent-skills.ref`.
 
 ## Interfaces and Dependencies
 
@@ -109,4 +119,4 @@ The agent-skills flake must expose `packages.x86_64-linux.harness-control`, `pac
 
 Dotfiles `scripts/install/install-harness-control` must accept no destructive default. It operates on the fixed dedicated profile, resolves agent-skills through the existing validated reference, and prints a distinct installed, unchanged, skipped, or failed result. Claude and Codex registration must have command `~/.local/bin/harness-control` expanded to an absolute path and an empty argument list.
 
-Revision note, 2026-10-15: initial plan written after the implementation ruling and fleet/Nix preflight.
+Revision note, 2026-10-15: initial plan written after the implementation ruling and fleet/Nix preflight. Updated after the first build exposed uncached unstable dependency tests; the lock now follows the cached stable branch.
