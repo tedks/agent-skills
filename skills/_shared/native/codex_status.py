@@ -2,12 +2,15 @@
 
 Rollouts are an unstable local format (observed with codex-cli 0.157.1), not
 an API. The caller must associate the file with its live harness first; this
-module never searches sessions or guesses from modification time. Timestamps
+module never infers session identity from modification time or search. The one
+exception is ``newest_account_quota``, which searches rollouts only for the
+account-scoped meter (it returns no identity, paths or content, and modification
+time merely bounds and orders the candidate files). Timestamps
 describe observations, not freshness guarantees. Token accounting cannot prove
 current context remaining, especially across compaction or an active turn.
 """
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import json
 import math
 import os
@@ -38,6 +41,35 @@ def _timestamp(value):
         return value if parsed.tzinfo is not None else None
     except ValueError:
         return None
+
+
+_PLAN = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,31}")
+
+
+def _plan_type(value):
+    return value if isinstance(value, str) and _PLAN.fullmatch(value) else None
+
+
+def _credits(value):
+    """Booleans only. The credit balance is private and is never projected."""
+    value = value if isinstance(value, dict) else {}
+    return {key: value.get(key) if type(value.get(key)) is bool else None
+            for key in ("has_credits", "unlimited")}
+
+
+def _quota_bucket(quota, stamp, provider, now):
+    """Project one raw rate_limits dict to (bucket key, public bucket)."""
+    bucket = _text(quota.get("limit_id"))
+    evaluated_at = now.timestamp()
+    # A legacy snapshot without a bucket ID has explicitly unknown scope.
+    return bucket or "unknown", {
+        "limit_id": bucket, "limit_name": _text(quota.get("limit_name")),
+        "plan_type": _plan_type(quota.get("plan_type")),
+        "credits": _credits(quota.get("credits")),
+        "scope": "account", "provider": provider,
+        "observed_at": stamp, "evaluated_at": now.isoformat(),
+        "primary": _window(quota.get("primary"), stamp, evaluated_at),
+        "secondary": _window(quota.get("secondary"), stamp, evaluated_at)}
 
 
 def _tokens(value):
@@ -152,14 +184,8 @@ def parse_rollout(lines: Iterable[str | None], expected_session_id: str | None =
                     "context_window": _integer(info.get("model_context_window"))}
             quota = payload.get("rate_limits")
             if isinstance(quota, dict):
-                bucket = _text(quota.get("limit_id"))
-                # A legacy snapshot without a bucket ID has explicitly unknown scope.
-                result["quota_buckets"][bucket or "unknown"] = {
-                    "limit_id": bucket, "limit_name": _text(quota.get("limit_name")),
-                    "scope": "account", "provider": result["model_provider"],
-                    "observed_at": stamp, "evaluated_at": now.isoformat(),
-                    "primary": _window(quota.get("primary"), stamp, evaluated_at),
-                    "secondary": _window(quota.get("secondary"), stamp, evaluated_at)}
+                key, projected = _quota_bucket(quota, stamp, result["model_provider"], now)
+                result["quota_buckets"][key] = projected
         elif kind == "compacted":
             result["compaction"]["event_count"] += 1
             result["compaction"]["last_timestamp"] = stamp
@@ -168,6 +194,35 @@ def parse_rollout(lines: Iterable[str | None], expected_session_id: str | None =
     if result["session_id"] is None:
         return failure("missing_session_meta")
     return result
+
+
+def _codex_home_candidate(pid, home, proc):
+    """CODEX_HOME from the pinned process, else its HOME/.codex, else home/.codex.
+
+    May return a relative path; raises OSError/RuntimeError on unreadable input.
+    """
+    environment = dict(item.split(b"=", 1) for item in
+                       (proc / str(pid) / "environ").read_bytes().split(b"\0") if b"=" in item)
+    configured = environment.get(b"CODEX_HOME")
+    if configured:
+        return Path(configured.decode("utf-8", "surrogateescape"))
+    pinned_home = environment.get(b"HOME")
+    if pinned_home:
+        home = Path(pinned_home.decode("utf-8", "surrogateescape"))
+    else:
+        home = Path.home() if home is None else home
+    return home / ".codex"
+
+
+def codex_home_for(pid: int, home: Path | None = None, *, proc: Path = Path("/proc")) -> Path | None:
+    """Absolute CODEX_HOME of the pinned process, or None when not determinable."""
+    if type(pid) is not int or pid <= 0:
+        return None
+    try:
+        codex_home = _codex_home_candidate(pid, home, proc)
+    except (OSError, ValueError, UnicodeError, RuntimeError):
+        return None
+    return codex_home if codex_home.is_absolute() else None
 
 
 def read_codex_status(pid: int, home: Path | None = None, *, proc: Path = Path("/proc"),
@@ -198,18 +253,7 @@ def read_codex_status(pid: int, home: Path | None = None, *, proc: Path = Path("
     candidates = {}
     try:
         process_dir = proc / str(pid)
-        environment = dict(item.split(b"=", 1) for item in
-                           (process_dir / "environ").read_bytes().split(b"\0") if b"=" in item)
-        configured = environment.get(b"CODEX_HOME")
-        if configured:
-            codex_home = Path(configured.decode("utf-8", "surrogateescape"))
-        else:
-            pinned_home = environment.get(b"HOME")
-            if pinned_home:
-                home = Path(pinned_home.decode("utf-8", "surrogateescape"))
-            else:
-                home = Path.home() if home is None else home
-            codex_home = home / ".codex"
+        codex_home = _codex_home_candidate(pid, home, proc)
         if not codex_home.is_absolute():
             return failure("relative_codex_home_unsupported")
         sessions = (codex_home / "sessions").resolve()
@@ -305,3 +349,137 @@ def read_codex_status(pid: int, home: Path | None = None, *, proc: Path = Path("
         return result
     except (OSError, ValueError, UnicodeError, KeyError, RuntimeError):
         return failure("unreadable_or_invalid_rollout")
+
+
+_MAX_AGE = timedelta(days=8)
+
+
+def _rollout_candidates(sessions: Path, now: datetime, max_files: int):
+    """Regular rollout-*.jsonl files modified in the last 8 days, newest mtime first."""
+    cutoff = (now - _MAX_AGE).timestamp()
+    found = []
+    for directory, _, names in os.walk(sessions, onerror=_raise, followlinks=False):
+        for name in names:
+            if not name.startswith("rollout-") or not name.endswith(".jsonl"):
+                continue
+            path = Path(directory) / name
+            try:
+                info = path.lstat()
+                if not stat.S_ISREG(info.st_mode) or info.st_mtime < cutoff:
+                    continue
+                if not path.resolve().is_relative_to(sessions):
+                    continue
+            except (OSError, ValueError, RuntimeError):
+                continue
+            found.append((info.st_mtime, path))
+    found.sort(key=lambda item: item[0], reverse=True)
+    return [path for _, path in found[:max_files]]
+
+
+def _raise(error):
+    raise error
+
+
+def _stamp_value(value):
+    stamp = _timestamp(value)
+    return datetime.fromisoformat(stamp.replace("Z", "+00:00")) if stamp else None
+
+
+def _file_quota(path: Path, tail_bytes: int, max_line_bytes: int):
+    """(model_provider, {bucket: (when, stamp, quota)}) from one rollout; None if unreadable."""
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+    descriptor = os.open(path, flags)
+    with os.fdopen(descriptor, "rb") as stream:
+        info = os.fstat(stream.fileno())
+        if not stat.S_ISREG(info.st_mode):
+            return None
+        provider = None
+        header = stream.readline(max_line_bytes + 1)
+        if header.endswith(b"\n") and len(header) <= max_line_bytes:
+            try:
+                meta = json.loads(header)
+                if isinstance(meta, dict) and meta.get("type") == "session_meta" \
+                        and isinstance(meta.get("payload"), dict):
+                    provider = _text(meta["payload"].get("model_provider"))
+            except ValueError:
+                pass
+        size = info.st_size
+        start = max(0, size - tail_bytes)
+        stream.seek(max(0, start - 1))
+        data = stream.read(size - max(0, start - 1))
+    if start > 0:
+        # Drop a leading partial line unless the tail begins on a boundary.
+        data = data[1:] if data[:1] == b"\n" else data[data.find(b"\n") + 1:] if b"\n" in data else b""
+    data = data[:data.rfind(b"\n") + 1]  # an unfinished trailing line is not a record
+    newest = {}
+    for line in data.split(b"\n"):
+        if b"rate_limits" not in line or len(line) > max_line_bytes:
+            continue
+        try:
+            record = json.loads(line)
+        except ValueError:
+            continue
+        if not isinstance(record, dict) or record.get("type") != "event_msg":
+            continue
+        payload = record.get("payload")
+        if not isinstance(payload, dict) or payload.get("type") != "token_count":
+            continue
+        quota = payload.get("rate_limits")
+        stamp = _timestamp(record.get("timestamp"))
+        when = _stamp_value(stamp)
+        if not isinstance(quota, dict) or when is None:
+            continue
+        key = _text(quota.get("limit_id")) or "unknown"
+        if key not in newest or when >= newest[key][0]:
+            newest[key] = (when, stamp, quota)
+    return provider, newest
+
+
+def newest_account_quota(codex_home: Path, *, now: datetime | None = None, max_files: int = 64,
+                         tail_bytes: int = 4 * 1024 * 1024,
+                         max_line_bytes: int = 4 * 1024 * 1024) -> dict:
+    """Newest rate_limits observation per bucket across this CODEX_HOME's rollouts.
+
+    The OpenAI meter is account-wide but each session only records its own last
+    event, so an idle session's meter goes stale. This searches the most recently
+    modified rollouts (at most ``max_files``, modified within 8 days) and picks
+    per bucket the record with the greatest valid timestamp; mtime only orders
+    candidates. Reads the first line (provider) and the last ``tail_bytes`` of
+    each file, ignoring partial/unfinished/malformed lines. Returns no paths,
+    session ids, cwd or content, and never the credit balance.
+    """
+    def unavailable(reason):
+        return {"state": "unavailable", "source": "codex_rollouts_newest", "reason": reason}
+
+    if now is None:
+        now = datetime.now(timezone.utc)
+    if not isinstance(now, datetime) or now.tzinfo is None:
+        return unavailable("invalid_observation_time")
+    if any(type(value) is not int or value <= 0 for value in (max_files, tail_bytes, max_line_bytes)):
+        return unavailable("invalid_read_limits")
+    try:
+        sessions = (Path(codex_home) / "sessions").resolve()
+        paths = _rollout_candidates(sessions, now, max_files)
+    except (OSError, ValueError, UnicodeError, RuntimeError):
+        return unavailable("sessions_unreadable")
+    best = {}
+    scanned = 0
+    for path in paths:
+        try:
+            found = _file_quota(path, tail_bytes, max_line_bytes)
+        except (OSError, ValueError, UnicodeError):
+            continue
+        if found is None:
+            continue
+        scanned += 1
+        provider, newest = found
+        for key, (when, stamp, quota) in newest.items():
+            if key not in best or when > best[key][0]:
+                best[key] = (when, stamp, quota, provider)
+    if not best:
+        return unavailable("no_recent_rate_limits")
+    buckets = {}
+    for key, (_, stamp, quota, provider) in best.items():
+        buckets[key] = _quota_bucket(quota, stamp, provider, now)[1]
+    return {"state": "observed", "source": "codex_rollouts_newest", "scope": "account",
+            "quota_buckets": buckets, "files_scanned": scanned, "evaluated_at": now.isoformat()}
