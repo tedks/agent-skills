@@ -501,14 +501,14 @@ class AccountQuotaTests(unittest.TestCase):
         self.assertEqual(status._file_quota(target, 1024, 1024)[1].keys(), {'codex'})
         with self.assertRaises(OSError):
             status._file_quota(link, 1024, 1024)
-        self.assertEqual(status._rollout_candidates(self.sessions.resolve(), ACCOUNT_NOW, 10),
+        self.assertEqual(status._rollout_candidates((self.home / 'sessions').resolve(), ACCOUNT_NOW, 10),
                          [(target.stat().st_mtime, target.resolve())])
 
     def test_resolved_path_must_stay_under_sessions(self):
         outside = Path(self.tmp.name) / 'outside'
         outside.mkdir()
         self.add('rollout-outside.jsonl', rollout_text([quota_event(at(10, 9), 84)]), directory=outside)
-        with patch.object(status.os, 'walk', return_value=[(str(outside), [], ['rollout-outside.jsonl'])]):
+        with patch.object(status, '_day_files', return_value=[(outside, 'rollout-outside.jsonl')]):
             self.assertEqual(self.newest().get('reason'), 'no_recent_rate_limits')
 
     def test_leading_partial_line_dropped(self):
@@ -545,6 +545,83 @@ class AccountQuotaTests(unittest.TestCase):
         self.add('rollout-a.jsonl', rollout_text([quota_event(at(10, 10), 1)]), age_hours=1)
         result = self.newest()
         self.assertEqual((result['files_scanned'], result['stopped_early']), (3, True))
+
+    def test_meterless_tail_searches_backwards(self):
+        filler = event('response_item', {'type': 'message', 'content': 'x' * 3000})
+        self.add('rollout-a.jsonl', rollout_text([quota_event(at(10, 1), 14), filler, filler]))
+        result = self.newest(tail_bytes=1000)
+        self.assertEqual(result.get('state'), 'observed')
+        self.assertEqual((self.primary(result), result['incomplete']), (14, False))
+        self.assertNotIn('reason_incomplete', result)
+
+    def test_meterless_window_is_incomplete_not_stale(self):
+        filler = event('response_item', {'type': 'message', 'content': 'x' * 3000})
+        self.add('rollout-old.jsonl', rollout_text([quota_event(at(9, 1), 99)]), age_hours=5)
+        self.add('rollout-new.jsonl', rollout_text([quota_event(at(10, 1), 15), filler, filler]), age_hours=1)
+        result = self.newest(tail_bytes=1000, search_bytes=2000)
+        self.assertEqual(result['state'], 'observed')
+        self.assertEqual((result.get('incomplete'), result.get('reason_incomplete')), (True, 'file_without_meter_in_window'))
+        # Only the new file is meterless; with nothing else observed the reader says so.
+        (self.sessions / 'rollout-old.jsonl').unlink()
+        result = self.newest(tail_bytes=1000, search_bytes=2000)
+        self.assertEqual((result['state'], result['reason']), ('unavailable', 'file_without_meter_in_window'))
+        # A file read in full that simply has no meter is complete.
+        self.add('rollout-new.jsonl', rollout_text([event('response_item', {'type': 'message', 'content': 'x' * 300})]))
+        self.add('rollout-old.jsonl', rollout_text([quota_event(at(9, 1), 99)]), age_hours=5)
+        self.assertFalse(self.newest(tail_bytes=1000, search_bytes=2000)['incomplete'])
+
+    def test_expected_bucket_only_in_older_file(self):
+        self.add('rollout-a.jsonl', rollout_text([quota_event(at(10, 11), 1)]), age_hours=1)
+        self.add('rollout-b.jsonl', rollout_text([quota_event(at(10, 9), 2, bucket='other')]), age_hours=2)
+        result = self.newest()
+        self.assertEqual((set(result['quota_buckets']), result['stopped_early']), ({'codex'}, True))
+        result = self.newest(expected_buckets=['codex', 'other'])
+        self.assertEqual((set(result['quota_buckets']), result['stopped_early']), ({'codex', 'other'}, False))
+        self.assertEqual(self.newest(expected_buckets=['codex'])['files_scanned'], 1)
+        self.assertEqual(self.newest(expected_buckets=7)['reason'], 'invalid_expected_buckets')
+
+    def test_early_stop_skew_margin(self):
+        self.add('rollout-a.jsonl', rollout_text([quota_event(at(10, 11), 1)]), age_hours=1)
+        for margin, scanned in [(119, 2), (120, 1)]:
+            # b's mtime is `margin` seconds before the best record's timestamp.
+            self.add('rollout-b.jsonl', rollout_text([quota_event(at(10, 9), 2)]),
+                     age_hours=(3600 + margin) / 3600)
+            self.assertEqual(self.newest()['files_scanned'], scanned, margin)
+
+    def test_deeply_nested_line_is_skipped(self):
+        deep = '[' * 200000 + ' rate_limits\n'
+        self.add('rollout-a.jsonl', rollout_text([quota_event(at(10, 1), 16), deep]))
+        try:
+            result = self.newest()
+        except RecursionError:
+            self.fail('RecursionError escaped the reader')
+        self.assertEqual(result.get('state'), 'observed')
+        self.assertEqual(self.primary(result), 16)
+
+    def test_old_day_directories_are_never_listed(self):
+        now = datetime(2026, 3, 20, 12, tzinfo=timezone.utc)  # cutoff 03-12, so 03-11 is the oldest listed
+        layout = {'2026/03/11': True, '2026/03/10': False, '2026/02/28': False, '2025/12/31': False}
+        for name in layout:
+            directory = self.home / 'sessions' / name
+            directory.mkdir(parents=True, exist_ok=True)
+            self.add('rollout-a.jsonl', rollout_text([quota_event('2026-03-19T00:00:00Z', 17)]), directory=directory)
+        self.add('rollout-flat.jsonl', rollout_text([]), directory=self.home / 'sessions')
+        listed = []
+        original = os.scandir
+        def spy(path):
+            listed.append(str(path))
+            return original(path)
+        with patch.object(os, 'scandir', spy):
+            status.newest_account_quota(self.home, now=now)
+        layout.update({'2025': False, '2026/02': False, '2026/03': True})
+        for name, expected in layout.items():
+            self.assertEqual(str(self.home / 'sessions' / name) in listed, expected, name)
+
+    def test_header_over_64k_has_no_provider(self):
+        big = event('session_meta', {'id': SID, 'source': 'cli', 'cwd': 'c' * 70000, 'model_provider': 'openai'})
+        self.add('rollout-a.jsonl', big + quota_event(at(10, 1), 18))
+        bucket = self.newest()['quota_buckets']['codex']
+        self.assertEqual((bucket['provider'], bucket['primary']['used_percent']), (None, 18))
 
     def test_age_cutoff_boundary(self):
         self.add('rollout-edge.jsonl', rollout_text([quota_event(at(10, 1), 21)]), age_hours=8 * 24 - 1)
@@ -709,8 +786,8 @@ def mutation_check():
         ('newest-in-file', 'if key not in newest or when >= newest[key][0]:',
          'if True:', 'AccountQuotaTests.test_within_file_newest_record_and_per_bucket'),
         ('age-cutoff', 'or info.st_mtime < cutoff:', 'or False:', 'AccountQuotaTests.test_age_cutoff_boundary'),
-        ('age-cutoff-boundary', 'cutoff = (now - _MAX_AGE).timestamp()',
-         'cutoff = (now - _MAX_AGE * 2).timestamp()', 'AccountQuotaTests.test_age_cutoff_boundary'),
+        ('age-cutoff-boundary', 'cutoff_time = now - _MAX_AGE',
+         'cutoff_time = now - _MAX_AGE * 2', 'AccountQuotaTests.test_age_cutoff_boundary'),
         ('symlink-rejection', 'if not stat.S_ISREG(info.st_mode) or info.st_mtime < cutoff:',
          'if info.st_mtime < cutoff:', 'AccountQuotaTests.test_symlink_not_opened'),
         ('no-follow', 'getattr(os, "O_NOFOLLOW", 0) | ', '', 'AccountQuotaTests.test_symlink_not_opened'),
@@ -718,20 +795,31 @@ def mutation_check():
         ('max-files', 'found[:max_files]', 'found', 'AccountQuotaTests.test_max_files_limits_candidates_by_mtime'),
         ('mtime-order', 'found.sort(key=lambda item: item[0], reverse=True)',
          'found.sort(key=lambda item: item[0])', 'AccountQuotaTests.test_max_files_limits_candidates_by_mtime'),
-        ('tail-bound', 'start = max(0, size - tail_bytes)', 'start = 0', 'AccountQuotaTests.test_tail_bytes_bound_and_partial_lines'),
+        ('tail-bound', 'start = max(0, size - window)', 'start = 0', 'AccountQuotaTests.test_tail_bytes_bound_and_partial_lines'),
         ('leading-partial', 'data = data[1:] if data[:1] == b"\\n" else data[data.find(b"\\n") + 1:] if b"\\n" in data else b""',
          'pass', 'AccountQuotaTests.test_leading_partial_line_dropped'),
         ('trailing-partial', 'data = data[:data.rfind(b"\\n") + 1]', 'pass', 'AccountQuotaTests.test_unfinished_trailing_line_ignored'),
-        ('malformed-line', 'except ValueError:\n            continue\n        if not isinstance(record, dict) or record.get("type") != "event_msg":',
-         'except ValueError:\n            raise\n        if not isinstance(record, dict) or record.get("type") != "event_msg":', 'AccountQuotaTests.test_skips_unusable_files_and_lines'),
+        ('malformed-line', 'except (ValueError, RuntimeError):  # RecursionError on deeply nested input\n            continue',
+         'except (ValueError, RuntimeError):  # RecursionError on deeply nested input\n            raise', 'AccountQuotaTests.test_skips_unusable_files_and_lines'),
         ('oversized-line', 'len(line) > max_line_bytes', 'False', 'AccountQuotaTests.test_oversized_line_skipped'),
         ('valid-timestamp', 'if stamp else None', 'if stamp else datetime.min.replace(tzinfo=timezone.utc)', 'AccountQuotaTests.test_missing_bucket_id_is_unknown_and_invalid_timestamps_skipped'),
         ('codex-home-relative', 'return codex_home if codex_home.is_absolute() else None',
          'return codex_home', 'CodexHomeTests.test_resolution_order'),
-        ('no-recent', 'return unavailable("no_recent_rate_limits")', 'return {"state": "observed"}', 'AccountQuotaTests.test_unavailable_states'),
-        ('stop-comparison', '.timestamp() >= mtime:', '.timestamp() > mtime + 86400 * 365:', 'AccountQuotaTests.test_stops_early_when_bound_reached'),
-        ('stop-removed', 'if best and min(', 'if False and min(', 'AccountQuotaTests.test_stops_early_when_bound_reached'),
+        ('no-recent', 'else "no_recent_rate_limits")', 'else "no_recent_rate_limits") and {"state": "observed"}', 'AccountQuotaTests.test_unavailable_states'),
+        ('stop-comparison', '.timestamp() >= mtime + _SKEW_SECONDS)', '.timestamp() > mtime + 86400 * 365)', 'AccountQuotaTests.test_stops_early_when_bound_reached'),
+        ('stop-removed', 'if (best and expected', 'if (False and expected', 'AccountQuotaTests.test_stops_early_when_bound_reached'),
         ('stop-bound-min', 'min(entry[0] for entry in best.values())', 'max(entry[0] for entry in best.values())', 'AccountQuotaTests.test_multi_bucket_bound_uses_oldest_bucket'),
+        ('skew-margin', '>= mtime + _SKEW_SECONDS)', '>= mtime)', 'AccountQuotaTests.test_early_stop_skew_margin'),
+        ('expected-buckets', 'expected <= best.keys()', 'True', 'AccountQuotaTests.test_expected_bucket_only_in_older_file'),
+        ('backward-search', 'if window >= limit:', 'if True:', 'AccountQuotaTests.test_meterless_tail_searches_backwards'),
+        ('search-cap', 'limit = max(tail_bytes, search_bytes)', 'limit = 10**12', 'AccountQuotaTests.test_meterless_window_is_incomplete_not_stale'),
+        ('incomplete-flag', 'return provider, newest, False', 'return provider, newest, True', 'AccountQuotaTests.test_meterless_window_is_incomplete_not_stale'),
+        ('incomplete-full-read', 'if newest or start == 0:', 'if newest:', 'AccountQuotaTests.test_meterless_window_is_incomplete_not_stale'),
+        ('recursion-line', 'except (ValueError, RuntimeError):  # RecursionError on deeply nested input', 'except ValueError:', 'AccountQuotaTests.test_deeply_nested_line_is_skipped'),
+        ('year-prune', 'if year < oldest.year:', 'if False:', 'AccountQuotaTests.test_old_day_directories_are_never_listed'),
+        ('month-prune', 'if (year, month) < (oldest.year, oldest.month):', 'if False:', 'AccountQuotaTests.test_old_day_directories_are_never_listed'),
+        ('day-prune', 'if when < oldest:', 'if False:', 'AccountQuotaTests.test_old_day_directories_are_never_listed'),
+        ('header-cap', '_HEADER_BYTES = 64 * 1024', '_HEADER_BYTES = 640 * 1024', 'AccountQuotaTests.test_header_over_64k_has_no_provider'),
     ]
     source = MODULE.read_text()
     failed = []

@@ -330,16 +330,28 @@ def _observed(bucket):
         return None
 
 
-def _mark_superseded(session_buckets, account_buckets):
-    """Flag session buckets for which the account has a strictly newer observation."""
+def _mark_superseded(session_buckets, account_latest):
+    """Flag session buckets against account_latest.
+
+    True/False only when both observations are comparable; None (unknown) when
+    account_latest is not observed or a timestamp is unparseable.
+    """
     if not isinstance(session_buckets, dict):
         return session_buckets
-    account_buckets = account_buckets if isinstance(account_buckets, dict) else {}
+    account = account_latest.get('quota_buckets') if isinstance(account_latest, dict) \
+        and account_latest.get('state') == 'observed' else None
     marked = {}
     for key, bucket in session_buckets.items():
         if isinstance(bucket, dict):
-            mine, latest = _observed(bucket), _observed(account_buckets.get(key) or {})
-            bucket = {**bucket, 'superseded': bool(mine and latest and latest > mine)}
+            flag = None
+            mine = _observed(bucket)
+            if isinstance(account, dict) and mine is not None:
+                if key not in account:
+                    flag = False
+                else:
+                    latest = _observed(account[key]) if isinstance(account[key], dict) else None
+                    flag = None if latest is None else latest > mine
+            bucket = {**bucket, 'superseded': flag}
         marked[key] = bucket
     return marked
 
@@ -354,9 +366,13 @@ async def get_usage() -> dict:
     Codex: the bound session's own last observation (it goes stale when the
     session is idle) plus ``account_latest``, the newest account-wide meter seen
     in any recent rollout of this CODEX_HOME (no paths or session ids). A session
-    bucket carries ``superseded: true`` when account_latest holds a strictly
-    newer observation of the same limit_id. account_latest is returned even when
-    the session binding failed.
+    bucket carries ``superseded``: true when account_latest holds a strictly
+    newer observation of the same limit_id, false when not, null (unknown) when
+    account_latest is not observed or timestamps are unparseable. account_latest
+    is returned even when the session binding failed; it assumes one OpenAI
+    account per CODEX_HOME, may be ``incomplete`` (see newest_account_quota), and
+    covers only the session's buckets when the session has any (else only the
+    buckets seen).
     """
     import time
     from harness_identity import IdentityError
@@ -371,15 +387,22 @@ async def get_usage() -> dict:
                                             'reason': binding.get('reason', 'native_binding_unavailable')})
         result = {key: value for key, value in state.items()
                   if key in ('state', 'reason', 'source', 'session_id', 'model_provider', 'quota_buckets', 'history_complete', 'read_window')}
-        codex_home = await asyncio.to_thread(codex_status.codex_home_for, identity.pid)
-        if codex_home is None:
+        expected = list(result['quota_buckets']) if isinstance(result.get('quota_buckets'), dict) \
+            and result['quota_buckets'] else None
+        try:
+            codex_home = await asyncio.to_thread(codex_status.codex_home_for, identity.pid)
+            if codex_home is None:
+                latest = {'state': 'unavailable', 'source': 'codex_rollouts_newest',
+                          'reason': 'codex_home_unavailable'}
+            else:
+                latest = await asyncio.to_thread(
+                    lambda: codex_status.newest_account_quota(codex_home, expected_buckets=expected))
+        except Exception:  # never lose the session result to the account reader
             latest = {'state': 'unavailable', 'source': 'codex_rollouts_newest',
-                      'reason': 'codex_home_unavailable'}
-        else:
-            latest = await asyncio.to_thread(codex_status.newest_account_quota, codex_home)
+                      'reason': 'reader_failed'}
         result['account_latest'] = latest
         if 'quota_buckets' in result:
-            result['quota_buckets'] = _mark_superseded(result['quota_buckets'], latest.get('quota_buckets'))
+            result['quota_buckets'] = _mark_superseded(result['quota_buckets'], latest)
         return result
     except IdentityError as exc:
         return {"state": "unavailable", "reason": str(exc)}

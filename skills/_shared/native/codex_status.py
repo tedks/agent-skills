@@ -5,12 +5,14 @@ an API. The caller must associate the file with its live harness first; this
 module never infers session identity from modification time or search. The one
 exception is ``newest_account_quota``, which searches rollouts only for the
 account-scoped meter (it returns no identity, paths or content, and modification
-time merely bounds and orders the candidate files). Timestamps
+time merely bounds and orders the candidate files). That scan assumes one
+OpenAI account per CODEX_HOME (rollouts carry no account id) and follows a
+symlinked ``sessions`` root, as ``read_codex_status`` does (same user). Timestamps
 describe observations, not freshness guarantees. Token accounting cannot prove
 current context remaining, especially across compaction or an active turn.
 """
 
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 import json
 import math
 import os
@@ -352,31 +354,73 @@ def read_codex_status(pid: int, home: Path | None = None, *, proc: Path = Path("
 
 
 _MAX_AGE = timedelta(days=8)
+_SKEW_SECONDS = 120  # clock/mtime skew margin for the early-stop bound
+_HEADER_BYTES = 64 * 1024  # only model_provider is needed from the first line
+_SEARCH_BYTES = 8 * 1024 * 1024  # per-file backward-search cap
+
+
+def _numbered_dirs(parent: Path, width: int):
+    """Real (non-symlink) subdirectories named by a fixed-width integer, descending."""
+    found = []
+    try:
+        with os.scandir(parent) as entries:
+            for entry in entries:
+                if (len(entry.name) == width and entry.name.isascii() and entry.name.isdigit()
+                        and entry.is_dir(follow_symlinks=False)):
+                    found.append((int(entry.name), Path(entry.path)))
+    except OSError:
+        return []
+    return sorted(found, reverse=True)
+
+
+def _day_files(sessions: Path, oldest: date):
+    """(directory, name) of entries in sessions/YYYY/MM/DD dirs dated >= ``oldest``.
+
+    Walks only that layout, newest first; older day directories are never listed
+    and files outside the layout are ignored.
+    """
+    for year, year_dir in _numbered_dirs(sessions, 4):
+        if year < oldest.year:
+            break
+        for month, month_dir in _numbered_dirs(year_dir, 2):
+            if (year, month) < (oldest.year, oldest.month):
+                break
+            for day, day_dir in _numbered_dirs(month_dir, 2):
+                try:
+                    when = date(year, month, day)
+                except ValueError:
+                    continue
+                if when < oldest:
+                    break
+                try:
+                    with os.scandir(day_dir) as entries:
+                        names = [entry.name for entry in entries]
+                except OSError:
+                    continue
+                for name in names:
+                    yield day_dir, name
 
 
 def _rollout_candidates(sessions: Path, now: datetime, max_files: int):
     """(mtime, path) of regular rollout-*.jsonl files modified in the last 8 days, newest first."""
-    cutoff = (now - _MAX_AGE).timestamp()
+    cutoff_time = now - _MAX_AGE
+    cutoff = cutoff_time.timestamp()
+    oldest = cutoff_time.astimezone(timezone.utc).date() - timedelta(days=1)
     found = []
-    for directory, _, names in os.walk(sessions, onerror=_raise, followlinks=False):
-        for name in names:
-            if not name.startswith("rollout-") or not name.endswith(".jsonl"):
+    for directory, name in _day_files(sessions, oldest):
+        if not name.startswith("rollout-") or not name.endswith(".jsonl"):
+            continue
+        path = directory / name
+        try:
+            info = path.lstat()
+            if not stat.S_ISREG(info.st_mode) or info.st_mtime < cutoff:
                 continue
-            path = Path(directory) / name
-            try:
-                info = path.lstat()
-                if not stat.S_ISREG(info.st_mode) or info.st_mtime < cutoff:
-                    continue
-                path.resolve().relative_to(sessions)  # ValueError when it escapes
-            except (OSError, ValueError, RuntimeError):
-                continue
-            found.append((info.st_mtime, path))
+            path.resolve().relative_to(sessions)  # ValueError when it escapes
+        except (OSError, ValueError, RuntimeError):
+            continue
+        found.append((info.st_mtime, path))
     found.sort(key=lambda item: item[0], reverse=True)
     return found[:max_files]
-
-
-def _raise(error):
-    raise error
 
 
 def _stamp_value(value):
@@ -384,39 +428,13 @@ def _stamp_value(value):
     return datetime.fromisoformat(stamp.replace("Z", "+00:00")) if stamp else None
 
 
-def _file_quota(path: Path, tail_bytes: int, max_line_bytes: int):
-    """(model_provider, {bucket: (when, stamp, quota)}) from one rollout; None if unreadable."""
-    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
-    descriptor = os.open(path, flags)
-    with os.fdopen(descriptor, "rb") as stream:
-        info = os.fstat(stream.fileno())
-        if not stat.S_ISREG(info.st_mode):
-            return None
-        provider = None
-        header = stream.readline(max_line_bytes + 1)
-        if header.endswith(b"\n") and len(header) <= max_line_bytes:
-            try:
-                meta = json.loads(header)
-                if isinstance(meta, dict) and meta.get("type") == "session_meta" \
-                        and isinstance(meta.get("payload"), dict):
-                    provider = _text(meta["payload"].get("model_provider"))
-            except ValueError:
-                pass
-        size = info.st_size
-        start = max(0, size - tail_bytes)
-        stream.seek(max(0, start - 1))
-        data = stream.read(size - max(0, start - 1))
-    if start > 0:
-        # Drop a leading partial line unless the tail begins on a boundary.
-        data = data[1:] if data[:1] == b"\n" else data[data.find(b"\n") + 1:] if b"\n" in data else b""
-    data = data[:data.rfind(b"\n") + 1]  # an unfinished trailing line is not a record
-    newest = {}
+def _scan_tail(data: bytes, max_line_bytes: int, newest: dict):
     for line in data.split(b"\n"):
         if b"rate_limits" not in line or len(line) > max_line_bytes:
             continue
         try:
             record = json.loads(line)
-        except ValueError:
+        except (ValueError, RuntimeError):  # RecursionError on deeply nested input
             continue
         if not isinstance(record, dict) or record.get("type") != "event_msg":
             continue
@@ -431,23 +449,84 @@ def _file_quota(path: Path, tail_bytes: int, max_line_bytes: int):
         key = _text(quota.get("limit_id")) or "unknown"
         if key not in newest or when >= newest[key][0]:
             newest[key] = (when, stamp, quota)
-    return provider, newest
+
+
+def _file_quota(path: Path, tail_bytes: int, max_line_bytes: int, search_bytes: int = _SEARCH_BYTES):
+    """(provider, {bucket: (when, stamp, quota)}, covered) from one rollout; None if unreadable.
+
+    Reads the last ``tail_bytes``; when they hold no valid meter the window doubles
+    backwards up to ``search_bytes``. ``covered`` is False when no meter was found
+    although earlier, unread bytes remain.
+    """
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+    descriptor = os.open(path, flags)
+    with os.fdopen(descriptor, "rb") as stream:
+        info = os.fstat(stream.fileno())
+        if not stat.S_ISREG(info.st_mode):
+            return None
+        provider = None
+        header = stream.readline(_HEADER_BYTES + 1)
+        if header.endswith(b"\n") and len(header) <= _HEADER_BYTES:
+            try:
+                meta = json.loads(header)
+                if isinstance(meta, dict) and meta.get("type") == "session_meta" \
+                        and isinstance(meta.get("payload"), dict):
+                    provider = _text(meta["payload"].get("model_provider"))
+            except (ValueError, RuntimeError):
+                pass
+        size = info.st_size
+        window = tail_bytes
+        limit = max(tail_bytes, search_bytes)
+        while True:
+            start = max(0, size - window)
+            stream.seek(max(0, start - 1))
+            data = stream.read(size - max(0, start - 1))
+            if start > 0:
+                # Drop a leading partial line unless the tail begins on a boundary.
+                data = data[1:] if data[:1] == b"\n" else data[data.find(b"\n") + 1:] if b"\n" in data else b""
+            data = data[:data.rfind(b"\n") + 1]  # an unfinished trailing line is not a record
+            newest = {}
+            _scan_tail(data, max_line_bytes, newest)
+            if newest or start == 0:
+                return provider, newest, True
+            if window >= limit:
+                return provider, newest, False
+            window = min(window * 2, limit)
 
 
 def newest_account_quota(codex_home: Path, *, now: datetime | None = None, max_files: int = 32,
                          tail_bytes: int = 1024 * 1024,
-                         max_line_bytes: int = 4 * 1024 * 1024) -> dict:
+                         max_line_bytes: int = 4 * 1024 * 1024,
+                         search_bytes: int = _SEARCH_BYTES,
+                         expected_buckets: Iterable[str] | None = None) -> dict:
     """Newest rate_limits observation per bucket across this CODEX_HOME's rollouts.
 
     The OpenAI meter is account-wide but each session only records its own last
     event, so an idle session's meter goes stale. This searches the most recently
     modified rollouts (at most ``max_files``, modified within 8 days) and picks
-    per bucket the record with the greatest valid timestamp; mtime only orders
-    candidates and bounds the scan: a record cannot be newer than its file's
-    mtime, so scanning stops once every bucket found so far has a best
-    timestamp at or after the next candidate's mtime (``stopped_early``). Reads the first line (provider) and the last ``tail_bytes`` of
-    each file, ignoring partial/unfinished/malformed lines. Returns no paths,
-    session ids, cwd or content, and never the credit balance.
+    per bucket the record with the greatest valid timestamp. Assumes one OpenAI
+    account per CODEX_HOME (rollouts carry no account id) and follows a symlinked
+    ``sessions`` root (same user, as ``read_codex_status`` does).
+
+    Only ``sessions/YYYY/MM/DD/rollout-*.jsonl`` is read (day directories older
+    than the cutoff are never listed; files elsewhere are ignored). Each file's
+    first line (at most 64 KiB) supplies model_provider only. Its last
+    ``tail_bytes`` are parsed; if they hold no valid meter the window grows
+    backwards up to ``search_bytes`` (default 8 MiB). A file whose window still
+    holds no meter although earlier bytes remain makes the result
+    ``"incomplete": true`` with ``reason_incomplete``
+    ``"file_without_meter_in_window"``; an older file's meter must then not be
+    taken as complete. Partial/unfinished/malformed (including too deeply
+    nested) lines are ignored.
+
+    mtime only orders candidates and bounds the scan: a record cannot be newer
+    than its file's mtime, so scanning stops (``stopped_early``) once the best
+    timestamp of every bucket found is at least 120 s past the next candidate's
+    mtime. With ``expected_buckets`` the scan continues until all of them are
+    found; without it, it stops after at least one bucket, so ``account_latest``
+    covers only the buckets seen. Rollouts copied with preserved mtimes
+    (cp -p, rsync -t) can be missed. Returns no paths, session ids, cwd or
+    content, and never the credit balance.
     """
     def unavailable(reason):
         return {"state": "unavailable", "source": "codex_rollouts_newest", "reason": reason}
@@ -456,36 +535,52 @@ def newest_account_quota(codex_home: Path, *, now: datetime | None = None, max_f
         now = datetime.now(timezone.utc)
     if not isinstance(now, datetime) or now.tzinfo is None:
         return unavailable("invalid_observation_time")
-    if any(type(value) is not int or value <= 0 for value in (max_files, tail_bytes, max_line_bytes)):
+    if any(type(value) is not int or value <= 0
+           for value in (max_files, tail_bytes, max_line_bytes, search_bytes)):
         return unavailable("invalid_read_limits")
     try:
+        expected = set(expected_buckets) if expected_buckets is not None else set()
+        if not all(isinstance(name, str) for name in expected):
+            return unavailable("invalid_expected_buckets")
+    except TypeError:
+        return unavailable("invalid_expected_buckets")
+    try:
         sessions = (Path(codex_home) / "sessions").resolve()
+        if not sessions.is_dir():
+            return unavailable("sessions_unreadable")
         paths = _rollout_candidates(sessions, now, max_files)
     except (OSError, ValueError, UnicodeError, RuntimeError):
         return unavailable("sessions_unreadable")
     best = {}
     scanned = 0
     stopped_early = False
+    incomplete = False
     for mtime, path in paths:
-        if best and min(entry[0] for entry in best.values()).timestamp() >= mtime:
+        if (best and expected <= best.keys()
+                and min(entry[0] for entry in best.values()).timestamp() >= mtime + _SKEW_SECONDS):
             stopped_early = True
             break
         try:
-            found = _file_quota(path, tail_bytes, max_line_bytes)
-        except (OSError, ValueError, UnicodeError):
+            found = _file_quota(path, tail_bytes, max_line_bytes, search_bytes)
+        except (OSError, ValueError, UnicodeError, RuntimeError):
             continue
         if found is None:
             continue
         scanned += 1
-        provider, newest = found
+        provider, newest, covered = found
+        incomplete = incomplete or not covered
         for key, (when, stamp, quota) in newest.items():
             if key not in best or when > best[key][0]:
                 best[key] = (when, stamp, quota, provider)
     if not best:
-        return unavailable("no_recent_rate_limits")
+        return unavailable("file_without_meter_in_window" if incomplete else "no_recent_rate_limits")
     buckets = {}
     for key, (_, stamp, quota, provider) in best.items():
         buckets[key] = _quota_bucket(quota, stamp, provider, now)[1]
-    return {"state": "observed", "source": "codex_rollouts_newest", "scope": "account",
-            "quota_buckets": buckets, "files_scanned": scanned,
-            "stopped_early": stopped_early, "evaluated_at": now.isoformat()}
+    result = {"state": "observed", "source": "codex_rollouts_newest", "scope": "account",
+              "quota_buckets": buckets, "files_scanned": scanned,
+              "stopped_early": stopped_early, "incomplete": incomplete,
+              "evaluated_at": now.isoformat()}
+    if incomplete:
+        result["reason_incomplete"] = "file_without_meter_in_window"
+    return result

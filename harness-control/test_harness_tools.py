@@ -73,7 +73,7 @@ class ToolsTests(unittest.IsolatedAsyncioTestCase):
             self.assertNotIn('rollout_path',status['observation'])
             self.assertNotIn('rollout_path',usage)
             self.assertNotIn('model',usage)
-            self.assertEqual(usage['quota_buckets'],{'test':{'superseded':False}})
+            self.assertEqual(usage['quota_buckets'],{'test':{'superseded':None}})
 
     def _bucket(self, stamp, used):
         return {'limit_id': 'codex', 'observed_at': stamp, 'primary': {'used_percent': used}}
@@ -90,7 +90,7 @@ class ToolsTests(unittest.IsolatedAsyncioTestCase):
             result = await server.get_usage()
         locate.assert_called_once_with(123)
         if home:
-            newest.assert_called_once_with(Path(self.tmp.name))
+            newest.assert_called_once_with(Path(self.tmp.name), expected_buckets=list(session) or None)
         else:
             newest.assert_not_called()
         return result
@@ -105,7 +105,7 @@ class ToolsTests(unittest.IsolatedAsyncioTestCase):
         usage = await self._codex_usage(session, account)
         self.assertEqual(usage['account_latest'], account)
         flags = {key: bucket['superseded'] for key, bucket in usage['quota_buckets'].items()}
-        self.assertEqual(flags, {'codex': True, 'same': False, 'older': False, 'absent': False, 'bad': False})
+        self.assertEqual(flags, {'codex': True, 'same': False, 'older': False, 'absent': False, 'bad': None})
         self.assertEqual(usage['quota_buckets']['codex']['primary'], {'used_percent': 99})
         self.assertNotIn('rollout_path', usage)
         self.assertNotIn('superseded', session['codex'])  # the binding's own data is not mutated
@@ -114,7 +114,24 @@ class ToolsTests(unittest.IsolatedAsyncioTestCase):
         usage = await self._codex_usage({'codex': self._bucket('2026-10-14T00:00:00Z', 9)}, None, home=None)
         self.assertEqual(usage['account_latest'], {'state': 'unavailable', 'source': 'codex_rollouts_newest',
                                                    'reason': 'codex_home_unavailable'})
-        self.assertFalse(usage['quota_buckets']['codex']['superseded'])
+        self.assertIsNone(usage['quota_buckets']['codex']['superseded'])  # unknown, not False
+
+    async def test_codex_account_reader_failure_keeps_session_result(self):
+        identity = Identity('codex', 123, '777', 'boot', '/tmp/socket', '%9', '/work')
+        data = {'state': 'observed', 'session_id': SID, 'quota_buckets': {'codex': self._bucket('2026-10-14T00:00:00Z', 9)}}
+        binding = {'state': 'observed', 'session_id': SID, 'observation': data}
+        with patch.object(server, '_own_identity', return_value=identity), \
+                patch('session_binding.observe_native_session', return_value=binding), \
+                patch.object(server.codex_status, 'codex_home_for', return_value=self.path), \
+                patch.object(server.codex_status, 'newest_account_quota', side_effect=RecursionError('deep')):
+            try:
+                usage = await server.get_usage()
+            except Exception as exc:
+                self.fail('account reader failure escaped: ' + type(exc).__name__)
+        self.assertEqual(usage['account_latest'], {'state': 'unavailable', 'source': 'codex_rollouts_newest',
+                                                   'reason': 'reader_failed'})
+        self.assertEqual(usage['session_id'], SID)
+        self.assertIsNone(usage['quota_buckets']['codex']['superseded'])
 
     async def test_codex_partial_observation_limits(self):
         identity = Identity('codex', 123, '777', 'boot', '/tmp/socket', '%9', '/work')
@@ -158,8 +175,9 @@ MUTANTS = {
     'test_no_tmux_returns_typed_unavailable': ('"reason": str(exc)', '"reason": "unknown"'),
     'test_claude_binding_ignores_env_override': ('binding = await asyncio.to_thread(_native_observation, identity)', "binding = {'state': 'observed', 'session_id': os.environ.get('CLAUDE_SESSION_ID'), 'pointer_paths': ['/tmp/nope'], 'status_dir': '/tmp'}"),
     'test_missing_or_invalid_snapshot_unavailable': ('return sid, None\n\n\n@mcp.tool()', "return sid, {'schema_version': 1, 'session_id': sid, 'observed_at': 1}\n\n\n@mcp.tool()"),
-    'test_codex_account_latest_and_superseded': ("bucket = {**bucket, 'superseded': bool(mine and latest and latest > mine)}", "bucket = {**bucket, 'superseded': bool(mine and latest and latest != mine)}"),
-    'test_codex_account_latest_unavailable_without_home': ("'reason': 'codex_home_unavailable'", "'reason': 'unknown'"),
+    'test_codex_account_latest_and_superseded': ("flag = None if latest is None else latest > mine", "flag = None if latest is None else latest != mine"),
+    'test_codex_account_reader_failure_keeps_session_result': ("        except Exception:  # never lose", "        except ZeroDivisionError:  # never lose"),
+    'test_codex_account_latest_unavailable_without_home': ("            flag = None\n            mine = _observed(bucket)", "            flag = False\n            mine = _observed(bucket)"),
     'test_codex_allowlist': ("state.pop('rollout_path', None)", 'pass'),
     'test_codex_unsupported_result_compatibility': ("state = dict(binding.get('observation',", "state = dict({'state': 'unavailable', 'reason': 'changed'}.get('observation',"),
     'test_configured_pointer_snapshot_uses_default_directory': ("Path(binding['status_dir'])", "Path(binding['pointer_paths'][0]).parent"),
