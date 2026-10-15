@@ -88,19 +88,24 @@
 
       checks.${system} = {
         harness-control-unit = pkgs.runCommand "harness-control-unit" {
-          nativeBuildInputs = [ runtimePython ];
+          nativeBuildInputs = [ runtimePython pkgs.tmux ];
         } ''
           export AGENT_SKILLS_ROOT=${runtimeSkillsSource}/skills
           export HARNESS_TEST_SLEEP=${lib.getExe' pkgs.coreutils "sleep"}
           export PYTHONDONTWRITEBYTECODE=1
           export PYTHONPATH=${./harness-control}
-          export PATH=${runtimePath}
+          export PATH=${lib.makeBinPath (runtimeInputs ++ [ pkgs.tmux ])}
           ${runtimePython}/bin/python3 ${./harness-control}/test_session_id.py
           ${runtimePython}/bin/python3 ${./harness-control}/test_harness_tools.py
           ${runtimePython}/bin/python3 ${./harness-control}/test_harness_lifecycle.py
           ${runtimePython}/bin/python3 ${./harness-control}/test_runtime.py
+          ${runtimePython}/bin/python3 ${./harness-control}/test_harness_control_core.py
+          ${runtimePython}/bin/python3 ${./harness-control}/test_harness_status_live.py
           ${runtimePython}/bin/python3 ${./harness-control}/test_harness_tools.py --mutation-check
           ${runtimePython}/bin/python3 ${./harness-control}/test_harness_lifecycle.py --mutation-check
+          ${runtimePython}/bin/python3 ${./harness-control}/test_harness_control_core.py --mutation-check
+          ${runtimePython}/bin/python3 ${./harness-control}/test_harness_status_live.py --mutation-check
+          ${runtimePython}/bin/python3 ${./harness-control}/test_harness_control_core.py --live-integration
           touch $out
         '';
 
