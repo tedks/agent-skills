@@ -758,16 +758,19 @@ def _settle_dispatches(record, reason):
 
 
 def _environment(identity):
-    env = dict(os.environ)
+    env = {name: value for name, value in os.environ.items()
+           if not name.startswith('PYTHON') and name != 'NIX_PYTHONPATH'}
+    env['PYTHONDONTWRITEBYTECODE'] = '1'
+    env['PYTHONNOUSERSITE'] = '1'
     env.pop('SPAWN_TMUX_LABEL', None)
     env['SPAWN_TMUX_SOCKET'] = identity.socket
     return env
 
 
 def _observer_command(directory, operation_id):
-    """Re-enter this module through the same isolated Nix Python environment."""
-    return [sys.executable, '-I', '-m', 'harness_control', '--observe',
-            str(directory), operation_id]
+    """Re-enter this exact module without ambient Python paths or user packages."""
+    return [sys.executable, '-E', '-s', str(Path(__file__).resolve()),
+            '--observe', str(directory), operation_id]
 
 
 def observe(directory, operation_id):

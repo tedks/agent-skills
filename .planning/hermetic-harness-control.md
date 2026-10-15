@@ -15,6 +15,7 @@ The active deployment scope is the three x86_64 Linux workstations that have Nix
 - [x] (2026-10-15 01:24Z) Added the canonical runtime, protocol smoke test, mutation-tested behavior suites, and a locked `nixos-25.11` Nix package.
 - [x] (2026-10-15 01:24Z) Proved the packaged MCP handshake under hostile Python variables and PATH, with no mutable checkout reference or test-only scientific packages in its runtime closure.
 - [x] (2026-10-15 01:50Z) Addressed council round 1 findings with isolated Python launch, packaged Git, isolated observer re-entry, commit-addressed installation, and session-id path validation; convergence review remains.
+- [x] (2026-10-15 02:35Z) Addressed convergence round 2 findings by scrubbing every ambient `PYTHON*` variable plus `NIX_PYTHONPATH`, preserving source and installed observer entry through its exact file, and expanding malformed-state and package isolation tests; the next fix-delta round remains.
 - [ ] Land the agent-skills PR, then pin that merged commit in dotfiles.
 - [ ] Add the dedicated-profile installer and change Claude/Codex registration to the stable packaged command.
 - [ ] Remove the superseded dotfiles runtime copy, update docs/tests, and prove install, upgrade, refusal, and rollback behavior.
@@ -40,6 +41,9 @@ The active deployment scope is the three x86_64 Linux workstations that have Nix
 - Observation: putting pinned Bash and Python on `PATH` was insufficient for the captured transport because several scripts used `/usr/bin/env` shebangs.
   Evidence: the first private-tmux Nix check failed with `bad interpreter: No such file or directory`. The filtered transport tree is now copied to its own store output and `patchShebangs` binds every executable directly to the Nix interpreters.
 
+- Observation: Python isolated mode alone does not exclude nixpkgs' `NIX_PYTHONPATH` hook.
+  Evidence: a hostile `.pth` file named by `NIX_PYTHONPATH` executed under the packaged interpreter even with `python -I`. The wrapper and every harness-launched Python subprocess now remove all inherited `PYTHON*` variables and `NIX_PYTHONPATH`; the artifact test asserts that the hostile `.pth` marker is never written.
+
 ## Decision Log
 
 - Decision: Use a normal Nix package, installed once, rather than PEX/scie or `nix bundle`.
@@ -62,8 +66,8 @@ The active deployment scope is the three x86_64 Linux workstations that have Nix
   Rationale: the stable branch provides MCP 1.15, satisfying the declared API range, entirely from the binary cache. Its MCP dependency download was 4.7 MiB and added 26.4 MiB unpacked on the development host. The unstable revision required local builds whose test-only dependency graphs reached SciPy. Consuming the cached upstream MCP output avoids both those build inputs and the maintenance risk of overriding dependency checks.
   Date/Author: 2026-10-15, Codex.
 
-- Decision: Launch both the MCP server and detached observer with the Nix Python in isolated mode, and include Git in the package's executable path.
-  Rationale: `python -I` ignores ambient Python configuration and user site packages. Re-entering the observer as an isolated module preserves the same dependency environment, while packaged Git makes checkpoint verification independent of the caller's PATH.
+- Decision: Launch the MCP server with the Nix Python in isolated mode, scrub every inherited `PYTHON*` variable and `NIX_PYTHONPATH`, re-enter the detached observer through the exact installed module file with `-E -s`, and include Git in the package's executable path.
+  Rationale: `python -I` ignores standard ambient Python configuration and user site packages but nixpkgs' site customization still consumes `NIX_PYTHONPATH`. Explicit scrubbing closes that path. The exact observer file works from both a source checkout and the installed package while ignoring environment and user-site configuration; packaged Git makes checkpoint verification independent of the caller's PATH.
   Date/Author: 2026-10-15, Codex.
 
 - Decision: Capture `skills/_shared` and only the five spawn-agent transport files reachable from `tmux-message.sh` in the runtime source tree.
@@ -92,7 +96,7 @@ Move the runtime-focused tests from dotfiles into agent-skills and adapt only re
 
 After the agent-skills PR is reviewed and merged, update dotfiles `.agent-skills.ref` to the merged commit. Add `scripts/install/install-harness-control`. It resolves the existing clean pinned checkout, verifies Nix exists, and installs `git+file://<checkout>?rev=<exact-commit>#harness-control` into the dedicated profile so only committed files enter the Nix source. It verifies the resulting executable and its MCP handshake, then atomically manages `~/.local/bin/harness-control`. A failed build, install, or smoke test must leave the prior profile generation and stable link usable.
 
-Change `scripts/install/install-claude-introspect` and the Codex registration in `scripts/install/install-codex-config` to register the stable executable with no `uv run --script` arguments. Preserve the current ownership checks for custom registrations. Add private-HOME installer tests for first install, idempotence, upgrade, failure preservation, absent Nix, foreign stable links, stale old registration migration, and exact registration output. Remove the old dotfiles runtime only after all tests consume the packaged source.
+Change `scripts/install/install-claude-introspect` and the Codex registration in `scripts/install/install-codex-config` to register the stable executable with no `uv run --script` arguments. Preserve the current ownership checks for custom registrations. Add private-HOME installer tests for first install, idempotence, upgrade, failure preservation, absent Nix, foreign stable links, stale old registration migration, exact registration output, and the repository's bare-repo plus linked-worktree layout. Remove the old dotfiles runtime only after all tests consume the packaged source.
 
 ## Concrete Steps
 
@@ -134,4 +138,4 @@ The agent-skills flake must expose `packages.x86_64-linux.harness-control`, `pac
 
 Dotfiles `scripts/install/install-harness-control` must accept no destructive default. It operates on the fixed dedicated profile, resolves agent-skills through the existing validated reference, and prints a distinct installed, unchanged, skipped, or failed result. Claude and Codex registration must have command `~/.local/bin/harness-control` expanded to an absolute path and an empty argument list.
 
-Revision note, 2026-10-15: initial plan written after the implementation ruling and fleet/Nix preflight. Updated after the first build exposed uncached unstable dependency tests, then after council round 1 exposed ambient Git/Python and local-path source boundaries.
+Revision note, 2026-10-15: initial plan written after the implementation ruling and fleet/Nix preflight. Updated after the first build exposed uncached unstable dependency tests, after council round 1 exposed ambient Git/Python and local-path source boundaries, and after convergence round 2 demonstrated that `NIX_PYTHONPATH` bypasses Python's ordinary isolated-mode protections.

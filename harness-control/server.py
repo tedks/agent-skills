@@ -213,10 +213,10 @@ def _read_session_state(session_id: str) -> dict:
         return {}
     state_file = SESSION_STATE_DIR / f"{session_id}.json"
     try:
-        return json.loads(state_file.read_text())
+        data = json.loads(state_file.read_text())
     except (OSError, ValueError):
-        pass
-    return {}
+        return {}
+    return data if isinstance(data, dict) else {}
 
 
 def _find_project_dir() -> Path | None:
@@ -240,10 +240,13 @@ def _find_project_dir() -> Path | None:
 def _read_sessions_index(project_dir: Path) -> list[dict]:
     """Read the sessions-index.json for a project."""
     index_file = project_dir / "sessions-index.json"
-    if not index_file.exists():
+    try:
+        data = json.loads(index_file.read_text())
+    except (OSError, ValueError):
         return []
-    data = json.loads(index_file.read_text())
-    return data.get("sessions", [])
+    if not isinstance(data, dict) or not isinstance(data.get("sessions"), list):
+        return []
+    return data["sessions"]
 
 
 # Self tools intentionally ignore the legacy CLAUDE_SESSION_ID testing override:

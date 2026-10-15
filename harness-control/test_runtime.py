@@ -8,19 +8,36 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 import harness_control
 import server
 
 
 class RuntimeTest(unittest.TestCase):
-    def test_observer_reenters_the_isolated_module(self):
-        command = harness_control._observer_command(Path("/state"), "a" * 32)
-        self.assertEqual(
-            [os.path.realpath(sys.executable), "-I", "-m", "harness_control",
-             "--observe", "/state", "a" * 32],
-            [os.path.realpath(command[0]), *command[1:]],
-        )
+    def test_observer_reenters_the_exact_module_without_ambient_python(self):
+        with tempfile.TemporaryDirectory() as directory:
+            command = harness_control._observer_command(Path(directory), "invalid")
+            result = subprocess.run(command, capture_output=True, text=True, timeout=10)
+        self.assertEqual(1, result.returncode)
+        self.assertIn("invalid_operation_id", result.stderr)
+
+    def test_child_environment_scrubs_ambient_python_configuration(self):
+        identity = mock.Mock(socket="/socket")
+        hostile = {
+            "PYTHONPATH": "/hostile",
+            "PYTHONWARNINGS": "error",
+            "PYTHONPLATLIBDIR": "lib64",
+            "NIX_PYTHONPATH": "/hostile-nix",
+            "SPAWN_TMUX_LABEL": "wrong",
+        }
+        with mock.patch.dict(os.environ, hostile):
+            env = harness_control._environment(identity)
+        self.assertFalse(any(name.startswith("PYTHON") for name in env
+                             if name not in {"PYTHONDONTWRITEBYTECODE", "PYTHONNOUSERSITE"}))
+        self.assertNotIn("NIX_PYTHONPATH", env)
+        self.assertNotIn("SPAWN_TMUX_LABEL", env)
+        self.assertEqual("/socket", env["SPAWN_TMUX_SOCKET"])
 
     def test_checkpoint_verification_finds_packaged_git(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -66,6 +83,16 @@ class RuntimeTest(unittest.TestCase):
             sid = "00000000-0000-0000-0000-000000000000"
             (state_dir / f"{sid}.json").write_text("not json")
             self.assertEqual({}, server._read_session_state(sid))
+            (state_dir / f"{sid}.json").write_text("[]")
+            self.assertEqual({}, server._read_session_state(sid))
+
+    def test_malformed_sessions_index_is_empty(self):
+        with tempfile.TemporaryDirectory() as directory:
+            project = Path(directory)
+            index = project / "sessions-index.json"
+            for content in ("not json", "[]", '{"sessions": {}}'):
+                index.write_text(content)
+                self.assertEqual([], server._read_sessions_index(project))
 
 
 if __name__ == "__main__":

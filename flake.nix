@@ -46,12 +46,15 @@
       '';
       harnessControl = pkgs.writeShellApplication {
         name = "harness-control";
-        inherit runtimeInputs;
         text = ''
+          export PATH=${runtimePath}''${PATH:+:$PATH}
+          for variable in ''${!PYTHON@}; do
+            unset "$variable"
+          done
+          unset NIX_PYTHONPATH
           export AGENT_SKILLS_ROOT=${runtimeSkillsSource}/skills
           export PYTHONDONTWRITEBYTECODE=1
           export PYTHONNOUSERSITE=1
-          unset PYTHONHOME PYTHONPATH PYTHONPLATLIBDIR
           exec ${runtimePython}/bin/python3 -I -m server "$@"
         '';
         meta = {
@@ -107,10 +110,14 @@
           ${runtimePython}/bin/python3 ${./harness-control}/test_package.py \
             ${lib.getExe harnessControl} ${./harness-control}
           set +e
-          AGENT_SKILLS_ROOT=${runtimeSkillsSource}/skills ${runtimePython}/bin/python3 -I -m harness_control
+          observer_error=$(AGENT_SKILLS_ROOT=${runtimeSkillsSource}/skills \
+            ${runtimePython}/bin/python3 -E -s \
+            ${harnessControlLibrary}/${python.sitePackages}/harness_control.py \
+            --observe "$TMPDIR/observer" invalid 2>&1)
           observer_status=$?
           set -e
-          test "$observer_status" -eq 2
+          test "$observer_status" -eq 1
+          [[ "$observer_error" == *invalid_operation_id* ]]
           touch $out
         '';
 
@@ -121,9 +128,14 @@
           ${lib.getExe pkgs.tmux} -S "$socket" new-session -d -s harness-test \
             "${lib.getExe pkgs.bash} -c 'printf \"transport-ready\\n\"; exec ${lib.getExe' pkgs.coreutils "sleep"} 30'"
           pane=$(${lib.getExe pkgs.tmux} -S "$socket" display-message -p -t '=harness-test:0.0' '#{pane_id}')
-          output=$(AGENT_SKILLS_ROOT=${runtimeSkillsSource}/skills \
-            SPAWN_TMUX_SOCKET="$socket" \
-            ${runtimeSkillsSource}/skills/spawn-agent/scripts/tmux-message.sh read "$pane")
+          output=""
+          for attempt in {1..50}; do
+            output=$(AGENT_SKILLS_ROOT=${runtimeSkillsSource}/skills \
+              SPAWN_TMUX_SOCKET="$socket" \
+              ${runtimeSkillsSource}/skills/spawn-agent/scripts/tmux-message.sh read "$pane")
+            [[ "$output" == *transport-ready* ]] && break
+            ${lib.getExe' pkgs.coreutils "sleep"} 0.02
+          done
           [[ "$output" == *transport-ready* ]]
           ${lib.getExe pkgs.tmux} -S "$socket" kill-server
           touch $out

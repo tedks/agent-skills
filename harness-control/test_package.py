@@ -36,6 +36,10 @@ async def probe(command: str) -> None:
         (hostile / "harness_identity.py").write_text(
             "raise AssertionError('ambient identity reader imported')\n"
         )
+        nix_path_marker = home / "nix-pythonpath-executed"
+        (hostile / "ambient.pth").write_text(
+            f"import pathlib; pathlib.Path({str(nix_path_marker)!r}).write_text('bad')\n"
+        )
         user_site = home / ".local" / "lib" / f"python{sys.version_info.major}.{sys.version_info.minor}" / "site-packages"
         user_site.mkdir(parents=True)
         (user_site / "harness_identity.py").write_text(
@@ -43,7 +47,6 @@ async def probe(command: str) -> None:
         )
         env = {
             "HOME": str(home),
-            "PATH": "/ambient-path-must-not-be-required",
             "PYTHONHOME": str(hostile),
             "PYTHONPATH": str(hostile),
             "PYTHONPLATLIBDIR": "lib64",
@@ -51,6 +54,7 @@ async def probe(command: str) -> None:
             "PYTHONDEVMODE": "1",
             "PYTHONINSPECT": "1",
             "PYTHONSAFEPATH": "0",
+            "NIX_PYTHONPATH": str(hostile),
             "AGENT_SKILLS_ROOT": str(hostile),
         }
         old_cwd = Path.cwd()
@@ -74,6 +78,8 @@ async def probe(command: str) -> None:
                         raise AssertionError(payload)
                     if payload.get("reason") != "no supported harness in process ancestry":
                         raise AssertionError(payload)
+                    if nix_path_marker.exists():
+                        raise AssertionError("ambient NIX_PYTHONPATH executed a .pth file")
         finally:
             os.chdir(old_cwd)
         print(f"package MCP probe passed in {time.monotonic() - started:.3f}s")
