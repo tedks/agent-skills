@@ -20,6 +20,7 @@ check() { local what="$1"; shift; if "$@"; then echo "ok   $what"; else echo "FA
 BASEPATH="/usr/bin:/bin"
 
 PATH="$WORK/bin:$BASEPATH" "$HERE/usage.sh" --project chaos > "$WORK/out"
+check "an unknown store age is called out, not hidden" grep -q 'store never scanned' "$WORK/out"
 check "sessions read without scanning, for the project" grep -qx 'token-usage sessions --no-scan --project chaos' "$LOG"
 check "totals by project and model" grep -qx 'token-usage totals --no-scan --by model' "$LOG"
 check "meters read" grep -qx 'token-usage meters' "$LOG"
@@ -27,15 +28,16 @@ check "incidents read" grep -qx 'token-tripwire status' "$LOG"
 
 : > "$LOG"
 PATH="$WORK/bin:$BASEPATH" "$HERE/usage.sh" --fresh --day 2026-10-14 > /dev/null
-check "--fresh scans" grep -qx 'token-usage sessions' "$LOG"
+check "--fresh scans" grep -qx 'token-usage scan' "$LOG"
 check "--day passed to totals" grep -qx 'token-usage totals --no-scan --day 2026-10-14 --by project' "$LOG"
 
 PATH="$WORK/bin:$BASEPATH" "$HERE/usage.sh" --json > "$WORK/json"
-check "json combines all five" python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); assert set(d) == {"sessions","totals_project","totals_model","meters","incidents"}' "$WORK/json"
+check "json combines all five, with the store age" python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); assert set(d) == {"sessions","totals_project","totals_model","meters","incidents","store_age_minutes","stale_note"} and d["stale_note"]' "$WORK/json"
 
+: > "$LOG"
 mv "$WORK/bin/token-usage" "$HOME/.bin/token-usage"
 PATH="$WORK/bin:$BASEPATH" "$HERE/usage.sh" > /dev/null
-check "falls back to ~/.bin" true
+check "falls back to ~/.bin" grep -qx 'token-usage meters' "$LOG"
 rm "$HOME/.bin/token-usage"
 if PATH="$WORK/bin:$BASEPATH" "$HERE/usage.sh" 2>/dev/null; then rc=0; else rc=$?; fi
 check "missing token-usage exits 3" [ "$rc" -eq 3 ]

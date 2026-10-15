@@ -1,6 +1,6 @@
 ---
 name: usage
-description: Use when a CTO or lead asks how much its lanes are spending, which session is burning quota, whether a lane tripped the token tripwire, or where the provider quota meters stand. Reads the installed token-usage counts (turns/h, cached tokens/h, average context per session; per-project/model totals; quota meters) and the tripwire's open incidents. Counts only; never message content. Does not install anything or change thresholds.
+description: Use when a CTO or lead asks how much its lanes are spending, which session is burning quota, whether a lane tripped the token tripwire, or where the provider quota meters stand. Reads the installed token-usage counts (turns/h, cached tokens/h, average context per turn for each session; per-project/model totals; quota meters) and the tripwire's open incidents. Counts only; never message content. Does not install anything or change thresholds.
 ---
 
 # Usage
@@ -20,10 +20,14 @@ CLIs that dotfiles installs (`scripts/usage`); this skill only calls them.
   table uses.
 - `--day` gives that local day's per-project and per-model totals (default today).
 - `--fresh` scans rollouts and transcripts first. Without it the script reads
-  the store as the last cron tick (every 10 minutes) left it, which keeps your
-  own context and the store's lock out of the way.
+  the store as the last scan left it: every 10 minutes where the
+  token-tripwire cron row is enabled, otherwise whenever something last ran
+  `token-usage`. The output always says how old the store is, and warns past
+  20 minutes. A stale store means the numbers are old, not that no lane is
+  running: rerun with `--fresh` before concluding anything.
 - `--json` emits one JSON object (`sessions`, `totals_project`,
-  `totals_model`, `meters`, `incidents`) for further processing.
+  `totals_model`, `meters`, `incidents`, plus `store_age_minutes` and
+  `stale_note`) for further processing.
 
 ## Read the answer
 

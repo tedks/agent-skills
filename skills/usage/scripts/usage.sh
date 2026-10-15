@@ -43,6 +43,28 @@ TW="$(find_cli token-tripwire || true)"
 
 scan=(--no-scan)
 $fresh && scan=()
+
+# How old is the store? Without a scan (and without the cron row) it can be
+# hours stale, and an empty view would read as "no lanes running".
+age_minutes() {
+  python3 - "$TU" <<'PY' 2>/dev/null || echo unknown
+import os, sys, time
+sys.path.insert(0, os.path.dirname(os.path.realpath(sys.argv[1])))
+import token_usage as tu
+path = tu.Store(tu.load_config()).state_path
+print(int((time.time() - os.stat(path).st_mtime) // 60))
+PY
+}
+if $fresh; then "$TU" scan > /dev/null; fi
+age="$(age_minutes)"
+if [ "$age" = unknown ]; then
+  stale_note="store never scanned on this host: run with --fresh (and enable the cron row)"
+elif [ "$age" -gt 20 ]; then
+  stale_note="store last scanned ${age} min ago: numbers are that old; run with --fresh, and check the token-tripwire cron row (install-token-tripwire --enable)"
+else
+  stale_note=""
+fi
+scan=(--no-scan)  # scanned just above when --fresh
 sessions=("$TU" sessions "${scan[@]}")
 [ -n "$project" ] && sessions+=(--project "$project")
 totals=("$TU" totals --no-scan)
@@ -63,10 +85,20 @@ out = {}
 for name in names:
     with open(os.path.join(sys.argv[1], name)) as stream:
         out[name] = json.load(stream)
-print(json.dumps(out, indent=1))' "$dir"
+age = sys.argv[2]
+out["store_age_minutes"] = None if age == "unknown" else int(age)
+out["stale_note"] = sys.argv[3] or None
+print(json.dumps(out, indent=1))' "$dir" "$age" "$stale_note"
+  [ -n "$stale_note" ] && echo "usage.sh: $stale_note" >&2
   exit 0
 fi
 
+if [ -n "$stale_note" ]; then
+  echo "!! $stale_note"
+  echo
+else
+  echo "(store scanned ${age} min ago)"
+fi
 echo "== Sessions, last 60 min${project:+ (project $project)} =="
 "${sessions[@]}"
 echo
