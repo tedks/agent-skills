@@ -577,7 +577,7 @@ class HarnessControl:
             _write(path, record)
             _write(active, {'operation_id': operation_id})
             try:
-                subprocess.Popen([sys.executable, str(Path(__file__).resolve()), '--observe', str(self.directory), operation_id],
+                subprocess.Popen(_observer_command(self.directory, operation_id),
                                  stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                                  start_new_session=True, close_fds=True)
             except OSError:
@@ -762,6 +762,12 @@ def _environment(identity):
     env.pop('SPAWN_TMUX_LABEL', None)
     env['SPAWN_TMUX_SOCKET'] = identity.socket
     return env
+
+
+def _observer_command(directory, operation_id):
+    """Re-enter this module through the same isolated Nix Python environment."""
+    return [sys.executable, '-I', '-m', 'harness_control', '--observe',
+            str(directory), operation_id]
 
 
 def observe(directory, operation_id):

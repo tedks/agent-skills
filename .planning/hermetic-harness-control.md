@@ -14,6 +14,7 @@ The active deployment scope is the three x86_64 Linux workstations that have Nix
 - [x] (2026-10-15 01:00Z) Created isolated `feat/hermetic-harness-control` worktrees in agent-skills and dotfiles and started the cross-repository tracker issue.
 - [x] (2026-10-15 01:24Z) Added the canonical runtime, protocol smoke test, mutation-tested behavior suites, and a locked `nixos-25.11` Nix package.
 - [x] (2026-10-15 01:24Z) Proved the packaged MCP handshake under hostile Python variables and PATH, with no mutable checkout reference or test-only scientific packages in its runtime closure.
+- [x] (2026-10-15 01:50Z) Addressed council round 1 findings with isolated Python launch, packaged Git, isolated observer re-entry, commit-addressed installation, and session-id path validation; convergence review remains.
 - [ ] Land the agent-skills PR, then pin that merged commit in dotfiles.
 - [ ] Add the dedicated-profile installer and change Claude/Codex registration to the stable packaged command.
 - [ ] Remove the superseded dotfiles runtime copy, update docs/tests, and prove install, upgrade, refusal, and rollback behavior.
@@ -32,6 +33,12 @@ The active deployment scope is the three x86_64 Linux workstations that have Nix
 
 - Observation: the inherited real-`/proc` parsing test assumed `/bin/sleep`, which does not exist in a pure Nix build sandbox.
   Evidence: the first stable-branch check failed at `subprocess.Popen` before the child started. The test now accepts a test-only sleep path, and the flake supplies coreutils' immutable executable.
+
+- Observation: the lifecycle code also invokes Git, and its detached observer originally re-entered the library through a bare interpreter path.
+  Evidence: council round 1 traced checkpoint verification to `subprocess.run(["git", ...])` and the observer to `sys.executable <module-file>`. A minimal client environment could therefore lose Git or Python dependency setup.
+
+- Observation: putting pinned Bash and Python on `PATH` was insufficient for the captured transport because several scripts used `/usr/bin/env` shebangs.
+  Evidence: the first private-tmux Nix check failed with `bad interpreter: No such file or directory`. The filtered transport tree is now copied to its own store output and `patchShebangs` binds every executable directly to the Nix interpreters.
 
 ## Decision Log
 
@@ -52,12 +59,20 @@ The active deployment scope is the three x86_64 Linux workstations that have Nix
   Date/Author: 2026-10-15, Codex.
 
 - Decision: Pin the package to the cached `nixos-25.11` nixpkgs branch rather than a four-day-old unstable revision or a local MCP override.
-  Rationale: the stable branch provides MCP 1.15, satisfying the declared API range, entirely from the binary cache with a 26.4 MiB unpacked dependency set on the development host. The unstable revision required local builds whose test-only dependency graphs reached SciPy. Consuming the cached upstream MCP output avoids both those build inputs and the maintenance risk of overriding dependency checks.
+  Rationale: the stable branch provides MCP 1.15, satisfying the declared API range, entirely from the binary cache. Its MCP dependency download was 4.7 MiB and added 26.4 MiB unpacked on the development host. The unstable revision required local builds whose test-only dependency graphs reached SciPy. Consuming the cached upstream MCP output avoids both those build inputs and the maintenance risk of overriding dependency checks.
+  Date/Author: 2026-10-15, Codex.
+
+- Decision: Launch both the MCP server and detached observer with the Nix Python in isolated mode, and include Git in the package's executable path.
+  Rationale: `python -I` ignores ambient Python configuration and user site packages. Re-entering the observer as an isolated module preserves the same dependency environment, while packaged Git makes checkpoint verification independent of the caller's PATH.
+  Date/Author: 2026-10-15, Codex.
+
+- Decision: Capture `skills/_shared` and only the five spawn-agent transport files reachable from `tmux-message.sh` in the runtime source tree.
+  Rationale: these are the canonical helpers and transport the server imports. Filtering at the Nix source boundary prevents unrelated skill edits from rebuilding the service or entering its closure while preserving one immutable revision for all runtime code.
   Date/Author: 2026-10-15, Codex.
 
 ## Outcomes & Retrospective
 
-The agent-skills package implementation is complete and its local gates pass. Its current closure is about 212 MiB on a clean host, dominated by a shared Nix Python/MCP runtime; the package itself does not embed a private interpreter archive. Cold MCP initialization and tool listing completed in 0.329 seconds on the development host. No runtime or fleet installation has changed yet.
+The agent-skills package implementation is complete and its local gates pass. Its current total closure is about 292 MiB, dominated by shared Nix Python/MCP and Git paths; the package itself does not embed a private interpreter archive. Cold MCP initialization and tool listing completed in 0.367 seconds on the development host. No runtime or fleet installation has changed yet.
 
 ## Context and Orientation
 
@@ -75,7 +90,7 @@ Add `flake.nix` and its generated `flake.lock`. The flake supports `x86_64-linux
 
 Move the runtime-focused tests from dotfiles into agent-skills and adapt only repository-relative paths. Add an artifact smoke test that uses the built executable and the MCP client to initialize the server and list tools under a private HOME. Prove the executable works with `uv` absent, a hostile `PYTHONPATH`, and the source checkout temporarily unavailable from the test's point of view. Run the existing identity, session-binding, Codex status, messaging, lifecycle, and mutation tests that cover the bundled boundary.
 
-After the agent-skills PR is reviewed and merged, update dotfiles `.agent-skills.ref` to the merged commit. Add `scripts/install/install-harness-control`. It resolves the existing clean pinned checkout, verifies Nix exists, installs `path:<checkout>#harness-control` into the dedicated profile, verifies the resulting executable and its MCP handshake, then atomically manages `~/.local/bin/harness-control`. A failed build, install, or smoke test must leave the prior profile generation and stable link usable.
+After the agent-skills PR is reviewed and merged, update dotfiles `.agent-skills.ref` to the merged commit. Add `scripts/install/install-harness-control`. It resolves the existing clean pinned checkout, verifies Nix exists, and installs `git+file://<checkout>?rev=<exact-commit>#harness-control` into the dedicated profile so only committed files enter the Nix source. It verifies the resulting executable and its MCP handshake, then atomically manages `~/.local/bin/harness-control`. A failed build, install, or smoke test must leave the prior profile generation and stable link usable.
 
 Change `scripts/install/install-claude-introspect` and the Codex registration in `scripts/install/install-codex-config` to register the stable executable with no `uv run --script` arguments. Preserve the current ownership checks for custom registrations. Add private-HOME installer tests for first install, idempotence, upgrade, failure preservation, absent Nix, foreign stable links, stale old registration migration, and exact registration output. Remove the old dotfiles runtime only after all tests consume the packaged source.
 
@@ -119,4 +134,4 @@ The agent-skills flake must expose `packages.x86_64-linux.harness-control`, `pac
 
 Dotfiles `scripts/install/install-harness-control` must accept no destructive default. It operates on the fixed dedicated profile, resolves agent-skills through the existing validated reference, and prints a distinct installed, unchanged, skipped, or failed result. Claude and Codex registration must have command `~/.local/bin/harness-control` expanded to an absolute path and an empty argument list.
 
-Revision note, 2026-10-15: initial plan written after the implementation ruling and fleet/Nix preflight. Updated after the first build exposed uncached unstable dependency tests; the lock now follows the cached stable branch.
+Revision note, 2026-10-15: initial plan written after the implementation ruling and fleet/Nix preflight. Updated after the first build exposed uncached unstable dependency tests, then after council round 1 exposed ambient Git/Python and local-path source boundaries.

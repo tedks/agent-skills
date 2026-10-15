@@ -11,25 +11,49 @@
       python = pkgs.python312;
       pythonPackages = pkgs.python312Packages;
       mcp = pythonPackages.mcp;
-      testPython = python.withPackages (_: [ mcp ]);
-      harnessControl = pythonPackages.buildPythonApplication {
+      packageVersion = (builtins.fromTOML (builtins.readFile ./harness-control/pyproject.toml)).project.version;
+      runtimeSkillsFiles = lib.fileset.toSource {
+        root = ./.;
+        fileset = lib.fileset.unions [
+          ./skills/_shared
+          ./skills/spawn-agent/scripts/claude-send-screen.py
+          ./skills/spawn-agent/scripts/tmux-ctx.sh
+          ./skills/spawn-agent/scripts/tmux-message.py
+          ./skills/spawn-agent/scripts/tmux-message.sh
+          ./skills/spawn-agent/scripts/tmux-resolve.sh
+        ];
+      };
+      harnessControlLibrary = pythonPackages.buildPythonPackage {
         pname = "agent-harness-control";
-        version = "0.1.0";
+        version = packageVersion;
         pyproject = true;
         src = ./harness-control;
 
         build-system = [ pythonPackages.setuptools ];
         dependencies = [ mcp ];
         doCheck = false;
-
-        makeWrapperArgs = [
-          "--set" "AGENT_SKILLS_ROOT" "${./skills}"
-          "--set" "PYTHONDONTWRITEBYTECODE" "1"
-          "--unset" "PYTHONHOME"
-          "--unset" "PYTHONPATH"
-          "--prefix" "PATH" ":" (lib.makeBinPath [ python pkgs.bash pkgs.coreutils ])
-        ];
-
+      };
+      runtimePython = python.withPackages (_: [ harnessControlLibrary ]);
+      runtimeInputs = [ runtimePython pkgs.bash pkgs.coreutils pkgs.gitMinimal ];
+      runtimePath = lib.makeBinPath runtimeInputs;
+      runtimeSkillsSource = pkgs.runCommand "harness-control-skills" {
+        nativeBuildInputs = runtimeInputs;
+      } ''
+        mkdir -p "$out"
+        cp -R ${runtimeSkillsFiles}/skills "$out/skills"
+        chmod -R u+w "$out/skills"
+        patchShebangs --build "$out/skills/spawn-agent/scripts"
+      '';
+      harnessControl = pkgs.writeShellApplication {
+        name = "harness-control";
+        inherit runtimeInputs;
+        text = ''
+          export AGENT_SKILLS_ROOT=${runtimeSkillsSource}/skills
+          export PYTHONDONTWRITEBYTECODE=1
+          export PYTHONNOUSERSITE=1
+          unset PYTHONHOME PYTHONPATH PYTHONPLATLIBDIR
+          exec ${runtimePython}/bin/python3 -I -m server "$@"
+        '';
         meta = {
           description = "Pinned self-status and lifecycle MCP server for terminal agents";
           license = lib.licenses.agpl3Only;
@@ -61,25 +85,47 @@
 
       checks.${system} = {
         harness-control-unit = pkgs.runCommand "harness-control-unit" {
-          nativeBuildInputs = [ testPython ];
+          nativeBuildInputs = [ runtimePython ];
         } ''
-          export AGENT_SKILLS_ROOT=${./skills}
+          export AGENT_SKILLS_ROOT=${runtimeSkillsSource}/skills
           export HARNESS_TEST_SLEEP=${lib.getExe' pkgs.coreutils "sleep"}
           export PYTHONDONTWRITEBYTECODE=1
           export PYTHONPATH=${./harness-control}
-          ${testPython}/bin/python3 ${./harness-control}/test_session_id.py
-          ${testPython}/bin/python3 ${./harness-control}/test_harness_tools.py
-          ${testPython}/bin/python3 ${./harness-control}/test_harness_lifecycle.py
-          ${testPython}/bin/python3 ${./harness-control}/test_harness_tools.py --mutation-check
-          ${testPython}/bin/python3 ${./harness-control}/test_harness_lifecycle.py --mutation-check
+          export PATH=${runtimePath}
+          ${runtimePython}/bin/python3 ${./harness-control}/test_session_id.py
+          ${runtimePython}/bin/python3 ${./harness-control}/test_harness_tools.py
+          ${runtimePython}/bin/python3 ${./harness-control}/test_harness_lifecycle.py
+          ${runtimePython}/bin/python3 ${./harness-control}/test_runtime.py
+          ${runtimePython}/bin/python3 ${./harness-control}/test_harness_tools.py --mutation-check
+          ${runtimePython}/bin/python3 ${./harness-control}/test_harness_lifecycle.py --mutation-check
           touch $out
         '';
 
         harness-control-package = pkgs.runCommand "harness-control-package" {
-          nativeBuildInputs = [ testPython ];
+          nativeBuildInputs = [ runtimePython ];
         } ''
-          ${testPython}/bin/python3 ${./harness-control}/test_package.py \
-            ${lib.getExe harnessControl}
+          ${runtimePython}/bin/python3 ${./harness-control}/test_package.py \
+            ${lib.getExe harnessControl} ${./harness-control}
+          set +e
+          AGENT_SKILLS_ROOT=${runtimeSkillsSource}/skills ${runtimePython}/bin/python3 -I -m harness_control
+          observer_status=$?
+          set -e
+          test "$observer_status" -eq 2
+          touch $out
+        '';
+
+        harness-control-transport = pkgs.runCommand "harness-control-transport" {
+          nativeBuildInputs = [ runtimePython pkgs.bash pkgs.coreutils pkgs.tmux ];
+        } ''
+          socket="$TMPDIR/tmux-server"
+          ${lib.getExe pkgs.tmux} -S "$socket" new-session -d -s harness-test \
+            "${lib.getExe pkgs.bash} -c 'printf \"transport-ready\\n\"; exec ${lib.getExe' pkgs.coreutils "sleep"} 30'"
+          pane=$(${lib.getExe pkgs.tmux} -S "$socket" display-message -p -t '=harness-test:0.0' '#{pane_id}')
+          output=$(AGENT_SKILLS_ROOT=${runtimeSkillsSource}/skills \
+            SPAWN_TMUX_SOCKET="$socket" \
+            ${runtimeSkillsSource}/skills/spawn-agent/scripts/tmux-message.sh read "$pane")
+          [[ "$output" == *transport-ready* ]]
+          ${lib.getExe pkgs.tmux} -S "$socket" kill-server
           touch $out
         '';
       };

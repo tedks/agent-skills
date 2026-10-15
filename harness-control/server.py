@@ -1,11 +1,4 @@
 #!/usr/bin/env python3
-# /// script
-# requires-python = ">=3.10"
-# # mcp 2.0 renamed FastMCP to MCPServer and changed other APIs (see
-# # https://py.sdk.modelcontextprotocol.io/v2/migration/); pin below 2 until
-# # this file is migrated.
-# dependencies = ["mcp>=1.2.0,<2"]
-# ///
 """Harness self status/control plus legacy Claude Code introspection MCP server.
 
 Provides tools for Claude Code to inspect its own session state:
@@ -20,8 +13,6 @@ Session state is written by the PreToolUse hook:
   ~/.claude/hooks/capture-session-state.sh
 which writes to:
   ~/.claude/session-state/<session-id>.json
-
-Claude session: 3735a547-8244-4da9-90fd-4bd8a0f6dd04
 """
 
 import asyncio
@@ -123,6 +114,7 @@ def _get_boot_id() -> str:
 # reporting no session, rather than answer null for a pointer ms from existing.
 POINTER_ATTEMPTS = 5
 POINTER_RETRY_DELAY = 0.1
+SESSION_ID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
 
 
 def _pointer_session(pid: int) -> str | None:
@@ -143,6 +135,8 @@ def _pointer_session(pid: int) -> str | None:
     if len(parts) != 3:
         return None
     session_id, starttime, boot_id = parts
+    if not SESSION_ID.fullmatch(session_id):
+        return None
     if starttime != _get_starttime(pid) or boot_id != _get_boot_id():
         return None
     return session_id
@@ -215,9 +209,13 @@ async def _get_session_id() -> str | None:
 
 def _read_session_state(session_id: str) -> dict:
     """Read the state file for a given session ID."""
+    if not SESSION_ID.fullmatch(session_id):
+        return {}
     state_file = SESSION_STATE_DIR / f"{session_id}.json"
-    if state_file.exists():
+    try:
         return json.loads(state_file.read_text())
+    except (OSError, ValueError):
+        pass
     return {}
 
 
@@ -588,6 +586,8 @@ async def branch_session(
     sid = session_id or await _get_session_id()
     if not sid:
         return {"error": "No session ID available. Is the session-state hook installed?"}
+    if not SESSION_ID.fullmatch(sid):
+        return {"error": f"Invalid session ID format: {sid}"}
 
     # Determine working directory
     if not working_dir:
@@ -609,10 +609,6 @@ async def branch_session(
                 tmux_target = f"claude:branch-{sid[:8]}"
         except (subprocess.TimeoutExpired, FileNotFoundError):
             return {"error": "tmux not available"}
-
-    # Validate session ID format (UUID) to reject anything unexpected
-    if not re.fullmatch(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", sid):
-        return {"error": f"Invalid session ID format: {sid}"}
 
     # Parse session:window from target
     parts = tmux_target.split(":", 1)
@@ -671,6 +667,8 @@ async def get_launch_dir(session_id: str | None = None) -> dict:
     sid = session_id or await _get_session_id()
     if not sid:
         return {"error": "No session ID available."}
+    if not SESSION_ID.fullmatch(sid):
+        return {"error": f"Invalid session ID format: {sid}"}
 
     state = _read_session_state(sid)
     if state.get("launch_dir"):

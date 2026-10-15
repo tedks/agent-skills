@@ -9,9 +9,6 @@ description = "Pinned self-status and lifecycle MCP server for terminal agents"
 requires-python = ">=3.10"
 dependencies = ["mcp>=1.2.0,<2"]
 
-[project.scripts]
-harness-control = "server:main"
-
 [tool.setuptools]
 py-modules = [
   "_skills_native",

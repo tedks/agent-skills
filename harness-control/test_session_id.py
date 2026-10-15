@@ -1,8 +1,4 @@
 #!/usr/bin/env python3
-# /// script
-# requires-python = ">=3.10"
-# dependencies = ["mcp[cli]>=1.2.0,<2"]
-# ///
 """Tests for how server.py resolves the current session id.
 
 Most cases fake the process tree (pid -> parent, comm, start time) and use a
@@ -41,9 +37,9 @@ class SessionIdTest(unittest.IsolatedAsyncioTestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         self.state = Path(self.tmp.name)
-        # python(100) -> uv(99) -> claude(98) -> bash(50) -> claude(40, a parent session)
+        # python(100) -> launcher(99) -> claude(98) -> bash(50) -> claude(40, parent)
         self.ppid = {100: 99, 99: 98, 98: 50, 50: 40, 40: 1}
-        self.comm = {100: "python3", 99: "uv", 98: "claude", 50: "bash", 40: "claude"}
+        self.comm = {100: "python3", 99: "launcher", 98: "claude", 50: "bash", 40: "claude"}
         self.start = {100: "9000", 99: "8000", 98: "7000", 50: "500", 40: "100"}
         for p in [
             mock.patch.object(server, "SESSION_STATE_DIR", self.state),

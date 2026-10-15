@@ -1,8 +1,4 @@
 #!/usr/bin/env python3
-# /// script
-# requires-python = ">=3.10"
-# dependencies = ["mcp[cli]>=1.2.0,<2"]
-# ///
 """Self-only MCP lifecycle binding tests; no terminal or harness is controlled."""
 import importlib.util
 import json

@@ -5,6 +5,7 @@ import asyncio
 import json
 import os
 from pathlib import Path
+import subprocess
 import sys
 import tempfile
 import time
@@ -35,11 +36,21 @@ async def probe(command: str) -> None:
         (hostile / "harness_identity.py").write_text(
             "raise AssertionError('ambient identity reader imported')\n"
         )
+        user_site = home / ".local" / "lib" / f"python{sys.version_info.major}.{sys.version_info.minor}" / "site-packages"
+        user_site.mkdir(parents=True)
+        (user_site / "harness_identity.py").write_text(
+            "raise AssertionError('user site identity reader imported')\n"
+        )
         env = {
             "HOME": str(home),
             "PATH": "/ambient-path-must-not-be-required",
             "PYTHONHOME": str(hostile),
             "PYTHONPATH": str(hostile),
+            "PYTHONPLATLIBDIR": "lib64",
+            "PYTHONWARNINGS": "error",
+            "PYTHONDEVMODE": "1",
+            "PYTHONINSPECT": "1",
+            "PYTHONSAFEPATH": "0",
             "AGENT_SKILLS_ROOT": str(hostile),
         }
         old_cwd = Path.cwd()
@@ -61,12 +72,30 @@ async def probe(command: str) -> None:
                                               if item.type == "text"))
                     if payload.get("state") != "unavailable":
                         raise AssertionError(payload)
+                    if payload.get("reason") != "no supported harness in process ancestry":
+                        raise AssertionError(payload)
         finally:
             os.chdir(old_cwd)
         print(f"package MCP probe passed in {time.monotonic() - started:.3f}s")
 
 
 if __name__ == "__main__":
-    if len(sys.argv) != 2 or not Path(sys.argv[1]).is_absolute():
-        raise SystemExit("usage: test_package.py /absolute/path/to/harness-control")
+    if len(sys.argv) != 3 or not all(Path(value).is_absolute() for value in sys.argv[1:]):
+        raise SystemExit("usage: test_package.py /absolute/harness-control /absolute/module-dir")
+    with tempfile.TemporaryDirectory(prefix="harness-control-negative-") as directory:
+        hostile = Path(directory)
+        (hostile / "harness_identity.py").write_text(
+            "raise AssertionError('ambient identity reader imported')\n"
+        )
+        negative_env = dict(
+            os.environ,
+            PYTHONPATH=os.pathsep.join((str(hostile), sys.argv[2])),
+            AGENT_SKILLS_ROOT=str(hostile),
+        )
+        negative = subprocess.run(
+            [sys.executable, "-m", "server"], env=negative_env,
+            input=b"", capture_output=True, timeout=10,
+        )
+        if negative.returncode == 0 or b"ambient identity reader imported" not in negative.stderr:
+            raise AssertionError("negative wrapper control did not detect ambient Python import")
     asyncio.run(probe(sys.argv[1]))

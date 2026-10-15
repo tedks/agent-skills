@@ -1,8 +1,4 @@
 #!/usr/bin/env python3
-# /// script
-# requires-python = ">=3.10"
-# dependencies = ["mcp[cli]>=1.2.0,<2"]
-# ///
 """MCP wiring tests: verified self identity, allowlisted results and unavailable data."""
 import asyncio
 import importlib.util
