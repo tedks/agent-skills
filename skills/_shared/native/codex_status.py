@@ -367,8 +367,7 @@ def _rollout_candidates(sessions: Path, now: datetime, max_files: int):
                 info = path.lstat()
                 if not stat.S_ISREG(info.st_mode) or info.st_mtime < cutoff:
                     continue
-                if not path.resolve().is_relative_to(sessions):
-                    continue
+                path.resolve().relative_to(sessions)  # ValueError when it escapes
             except (OSError, ValueError, RuntimeError):
                 continue
             found.append((info.st_mtime, path))
