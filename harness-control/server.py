@@ -319,12 +319,44 @@ async def get_status() -> dict:
         return {"state": "unavailable", "reason": str(exc)}
 
 
+def _observed(bucket):
+    """Parsed observed_at of a quota bucket, or None."""
+    from datetime import datetime
+    try:
+        stamp = bucket['observed_at']
+        parsed = datetime.fromisoformat(stamp.replace('Z', '+00:00'))
+        return parsed if parsed.tzinfo is not None else None
+    except (KeyError, TypeError, AttributeError, ValueError):
+        return None
+
+
+def _mark_superseded(session_buckets, account_buckets):
+    """Flag session buckets for which the account has a strictly newer observation."""
+    if not isinstance(session_buckets, dict):
+        return session_buckets
+    account_buckets = account_buckets if isinstance(account_buckets, dict) else {}
+    marked = {}
+    for key, bucket in session_buckets.items():
+        if isinstance(bucket, dict):
+            mine, latest = _observed(bucket), _observed(account_buckets.get(key) or {})
+            bucket = {**bucket, 'superseded': bool(mine and latest and latest > mine)}
+        marked[key] = bucket
+    return marked
+
+
 @mcp.tool()
 async def get_usage() -> dict:
     """Last observed provider quota buckets and reset times, never context tokens.
 
     Read-only file observation. Missing/expired meters are unknown. The source
     timestamp must accompany decisions; this is not a live provider query.
+
+    Codex: the bound session's own last observation (it goes stale when the
+    session is idle) plus ``account_latest``, the newest account-wide meter seen
+    in any recent rollout of this CODEX_HOME (no paths or session ids). A session
+    bucket carries ``superseded: true`` when account_latest holds a strictly
+    newer observation of the same limit_id. account_latest is returned even when
+    the session binding failed.
     """
     import time
     from harness_identity import IdentityError
@@ -337,8 +369,18 @@ async def get_usage() -> dict:
             return parse_claude_usage(snapshot, sid, now=time.time())
         state = binding.get('observation', {'state': 'unsupported', 'source': 'codex_rollout',
                                             'reason': binding.get('reason', 'native_binding_unavailable')})
-        return {key: value for key, value in state.items()
-                if key in ('state', 'reason', 'source', 'session_id', 'model_provider', 'quota_buckets', 'history_complete', 'read_window')}
+        result = {key: value for key, value in state.items()
+                  if key in ('state', 'reason', 'source', 'session_id', 'model_provider', 'quota_buckets', 'history_complete', 'read_window')}
+        codex_home = await asyncio.to_thread(codex_status.codex_home_for, identity.pid)
+        if codex_home is None:
+            latest = {'state': 'unavailable', 'source': 'codex_rollouts_newest',
+                      'reason': 'codex_home_unavailable'}
+        else:
+            latest = await asyncio.to_thread(codex_status.newest_account_quota, codex_home)
+        result['account_latest'] = latest
+        if 'quota_buckets' in result:
+            result['quota_buckets'] = _mark_superseded(result['quota_buckets'], latest.get('quota_buckets'))
+        return result
     except IdentityError as exc:
         return {"state": "unavailable", "reason": str(exc)}
 
