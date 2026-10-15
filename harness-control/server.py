@@ -319,12 +319,64 @@ async def get_status() -> dict:
         return {"state": "unavailable", "reason": str(exc)}
 
 
+def _observed(bucket):
+    """Parsed observed_at of a quota bucket, or None."""
+    from datetime import datetime
+    try:
+        stamp = bucket['observed_at']
+        parsed = datetime.fromisoformat(stamp.replace('Z', '+00:00'))
+        return parsed if parsed.tzinfo is not None else None
+    except (KeyError, TypeError, AttributeError, ValueError):
+        return None
+
+
+def _mark_superseded(session_buckets, account_latest):
+    """Flag session buckets against account_latest.
+
+    True when account_latest holds a strictly newer observation of the bucket
+    (a real observation, valid even if the account result is incomplete). False
+    only when account_latest is observed and complete, holds the bucket and the
+    timestamps are comparable. Otherwise None (unknown): account_latest not
+    observed, incomplete, bucket absent, or unparseable timestamps.
+    """
+    if not isinstance(session_buckets, dict):
+        return session_buckets
+    observed = isinstance(account_latest, dict) and account_latest.get('state') == 'observed'
+    account = account_latest.get('quota_buckets') if observed else None
+    complete = observed and account_latest.get('incomplete') is not True
+    marked = {}
+    for key, bucket in session_buckets.items():
+        if isinstance(bucket, dict):
+            flag = None
+            mine = _observed(bucket)
+            theirs = account.get(key) if isinstance(account, dict) else None
+            latest = _observed(theirs) if isinstance(theirs, dict) else None
+            if mine is not None and latest is not None:
+                flag = True if latest > mine else (False if complete else None)
+            bucket = {**bucket, 'superseded': flag}
+        marked[key] = bucket
+    return marked
+
+
 @mcp.tool()
 async def get_usage() -> dict:
     """Last observed provider quota buckets and reset times, never context tokens.
 
     Read-only file observation. Missing/expired meters are unknown. The source
     timestamp must accompany decisions; this is not a live provider query.
+
+    Codex: the bound session's own last observation (it goes stale when the
+    session is idle) plus ``account_latest``, the newest account-wide meter seen
+    in any recent rollout of this CODEX_HOME (no paths or session ids). A session
+    bucket carries ``superseded``: true when account_latest holds a strictly
+    newer observation of the same limit_id; false only when account_latest is
+    observed, complete and holds that bucket without a newer record; null
+    (unknown) when it is not observed or is incomplete, lacks the bucket, or
+    timestamps are unparseable. account_latest
+    is returned even when the session binding failed; it assumes one OpenAI
+    account per CODEX_HOME, may be ``incomplete`` (see newest_account_quota), and
+    covers only the session's buckets when the session has any (else only the
+    buckets seen).
     """
     import time
     from harness_identity import IdentityError
@@ -337,8 +389,25 @@ async def get_usage() -> dict:
             return parse_claude_usage(snapshot, sid, now=time.time())
         state = binding.get('observation', {'state': 'unsupported', 'source': 'codex_rollout',
                                             'reason': binding.get('reason', 'native_binding_unavailable')})
-        return {key: value for key, value in state.items()
-                if key in ('state', 'reason', 'source', 'session_id', 'model_provider', 'quota_buckets', 'history_complete', 'read_window')}
+        result = {key: value for key, value in state.items()
+                  if key in ('state', 'reason', 'source', 'session_id', 'model_provider', 'quota_buckets', 'history_complete', 'read_window')}
+        expected = list(result['quota_buckets']) if isinstance(result.get('quota_buckets'), dict) \
+            and result['quota_buckets'] else None
+        try:
+            codex_home = await asyncio.to_thread(codex_status.codex_home_for, identity.pid)
+            if codex_home is None:
+                latest = {'state': 'unavailable', 'source': 'codex_rollouts_newest',
+                          'reason': 'codex_home_unavailable'}
+            else:
+                latest = await asyncio.to_thread(
+                    lambda: codex_status.newest_account_quota(codex_home, expected_buckets=expected))
+        except Exception:  # never lose the session result to the account reader
+            latest = {'state': 'unavailable', 'source': 'codex_rollouts_newest',
+                      'reason': 'reader_failed'}
+        result['account_latest'] = latest
+        if 'quota_buckets' in result:
+            result['quota_buckets'] = _mark_superseded(result['quota_buckets'], latest)
+        return result
     except IdentityError as exc:
         return {"state": "unavailable", "reason": str(exc)}
 
