@@ -43,4 +43,8 @@ if PATH="$WORK/bin:$BASEPATH" "$HERE/usage.sh" --day 14-10-2026 2>/dev/null; the
 check "bad --day refused" [ "$rc" -eq 2 ]
 if PATH="$WORK/bin:$BASEPATH" "$HERE/usage.sh" --project 2>/dev/null; then rc=0; else rc=$?; fi
 check "--project without a value refused" [ "$rc" -eq 2 ]
+if PATH="$WORK/bin:$BASEPATH" "$HERE/usage.sh" --project --json 2>/dev/null; then rc=0; else rc=$?; fi
+check "an option is not taken as --project's value" [ "$rc" -eq 2 ]
+if PATH="$WORK/bin:$BASEPATH" "$HERE/usage.sh" --help 2>/dev/null; then rc=0; else rc=$?; fi
+check "--help exits 0" [ "$rc" -eq 0 ]
 exit "$fail"

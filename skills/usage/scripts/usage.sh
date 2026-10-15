@@ -4,17 +4,23 @@ set -euo pipefail
 
 usage() {
   echo "Usage: usage.sh [--project NAME] [--day YYYY-MM-DD] [--fresh] [--json]" >&2
-  exit 2
+  exit "${1:-2}"
+}
+value() {  # an option's value must exist and must not be another option
+  if [ $# -lt 2 ] || [ -z "$2" ] || [[ "$2" == -* ]]; then
+    echo "usage.sh: $1 needs a value" >&2
+    usage
+  fi
 }
 
 project="" day="" fresh=false json=false
 while [ $# -gt 0 ]; do
   case "$1" in
-    --project) [ $# -ge 2 ] || usage; project="$2"; shift 2 ;;
-    --day) [ $# -ge 2 ] || usage; day="$2"; shift 2 ;;
+    --project) value "$@"; project="$2"; shift 2 ;;
+    --day) value "$@"; day="$2"; shift 2 ;;
     --fresh) fresh=true; shift ;;
     --json) json=true; shift ;;
-    -h|--help) usage ;;
+    -h|--help) usage 0 ;;
     *) usage ;;
   esac
 done
@@ -43,14 +49,21 @@ totals=("$TU" totals --no-scan)
 [ -n "$day" ] && totals+=(--day "$day")
 
 if $json; then
-  s="$("${sessions[@]}" --json)"
-  p="$("${totals[@]}" --by project --json)"
-  m="$("${totals[@]}" --by model --json)"
-  q="$("$TU" meters --json)"
-  if [ -n "$TW" ]; then i="$("$TW" status --json)"; else i='null'; fi
-  python3 -c 'import json, sys
+  # Each view goes through a private file: outputs can exceed an argument's size limit.
+  dir="$(mktemp -d)"
+  trap 'rm -rf -- "$dir"' EXIT
+  "${sessions[@]}" --json > "$dir/sessions"
+  "${totals[@]}" --by project --json > "$dir/totals_project"
+  "${totals[@]}" --by model --json > "$dir/totals_model"
+  "$TU" meters --json > "$dir/meters"
+  if [ -n "$TW" ]; then "$TW" status --json > "$dir/incidents"; else echo null > "$dir/incidents"; fi
+  python3 -c 'import json, os, sys
 names = ("sessions", "totals_project", "totals_model", "meters", "incidents")
-print(json.dumps(dict(zip(names, (json.loads(a) for a in sys.argv[1:]))), indent=1))' "$s" "$p" "$m" "$q" "$i"
+out = {}
+for name in names:
+    with open(os.path.join(sys.argv[1], name)) as stream:
+        out[name] = json.load(stream)
+print(json.dumps(out, indent=1))' "$dir"
   exit 0
 fi
 
