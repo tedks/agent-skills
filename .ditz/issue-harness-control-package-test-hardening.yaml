@@ -37,3 +37,12 @@ log_events:
     retain an explicit hostile-PATH package probe. Item (2) was cheap and was fixed
     immediately in PR #2; keep the observer end-to-end coverage with the existing
     send-smoke and stronger negative-control work.'
+- time: 2026-10-15T01:56:48-00:00
+  who: Ted Smith
+  what: commented
+  comment: 'PR #3 preserved the full legacy lifecycle suite beside the packaged runtime.
+    Additional non-blocking council notes to include here: improve mutation-timeout
+    diagnostics, and assert that test/fixture files do not enter the installed Python
+    package.
+
+    '
