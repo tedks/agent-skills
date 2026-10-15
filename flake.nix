@@ -23,6 +23,15 @@
           ./skills/spawn-agent/scripts/tmux-resolve.sh
         ];
       };
+      nativeTestsSource = lib.fileset.toSource {
+        root = ./.;
+        fileset = lib.fileset.unions [
+          ./skills/_shared/agent_skills_config.py
+          ./skills/_shared/native
+          ./skills/retire-agent
+          ./tests/test_native_helpers.py
+        ];
+      };
       harnessControlLibrary = pythonPackages.buildPythonPackage {
         pname = "agent-harness-control";
         version = packageVersion;
@@ -95,6 +104,9 @@
           export PYTHONDONTWRITEBYTECODE=1
           export PYTHONPATH=${./harness-control}
           export PATH=${runtimePath}:${lib.getBin pkgs.tmux}/bin
+          cp -R ${nativeTestsSource} "$TMPDIR/native-tests"
+          chmod -R u+w "$TMPDIR/native-tests"
+          native_tests="$TMPDIR/native-tests"
           ${runtimePython}/bin/python3 ${./harness-control}/test_session_id.py
           ${runtimePython}/bin/python3 ${./harness-control}/test_harness_tools.py
           ${runtimePython}/bin/python3 ${./harness-control}/test_harness_lifecycle.py
@@ -106,6 +118,14 @@
           ${runtimePython}/bin/python3 ${./harness-control}/test_harness_control_core.py --mutation-check
           ${runtimePython}/bin/python3 ${./harness-control}/test_harness_status_live.py --mutation-check
           ${runtimePython}/bin/python3 ${./harness-control}/test_harness_control_core.py --live-integration
+          ${runtimePython}/bin/python3 "$native_tests/skills/_shared/native/tests/test-harness-identity.py"
+          ${runtimePython}/bin/python3 "$native_tests/skills/_shared/native/tests/test-harness-identity.py" --mutation-check
+          ${runtimePython}/bin/python3 "$native_tests/skills/_shared/native/tests/test-session-binding.py"
+          ${runtimePython}/bin/python3 "$native_tests/skills/_shared/native/tests/test-session-binding.py" --mutation-check
+          ${runtimePython}/bin/python3 "$native_tests/skills/_shared/native/tests/test-codex-status.py"
+          ${runtimePython}/bin/python3 "$native_tests/skills/_shared/native/tests/test-codex-status.py" --mutation-check
+          ${runtimePython}/bin/python3 "$native_tests/tests/test_native_helpers.py"
+          ${runtimePython}/bin/python3 "$native_tests/tests/test_native_helpers.py" --mutation-check
           touch $out
         '';
 
