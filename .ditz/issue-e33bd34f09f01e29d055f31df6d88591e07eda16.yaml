@@ -29,7 +29,7 @@ type: bugfix
 component: harness-control
 release:
 reporter: Ted Smith <tedks@riseup.net>
-status: unstarted
+status: in_progress
 disposition:
 creation_time: 2026-10-16T06:09:44-00:00
 references: []
@@ -37,4 +37,8 @@ log_events:
 - time: 2026-10-16T06:09:44-00:00
   who: Ted Smith
   what: created
+  comment: ""
+- time: 2026-10-16T06:09:48-00:00
+  who: Ted Smith
+  what: started
   comment: ""
