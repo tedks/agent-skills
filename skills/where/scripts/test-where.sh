@@ -228,4 +228,42 @@ check "past the stat bound, sizes are skipped and said so" grep -qi 'sizes skipp
 GIT_DIR="$PLAIN/.git" "$WHERE" --refresh "$PROJ/master" > "$WORK/oenv" 2> /dev/null
 check "GIT_DIR in the environment is ignored" grep -q "root: $PROJ\$" "$WORK/oenv"
 
+# --- council round 2 regressions ---
+
+# Flat repo: thousands of top-level files collapse into one line.
+FLAT="$HOME/Projects/flat"
+git init -q -b master "$FLAT"
+for i in $(seq 1 3000); do : > "$FLAT/f$i.txt"; done
+for i in $(seq 1 200); do mkdir -p "$FLAT/dir$i"; : > "$FLAT/dir$i/x"; done
+git -C "$FLAT" add -A; git -C "$FLAT" commit -q -m flat
+"$WHERE" "$FLAT" > "$WORK/oflat" 2> /dev/null
+check "flat repo output stays near 120 lines" test "$(wc -l < "$WORK/oflat")" -le 125
+check "excess top-level files collapse into one counted line" grep -Eq 'more top-level files.*git ls-files' "$WORK/oflat"
+check "excess top-level directories are capped with a notice" grep -Eq 'truncated.*(more )?(top-level )?director(y|ies).*git ls-files' "$WORK/oflat"
+check "plural of directory is right" not grep -q 'directorys' "$WORK/oflat"
+
+# Past WHERE_MAX_STAT, deleted tracked files are still dropped.
+DEL="$HOME/Projects/del"
+git init -q -b master "$DEL"
+echo a > "$DEL/keep.txt"; echo b > "$DEL/gone.txt"
+git -C "$DEL" add -A; git -C "$DEL" commit -q -m del
+rm "$DEL/gone.txt"
+WHERE_MAX_STAT=1 "$WHERE" --refresh "$DEL" > "$WORK/odel" 2> /dev/null
+check "past the stat bound, deleted tracked files are not listed" not grep -q gone.txt "$WORK/odel"
+check "past the stat bound, live files still are" grep -q keep.txt "$WORK/odel"
+
+# Bad numeric env: one line, exit 1.
+WHERE_GIT_TIMEOUT=abc "$WHERE" "$PLAIN" > /dev/null 2> "$WORK/eb1"; rc=$?
+check "non-numeric WHERE_GIT_TIMEOUT exits 1" test "$rc" -eq 1
+check "non-numeric WHERE_GIT_TIMEOUT is one line, no traceback" test "$(wc -l < "$WORK/eb1")" -eq 1
+WHERE_MAX_STAT=x "$WHERE" "$PLAIN" > /dev/null 2> "$WORK/eb2"; rc=$?
+check "non-numeric WHERE_MAX_STAT exits 1" test "$rc" -eq 1
+check "non-numeric WHERE_MAX_STAT is one line, no traceback" test "$(wc -l < "$WORK/eb2")" -eq 1
+
+# A ~~~ fence is not closed by a ``` line.
+printf '# A\n\n## Structure\n~~~\n```\n## inside\n~~~\nafter-tilde\n\n## Next\n' > "$H/AGENTS.md"
+rm -f "$H/CLAUDE.md"
+"$WHERE" --refresh "$H" > "$WORK/oh4" 2> /dev/null
+check "fence closes only on its own type" grep -q after-tilde "$WORK/oh4"
+
 exit "$fail"
