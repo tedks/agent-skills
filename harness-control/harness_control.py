@@ -451,11 +451,14 @@ def _wait_idle(record, identity, observer_deadline, focus_after=None, sends=1, o
             last = {'state': 'unknown', 'reason': 'native_idle_evidence_unavailable'}
         if (record.get('action') == 'compact' and focus_after is None and operation_path is not None and
                 last.get('turns_seen', 0) > observed_turns):
-            record['idle_rearms'] = record.get('idle_rearms', 0) + last['turns_seen'] - observed_turns
-            observed_turns = last['turns_seen']
-            record['deadline'] = time.time() + record['idle_bound_seconds']
-            observer_deadline = time.monotonic() + record['idle_bound_seconds']
-            _write(operation_path, record)
+            with _guard(operation_path.parent):
+                if _read(operation_path)['state'] != 'waiting_idle':
+                    return {'state': 'cancelled', 'reason': 'cancelled_before_dispatch'}
+                record['idle_rearms'] = record.get('idle_rearms', 0) + last['turns_seen'] - observed_turns
+                observed_turns = last['turns_seen']
+                record['deadline'] = time.time() + record['idle_bound_seconds']
+                observer_deadline = time.monotonic() + record['idle_bound_seconds']
+                _write(operation_path, record)
         if last['state'] == 'idle':
             return last
         remaining = observer_deadline - reserve - time.monotonic()
@@ -878,14 +881,23 @@ def _claim_dispatch(directory, path, record):
 def _reserve_compact_dispatch(path, record, *, command):
     """Start sender/confirmation time only after the required native idle."""
     seconds = SEND_BUDGET + PREFLIGHT_BUDGET + (COMPACT_WATCH if command else 0)
-    record['deadline'] = time.time() + seconds
-    _write(path, record)
+    with _guard(path.parent):
+        if _read(path)['state'] not in ('waiting_idle', 'dispatching'):
+            return None
+        record['deadline'] = time.time() + seconds
+        _write(path, record)
     return time.monotonic() + seconds
+
+
+def _definitely_not_dispatched(delivery):
+    return (delivery.get('state') == 'not_dispatched' or
+            (delivery.get('state') == 'deferred' and delivery.get('input_attempted') is not True and
+             delivery.get('needs_review') is not True))
 
 
 def _failure_notice(directory, path, record, identity):
     """One visible best-effort failure receipt; never claim an ambiguous send failed."""
-    if (record['action'] != 'compact' or record.get('delivery', {}).get('state') != 'not_dispatched' or
+    if (record['action'] != 'compact' or not _definitely_not_dispatched(record.get('delivery', {})) or
             record['state'] != 'warning_dispatching' or
             record.get('failure_notice', {}).get('state') is not None):
         return
@@ -927,6 +939,8 @@ def _observe(directory, operation_id, record):
         if record.get('focus'):
             if record['action'] == 'compact':
                 observer_deadline = _reserve_compact_dispatch(path, record, command=False)
+                if observer_deadline is None:
+                    return
             if not _claim_dispatch(directory, path, record):
                 return
             record['focus_after'] = _baseline(record['transcript_path'])['offset']
@@ -949,6 +963,8 @@ def _observe(directory, operation_id, record):
         verify_pane(identity)
         if record['action'] == 'compact':
             observer_deadline = _reserve_compact_dispatch(path, record, command=True)
+            if observer_deadline is None:
+                return
             record['baseline'] = _baseline(record['transcript_path'])
             record['pane_baseline'] = _pane_marker(identity)
         if record['state'] == 'waiting_idle' and not _claim_dispatch(directory, path, record):
@@ -1025,7 +1041,7 @@ def _observe(directory, operation_id, record):
         _settle_dispatches(record, 'observer_interrupted_during_dispatch')
         record.update(updated_at=time.time())
         needs_notice = (record['action'] == 'compact' and
-                        record.get('delivery', {}).get('state') == 'not_dispatched' and
+                        _definitely_not_dispatched(record.get('delivery', {})) and
                         record['state'] in ('deferred', 'failed', 'timed_out'))
         if needs_notice:
             record['pending_final_state'] = record['state']

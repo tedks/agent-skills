@@ -355,6 +355,8 @@ class ControlTests(unittest.TestCase):
         oid = self.request(timeout_seconds=30)
         path = self.control.directory / (oid + '.json')
         record = h._read(path)
+        record['state'] = 'waiting_idle'
+        h._write(path, record)
         first_deadline = record['deadline']
         self.native_idle.side_effect = [
             {'state': 'busy_or_unknown', 'turns_seen': 1},
@@ -365,6 +367,30 @@ class ControlTests(unittest.TestCase):
         self.assertEqual(1, record['idle_rearms'])
         self.assertGreater(record['deadline'], first_deadline)
         self.assertEqual(1, h._read(path)['idle_rearms'])
+
+    def test_cancellation_during_idle_rearm_cannot_restore_waiting_state(self):
+        oid = self.request(timeout_seconds=30)
+        path = self.control.directory / (oid + '.json')
+        record = h._read(path)
+        record['state'] = 'waiting_idle'
+        h._write(path, record)
+        def cancel_then_report_turn(*args):
+            self.control.cancel(oid)
+            return {'state': 'busy_or_unknown', 'turns_seen': 1}
+        self.native_idle.side_effect = cancel_then_report_turn
+        result = h._wait_idle(record, self.identity, time.monotonic() + 30, operation_path=path)
+        self.assertEqual('cancelled', result['state'])
+        self.assertEqual('cancelled', h._read(path)['state'])
+
+    def test_cancellation_before_sender_reservation_prevents_dispatch(self):
+        oid = self.request(timeout_seconds=30)
+        path = self.control.directory / (oid + '.json')
+        record = h._read(path)
+        record['state'] = 'waiting_idle'
+        h._write(path, record)
+        self.control.cancel(oid)
+        self.assertIsNone(h._reserve_compact_dispatch(path, record, command=True))
+        self.assertEqual('cancelled', h._read(path)['state'])
 
     def test_focus_waits_for_new_completed_turn(self):
         oid = self.request(focus='focus')
@@ -1084,17 +1110,23 @@ class ControlTests(unittest.TestCase):
     def test_deferred_stderr_and_ambiguous_never_replayed(self):
         oid = self.request()
         def deferred(args):
+            if self.sent[-1].startswith('COMPACTION NOT DISPATCHED:'):
+                return subprocess.CompletedProcess(args, 0, json.dumps({'status': 'delivered', 'receipt': 'queued', 'pane': '%999'}), '')
             return subprocess.CompletedProcess(args, 2, '', json.dumps({'status': 'deferred', 'paste_attempted': False, 'input_attempted': False, 'reason': 'existing-input'}))
         result = self.observe(oid, deferred)
         self.assertEqual('deferred', result['state'])
         self.assertEqual('not_started', result['completion']['state'])
+        self.assertEqual('delivered', result['failure_notice']['state'])
+        self.assertEqual(1, sum(message.startswith('COMPACTION NOT DISPATCHED:') for message in self.sent))
+        self.sent.clear()
         oid = self.request()
         def ambiguous(args):
             return subprocess.CompletedProcess(args, 3, '', json.dumps({'status': 'ambiguous', 'paste_attempted': True, 'pending_file': '/private/pending'}))
         result = self.observe(oid, ambiguous)
         self.assertEqual('ambiguous', result['delivery']['state'])
         self.assertEqual('/private/pending', result['delivery']['pending_file'])
-        self.assertEqual(['/compact', '/compact'], self.sent)
+        self.assertEqual(['/compact'], self.sent)
+        self.assertIsNone(result['failure_notice'])
 
     def test_plain_exit_zero_and_wrong_pane_not_delivery(self):
         for response in ({'status': 'delivered', 'receipt': 'queued', 'pane': '%1'}, {'status': 'delivered'}):
