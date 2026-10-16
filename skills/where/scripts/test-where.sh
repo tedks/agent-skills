@@ -12,7 +12,7 @@ export GIT_AUTHOR_NAME=t GIT_AUTHOR_EMAIL=t@example.com GIT_COMMITTER_NAME=t GIT
 mkdir -p "$HOME/Projects"
 fail=0
 check() { local what="$1"; shift; if "$@"; then echo "ok   $what"; else echo "FAIL $what"; fail=1; fi; }
-not() { ! "$@"; }  # shellcheck disable=SC2329
+not() { ! "$@"; }
 
 # Bare-repo + worktrees layout: $HOME/Projects/proj/{.git,master,feat}
 SEED="$WORK/seed"
