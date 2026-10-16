@@ -44,7 +44,7 @@ git -C "$PROJ/.git" worktree add -q -b feat "$PROJ/feat" master
 mkdir -p "$PROJ/master/node_modules/dep"
 echo x > "$PROJ/master/node_modules/dep/index.js"
 
-cd "$PROJ/master"
+cd "$PROJ/master" || exit 1
 "$WHERE" > "$WORK/out" 2> "$WORK/err"
 check "names the project root" grep -q "root: $PROJ\$" "$WORK/out"
 check "lists worktrees of a bare layout" grep -q "$PROJ/feat" "$WORK/out"
@@ -74,7 +74,7 @@ check "a new HEAD invalidates the cache" not grep -qi 'cached' "$WORK/err5"
 check "the rebuilt map sees the new file's directory size" grep -q 'docs/' "$WORK/out5"
 
 # Path argument from an unrelated cwd
-cd "$WORK"
+cd "$WORK" || exit 1
 "$WHERE" "$PROJ/feat" > "$WORK/out6" 2> /dev/null
 check "path argument selects that worktree" grep -q "worktree: $PROJ/feat" "$WORK/out6"
 
@@ -126,10 +126,8 @@ check "spaces: run from a subdirectory maps the worktree" grep -q "worktree: $SP
 
 # Refusal at broad roots (exit 2 with a hint, nothing mapped)
 for broad in "$HOME" "$HOME/Projects" / /tmp; do
-  set +e
   "$WHERE" "$broad" > "$WORK/o" 2> "$WORK/e"
   rc=$?
-  set -e
   check "refuses $broad with exit 2" test "$rc" -eq 2
   check "refusal of $broad carries a hint" grep -qi 'broad' "$WORK/e"
   check "refusal of $broad maps nothing" test ! -s "$WORK/o"
@@ -143,5 +141,91 @@ mkdir -p "$WORK/notgit"
 "$WHERE" "$WORK/notgit" > /dev/null 2> "$WORK/e"
 rc=$?
 check "a non-git directory exits 2" test "$rc" -eq 2
+
+# --- council round 1 regressions ---
+
+# Symlinked AGENTS.md pointing outside the project must not be read.
+SYM="$HOME/Projects/sym"
+git init -q -b master "$SYM"
+printf '## Project structure\nTOPSECRET-OUTSIDE\n' > "$WORK/outside.md"
+ln -s "$WORK/outside.md" "$SYM/AGENTS.md"
+echo x > "$SYM/f"
+git -C "$SYM" add -A
+git -C "$SYM" commit -q -m sym
+"$WHERE" "$SYM" > "$WORK/osym" 2> /dev/null
+check "symlink outside the project is not read" not grep -q TOPSECRET "$WORK/osym"
+check "symlink outside the project is called out" grep -qi 'outside the project' "$WORK/osym"
+
+# Worktree added without HEAD moving invalidates the cache.
+"$WHERE" --refresh "$PROJ" > /dev/null 2>&1
+"$WHERE" "$PROJ" > /dev/null 2> "$WORK/ec1"
+check "baseline: root map is cached" grep -qi cached "$WORK/ec1"
+git -C "$PROJ/.git" worktree add -q "$PROJ/extra" -b extra master
+"$WHERE" "$PROJ" > "$WORK/oc2" 2> "$WORK/ec2"
+check "adding a worktree invalidates the cache" not grep -qi cached "$WORK/ec2"
+check "the new worktree is listed" grep -q "$PROJ/extra" "$WORK/oc2"
+
+# Cache identity includes the git common dir.
+CF=$(find "$XDG_CACHE_HOME/where" -type f -name "*proj_master*" | head -1)
+"$WHERE" "$PROJ/master" > /dev/null 2>&1
+CF=$(find "$XDG_CACHE_HOME/where" -type f -name "*proj_master*" | head -1)
+check "cache header records the common dir" grep -q "$PROJ/.git" "$CF"
+sed -i "1s|common=[^ ]*|common=/elsewhere/.git|" "$CF"
+"$WHERE" "$PROJ/master" > /dev/null 2> "$WORK/ec3"
+check "a different common dir in the cache is a miss" not grep -qi cached "$WORK/ec3"
+
+# Files directly inside a top-level dir are shown; singular wording.
+check "files directly inside a top-level dir are shown" grep -q 'blob.bin' "$WORK/out"
+check "header says untracked dirs are excluded" grep -qi 'untracked' "$WORK/out"
+
+# Every top-level entry survives truncation; truncation names the command.
+check "every top-level entry is printed (d1 and d80)" bash -c "grep -q ' d1/' '$WORK/out11' && grep -q ' d80/' '$WORK/out11'"
+check "truncation line names the full-content command" grep -Eq 'truncated.*(git ls-files|git worktree list)' "$WORK/out11"
+
+# Root mode lists many worktrees.
+MANY="$HOME/Projects/many"
+mkdir -p "$MANY"
+git clone -q --bare "$SEED" "$MANY/.git"
+for i in $(seq 1 40); do git -C "$MANY/.git" worktree add -q -b "b$i" "$MANY/w$i" master; done
+"$WHERE" "$MANY" > "$WORK/oman" 2> /dev/null
+check "root mode lists all 40 worktrees" test "$(grep -c "$MANY/w" "$WORK/oman")" -eq 40
+
+# Heading variants, code fences, CLAUDE.md fallback.
+H="$HOME/Projects/heads"
+git init -q -b master "$H"
+printf '# A\n\n## Structure\n\n```\n## not a heading\n```\nafter fence\n\n## Next\nx\n' > "$H/AGENTS.md"
+git -C "$H" add -A; git -C "$H" commit -q -m h
+"$WHERE" "$H" > "$WORK/oh" 2> /dev/null
+check "'## Structure' is accepted" grep -q 'after fence' "$WORK/oh"
+check "a ## inside a code fence does not end the section" not grep -q '^x$' "$WORK/oh"
+printf '# A\n\n## repository LAYOUT\n\nlayout-body\n' > "$H/AGENTS.md"
+"$WHERE" --refresh "$H" > "$WORK/oh2" 2> /dev/null
+check "case-insensitive 'repository layout' accepted" grep -q layout-body "$WORK/oh2"
+printf '# A\n\n## Other\n' > "$H/AGENTS.md"
+printf '## Project structure\n\nclaude-fallback\n' > "$H/CLAUDE.md"
+"$WHERE" --refresh "$H" > "$WORK/oh3" 2> /dev/null
+check "AGENTS.md lacking the section falls through to CLAUDE.md" grep -q claude-fallback "$WORK/oh3"
+
+# Failure modes: no traceback, one-line message, nonzero.
+mkdir -p "$WORK/fakebin"
+cat > "$WORK/fakebin/git" <<'FAKE'
+#!/bin/sh
+case "$*" in *ls-files*) sleep 5 ;; esac
+exec /usr/bin/git "$@"
+FAKE
+chmod +x "$WORK/fakebin/git"
+WHERE_GIT_TIMEOUT=1 PATH="$WORK/fakebin:$PATH" "$WHERE" --refresh "$PLAIN" > /dev/null 2> "$WORK/etm"
+rc=$?
+check "git timeout exits nonzero" test "$rc" -ne 0
+check "git timeout prints no traceback" not grep -q Traceback "$WORK/etm"
+check "git timeout prints a one-line message" test "$(wc -l < "$WORK/etm")" -eq 1
+
+# Size work is bounded.
+WHERE_MAX_STAT=3 "$WHERE" --refresh "$BIG" > "$WORK/obs" 2> /dev/null
+check "past the stat bound, sizes are skipped and said so" grep -qi 'sizes skipped' "$WORK/obs"
+
+# Inherited git env must not redirect the map.
+GIT_DIR="$PLAIN/.git" "$WHERE" --refresh "$PROJ/master" > "$WORK/oenv" 2> /dev/null
+check "GIT_DIR in the environment is ignored" grep -q "root: $PROJ\$" "$WORK/oenv"
 
 exit "$fail"
