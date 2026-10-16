@@ -447,13 +447,17 @@ def _own_control(require_transcript=False):
 
 
 def _control_call(method, *args, require_transcript=False, **kwargs):
-    from harness_control import ControlError
+    from harness_control import ControlError, OperationInProgress
     from harness_identity import IdentityError
     try:
         control = _own_control(require_transcript=require_transcript)
         return getattr(control, method)(*args, **kwargs)
     except IdentityError as exc:
         return {'state': 'unavailable', 'reason': str(exc)}
+    except OperationInProgress as exc:
+        return {'state': 'refused', 'reason': 'operation_in_progress',
+                'blocking_operation_id': exc.operation_id,
+                'blocking_state': exc.state, 'next_action': exc.next_action}
     except ControlError as exc:
         return {'state': 'refused', 'reason': str(exc)}
     except (OSError, ValueError, TypeError, KeyError):
@@ -491,8 +495,8 @@ async def self_compact(checkpoint_path: str, checkpoint_receipt: str,
     The native idle bound defaults to 3600 seconds and accepts 30 to 7200.
     Focus, when present, starts a fresh idle bound after its own turn. Sender
     and compaction confirmation time are separate from that bound. A new
-    operator turn cancels the scheduled command and emits one visible notice;
-    a peer compaction observed during the bounded follow-up sends continuation.
+    native root input turn cancels the scheduled command and emits one visible
+    notice. A peer compaction observed before cancellation sends continuation.
     The detached observer waits for native idle, then sends one ordinary
     CONTINUE with the verified shard path and optional continuation text only
     after a new transcript boundary AND fresh pane completion evidence
@@ -502,6 +506,8 @@ async def self_compact(checkpoint_path: str, checkpoint_receipt: str,
     was delivered without confirmed completion, it records unconfirmed with
     the delivery receipt, emits one notice, and never retries or continues.
     No event means no re-prompt; a peer may deliberately resume the session.
+    Tmux-delivered root input has no authenticated sender provenance, so a peer
+    message can also trigger cancellation.
     Delivery, compaction witness and continuation receipt remain separate.
     """
     return await asyncio.to_thread(_control_call, 'request', 'compact',
@@ -563,9 +569,9 @@ async def get_operation(operation_id: str) -> dict:
 
 @mcp.tool()
 async def cancel_operation(operation_id: str) -> dict:
-    """Cancel while accepted or waiting idle, BEFORE input dispatch.
+    """Cancel before slash input dispatch, including warning/watching states.
 
-    Once dispatch starts cancellation is refused, even before completion.
+    Once slash dispatch starts cancellation is refused, even before completion.
     Cancelled operations are never replayed by the observer.
     """
     return await asyncio.to_thread(_control_call, 'cancel', operation_id)

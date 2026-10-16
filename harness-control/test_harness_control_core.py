@@ -1099,6 +1099,135 @@ class ControlTests(unittest.TestCase):
         row['state'] = 'dispatching'
         h._write(path, row)
         self.assertEqual('refused', self.control.cancel(oid)['state'])
+        with self.assertRaisesRegex(h.OperationInProgress, f'operation_in_progress:{oid}:dispatching; get_operation'):
+            self.request('send', text='next')
+
+    def test_incident_warning_can_be_cancelled_and_replaced(self):
+        incident = json.loads((MODULE.parent / 'fixtures/compact-stale-cancel.json').read_text())
+        oid = self.request()
+        path = self.control.directory / (oid + '.json')
+        record = h._read(path)
+        record.update({key: value for key, value in incident.items() if key != 'operation_id'})
+        h._write(path, record)
+        lease = os.open(self.control.directory / '.worker', os.O_RDWR)
+        try:
+            h.fcntl.flock(lease, h.fcntl.LOCK_EX)
+            with self.assertRaisesRegex(h.OperationInProgress, f'operation_in_progress:{oid}:warning_dispatching; cancel_operation'):
+                self.request('send', text='next')
+            cancelled = self.control.cancel(oid)
+            self.assertEqual('cancelled', cancelled['state'])
+            self.assertEqual('explicit_cancel', cancelled['reason'])
+            self.assertEqual('not_dispatched', cancelled['delivery']['state'])
+        finally:
+            os.close(lease)
+        self.assertEqual('cancelled', self.control.operation(oid)['state'])
+        self.request('send', text='next')
+
+    def test_incident_warning_without_observer_settles_and_releases_session(self):
+        incident = json.loads((MODULE.parent / 'fixtures/compact-stale-cancel.json').read_text())
+        oid = self.request()
+        path = self.control.directory / (oid + '.json')
+        record = h._read(path)
+        record.update({key: value for key, value in incident.items() if key != 'operation_id'})
+        h._write(path, record)
+        settled = self.control.operation(oid)
+        self.assertEqual('cancelled', settled['state'])
+        self.assertEqual('intervening_turn', settled['reason'])
+        self.assertIsInstance(settled.get('failure_notice'), dict)
+        self.assertEqual('unavailable', settled['failure_notice']['state'])
+        self.assertEqual('cancelled', self.control.cancel(oid)['state'])
+        self.request('send', text='next')
+
+    def test_watching_other_can_be_cancelled_before_dispatch(self):
+        oid = self.request()
+        path = self.control.directory / (oid + '.json')
+        record = h._read(path)
+        record.update(state='watching_other', reason='intervening_turn',
+                      completion={'state': 'not_started'})
+        h._write(path, record)
+        lease = os.open(self.control.directory / '.worker', os.O_RDWR)
+        try:
+            h.fcntl.flock(lease, h.fcntl.LOCK_EX)
+            self.assertEqual('cancelled', self.control.cancel(oid)['state'])
+        finally:
+            os.close(lease)
+        self.request('send', text='next')
+
+    def test_explicit_cancel_during_notice_preserves_reason_and_notice_receipt(self):
+        oid = self.request()
+        path = self.control.directory / (oid + '.json')
+        record = h._read(path)
+        record.update(state='warning_dispatching', pending_final_state='cancelled',
+                      reason='intervening_turn', turns_seen=1,
+                      completion={'state': 'not_started'})
+        h._write(path, record)
+        def send(*_args):
+            self.assertEqual('cancelled', self.control.cancel(oid)['state'])
+            return {'state': 'delivered', 'receipt': 'queued'}
+        lease = os.open(self.control.directory / '.worker', os.O_RDWR)
+        try:
+            h.fcntl.flock(lease, h.fcntl.LOCK_EX)
+            with patch.object(h, '_send', side_effect=send):
+                h._failure_notice(self.control.directory, path, record, self.identity)
+        finally:
+            os.close(lease)
+        settled = self.control.operation(oid)
+        self.assertEqual('cancelled', settled['state'])
+        self.assertEqual('explicit_cancel', settled['reason'])
+        self.assertEqual('delivered', settled['failure_notice']['state'])
+        self.assertEqual('cancelled', self.control.cancel(oid)['state'])
+        self.request('send', text='next')
+
+    def test_explicit_cancel_before_notice_intent_is_not_overwritten(self):
+        oid = self.request()
+        path = self.control.directory / (oid + '.json')
+        record = h._read(path)
+        record.update(state='warning_dispatching', pending_final_state='cancelled',
+                      reason='intervening_turn', turns_seen=1,
+                      completion={'state': 'not_started'})
+        h._write(path, record)
+        lease = os.open(self.control.directory / '.worker', os.O_RDWR)
+        try:
+            h.fcntl.flock(lease, h.fcntl.LOCK_EX)
+            self.assertEqual('cancelled', self.control.cancel(oid)['state'])
+            with patch.object(h, '_send', return_value={'state': 'delivered', 'receipt': 'queued'}) as send:
+                h._failure_notice(self.control.directory, path, record, self.identity)
+            send.assert_not_called()
+        finally:
+            os.close(lease)
+        settled = self.control.operation(oid)
+        self.assertEqual('cancelled', settled['state'])
+        self.assertEqual('explicit_cancel', settled['reason'])
+        self.request('send', text='next')
+
+    def test_cancelled_operation_with_lost_observer_marks_notice_unavailable(self):
+        oid = self.request()
+        path = self.control.directory / (oid + '.json')
+        record = h._read(path)
+        record.update(state='cancelled', reason='intervening_turn',
+                      completion={'state': 'not_started'})
+        h._write(path, record)
+        result = self.control.operation(oid)
+        self.assertEqual('cancelled', result['state'])
+        self.assertIsInstance(result.get('failure_notice'), dict)
+        self.assertEqual('unavailable', result['failure_notice']['state'])
+        self.assertEqual('observer_disappeared_before_notice', result['failure_notice']['reason'])
+        self.request('send', text='next')
+
+    def test_cancelled_operation_with_lost_observer_marks_notice_ambiguous(self):
+        oid = self.request()
+        path = self.control.directory / (oid + '.json')
+        record = h._read(path)
+        record.update(state='cancelled', reason='explicit_cancel',
+                      completion={'state': 'cancelled'},
+                      failure_notice={'state': 'dispatching'})
+        h._write(path, record)
+        result = self.control.operation(oid)
+        self.assertEqual('cancelled', result['state'])
+        self.assertEqual('explicit_cancel', result['reason'])
+        self.assertEqual('ambiguous', result['failure_notice']['state'])
+        self.assertTrue(result['failure_notice']['needs_review'])
+        self.request('send', text='next')
 
     def test_aliases_and_other_commands(self):
         for text in ('/compact', '/compa', '/c', '/COM arg', '/exi', '/e', '/qui', '/qu reason', '/exit reason', ' \n /QUIT', '/q', 'hello\n/exit', '/ｅｘｉｔ', 'hello\r/exit', '\x1bexit'):
@@ -1146,11 +1275,11 @@ class ControlTests(unittest.TestCase):
         self.assertEqual('completed_by_other', result['state'])
         self.assertTrue(result['completion']['by_other'])
         self.assertEqual('delivered', result['continuation']['state'])
-        self.assertEqual(1, sum(message.startswith('COMPACTION CANCELLED:') for message in self.sent))
+        self.assertEqual(0, sum(message.startswith('COMPACTION CANCELLED:') for message in self.sent))
         self.assertEqual(1, sum(message.startswith('CONTINUE:') for message in self.sent))
         self.assertNotIn('/compact', self.sent)
 
-    def test_compaction_event_after_cancellation_notice_continues_by_other(self):
+    def test_compaction_event_after_cancellation_notice_does_not_reopen_cancel(self):
         self.rows(*self.claude_idle_rows('before'))
         oid = self.request(timeout_seconds=30)
         self.rows(*self.claude_idle_rows('after'))
@@ -1160,29 +1289,29 @@ class ControlTests(unittest.TestCase):
                 self.event()
             return subprocess.CompletedProcess(args, 0, json.dumps({'status': 'delivered', 'receipt': 'queued', 'pane': '%999'}), '')
         result = self.observe(oid, send)
-        self.assertEqual('completed_by_other', result['state'])
-        self.assertEqual(1, sum(message.startswith('CONTINUE:') for message in self.sent))
+        self.assertEqual('cancelled', result['state'])
+        self.assertEqual('delivered', result['failure_notice']['state'])
+        self.assertEqual(0, sum(message.startswith('CONTINUE:') for message in self.sent))
         self.assertNotIn('/compact', self.sent)
+        self.request('send', text='next')
 
-    def test_intervening_watch_blocks_new_operation_until_final_cancel(self):
+    def test_intervening_cancel_reaches_terminal_after_notice(self):
         self.rows(*self.claude_idle_rows('before'))
         oid = self.request(timeout_seconds=30)
         self.rows(*self.claude_idle_rows('after'))
         self.native_idle.side_effect = self.real_native_idle
-        checked = False
-        original = h._compact_event
-        def event(*args):
-            nonlocal checked
-            if self.sent and not checked:
-                checked = True
-                self.assertEqual('watching_other', self.control.operation(oid)['state'])
-                with self.assertRaisesRegex(h.ControlError, 'operation_in_progress'):
-                    self.request('send', text='hello')
-            return original(*args)
-        with patch.object(h, '_compact_event', side_effect=event):
-            result = self.observe(oid)
-        self.assertTrue(checked)
+        def send(args):
+            if self.sent[-1].startswith('COMPACTION CANCELLED:'):
+                self.assertEqual('cancelled', self.control.operation(oid)['state'])
+                with self.assertRaisesRegex(h.ControlError, 'observer_still_running'):
+                    self.request('send', text='next')
+            return subprocess.CompletedProcess(args, 0, json.dumps({'status': 'delivered', 'receipt': 'queued', 'pane': '%999'}), '')
+        result = self.observe(oid, send)
         self.assertEqual('cancelled', result['state'])
+        self.assertEqual('delivered', result['failure_notice']['state'])
+        states = [row['state'] for row in h._read(self.control.directory / (oid + '.json'))['transitions']]
+        self.assertNotIn('watching_other', states)
+        self.assertNotIn('warning_dispatching', states)
         self.request('send', text='hello')
 
     def test_explicit_cancel_wins_over_intervening_turn_and_peer_event(self):
@@ -1237,6 +1366,22 @@ class ControlTests(unittest.TestCase):
         self.assertNotIn('/compact', self.sent)
         self.assertEqual(1, sum(message.startswith('CONTINUE:') for message in self.sent))
 
+    def test_focus_supersession_with_peer_compaction_continues_by_other(self):
+        self.rows(*self.claude_idle_rows('before'))
+        oid = self.request(focus='focus')
+        def send(args):
+            if self.sent[-1] == 'focus':
+                self.rows(self.claude_row('user', 'after-u', 'before-d', message={'content': 'new work'}))
+                self.event()
+            return subprocess.CompletedProcess(args, 0, json.dumps({'status': 'delivered', 'receipt': 'queued', 'pane': '%999'}), '')
+        self.native_idle.side_effect = self.real_native_idle
+        result = self.observe(oid, send)
+        self.assertEqual('completed_by_other', result['state'])
+        self.assertEqual('confirmed', result['completion']['state'])
+        self.assertEqual('delivered', result['continuation']['state'])
+        self.assertNotIn('/compact', self.sent)
+        self.assertFalse(any(message.startswith('COMPACTION CANCELLED:') for message in self.sent))
+
     def test_real_claude_boundary_and_summary_are_not_operator_turns(self):
         self.rows(*self.claude_idle_rows('before'))
         oid = self.request(timeout_seconds=30)
@@ -1267,6 +1412,26 @@ class ControlTests(unittest.TestCase):
         self.assertEqual('compacted_by_other', result['delivery']['reason'])
         self.assertNotIn('/compact', self.sent)
         self.assertEqual(1, sum(message.startswith('CONTINUE:') for message in self.sent))
+
+    def test_peer_boundary_and_turn_between_idle_and_send_continues_by_other(self):
+        self.rows(*self.claude_idle_rows('before'))
+        oid = self.request(timeout_seconds=30)
+        injected = False
+        def idle(record, after=None):
+            nonlocal injected
+            if not injected:
+                self.rows(*self.claude_idle_rows('after'))
+                self.event()
+                injected = True
+            return self.real_native_idle(record, after)
+        self.native_idle.side_effect = idle
+        with patch.object(h, '_wait_idle', return_value={'state': 'idle'}):
+            result = self.observe(oid)
+        self.assertEqual('completed_by_other', result['state'])
+        self.assertEqual('compacted_by_other', result['delivery']['reason'])
+        self.assertEqual('delivered', result['continuation']['state'])
+        self.assertNotIn('/compact', self.sent)
+        self.assertFalse(any(message.startswith('COMPACTION CANCELLED:') for message in self.sent))
 
     def test_peer_boundary_on_send_parser_error_continues_by_other(self):
         self.rows(*self.claude_idle_rows('before'))
@@ -1747,7 +1912,7 @@ def mutations():
         ('focus_idle_recheck', "if suffix == '.focus' or text in ('/compact', '/exit'):", 'if False:'),
         ('focus_original_generation', "record.get('focus_after') if suffix != '.focus' else None", "record.get('focus_after')"),
         ('nontext_supersession', "user_input = not (isinstance(content, list) and bool(content) and\n                                      all(isinstance(c, dict) and c.get('type') == 'tool_result' for c in content))", "user_input = isinstance(content, str) or (isinstance(content, list) and any(isinstance(c, dict) and c.get('type') == 'text' for c in content))"),
-        ('waiting_cancel', "if record['state'] not in ('accepted', 'scheduled', 'waiting_idle'):", "if record['state'] != 'accepted':"),
+        ('waiting_cancel', "('accepted', 'scheduled', 'waiting_idle',\n                                      'warning_dispatching', 'watching_other') or", "('accepted', 'scheduled',\n                                      'warning_dispatching', 'watching_other') or"),
         ('cancel_preserved', "if _read(path)['state'] != 'cancelled':", 'if True:'),
         ('historical_leniency', "if start > baseline['offset']:", 'if True:'),
         ('incremental_cursor', "fresh = not cursor or cursor['key'] != key", 'fresh = True'),
@@ -1773,9 +1938,10 @@ def mutations():
         ('root_complete_without_start', "if (turn is None and offset >= baseline['offset'] and", "if (False and offset >= baseline['offset'] and"),
         ('new_codex_turn_cancellation', '                                turns_seen += 1\n', '                                turns_seen += 0\n'),
         ('new_claude_turn_cancellation', '                            user_turns_seen += 1\n', '                            user_turns_seen += 0\n'),
+        ('supersession_peer_event', "                if other_event:\n                    return {'state': 'completed_by_other', 'witness': other_event}\n            if str(exc)", "                if False:\n                    return {'state': 'completed_by_other', 'witness': other_event}\n            if str(exc)"),
         ('claude_api_metadata', "if kind in ('api-request-shape', 'api-request-blob', 'api-request'):", 'if False:'),
         ('claude_current_marker', 'len(_CLAUDE_COMPACT_ROW.findall(plain))', '0'),
-        ('continuation_preflight', 'deadline=time.time() + SEND_BUDGET + PREFLIGHT_BUDGET,', 'deadline=time.time() + SEND_BUDGET + 1,', 3),
+        ('continuation_preflight', 'deadline=time.time() + SEND_BUDGET + PREFLIGHT_BUDGET,', 'deadline=time.time() + SEND_BUDGET + 1,', 2),
         ('idle_dispatch', "if idle['state'] != 'idle':", 'if False:'),
         ('idle_wait', "if last['state'] == 'idle':", 'if True:'),
         ('idle_codex_match', "candidate == turn and focus_seen", 'focus_seen'),
@@ -1805,7 +1971,14 @@ def mutations():
         ('process', 'None if same_process(identity) else', 'None if not same_process(identity) else'),
         ('stderr', 'run.stdout if run.returncode == 0 else run.stderr', 'run.stdout'),
         ('pane', "and result.get('pane') == identity.pane", ''),
-        ('cancel', "if record['state'] not in ('accepted', 'scheduled', 'waiting_idle'):\n                return", "if False:\n                return"),
+        ('cancel', "if (record['state'] not in ('accepted', 'scheduled', 'waiting_idle',\n                                      'warning_dispatching', 'watching_other') or\n                    not _definitely_not_dispatched(record.get('delivery', {}))):", "if False:"),
+        ('warning_cancel', "'warning_dispatching', 'watching_other') or", "'watching_other',) or"),
+        ('notice_cancel_race', "if current['state'] == 'cancelled' and current.get('reason') == 'explicit_cancel':", "if False:"),
+        ('notice_cancel_preserved', "if current['state'] == 'cancelled':", "if False:"),
+        ('terminal_intervening_cancel', "record['pending_final_state'] = record['state']", "record['pending_final_state'] = 'watching_other'"),
+        ('cancel_terminal_before_notice', "if record['state'] != 'cancelled':\n                        record['state'] = 'warning_dispatching'", "record['state'] = 'warning_dispatching'"),
+        ('lost_cancel_notice', "record['failure_notice'] = {'state': 'unavailable',\n                                                    'reason': 'observer_disappeared_before_notice'}", "pass", 2),
+        ('lost_dispatching_notice', "notice_state == 'dispatching' or", 'False or', 2),
         ('failure_notice', "            _failure_notice(directory, path, record, identity)", "            pass"),
         ('warning_before_terminal', "record['state'] = 'warning_dispatching'", "record['state'] = 'deferred'"),
         ('focus', "if record['focus_delivery']['state'] != 'delivered':", 'if False:'),
@@ -1818,6 +1991,7 @@ def mutations():
         ('replaced', "if (info.st_dev, info.st_ino) != (baseline['device'], baseline['inode']) or info.st_size < baseline['offset']:", 'if False:'),
         ('private_directory', "info.st_mode & 0o077:\n        raise ControlError('state_directory_not_private')", "False:\n        raise ControlError('state_directory_not_private')"),
         ('no_event_no_continue', 'if witness:', 'if True:'),
+        ('preflight_peer_event', "            if text == '/compact':\n                other_event = _compact_event", "            if False:\n                other_event = _compact_event"),
         ('session_before_send', "        _verify_session(identity, record['session_id'], record.get('claude_state_dir'), record.get('codex_home'))\n        if suffix == '.focus' or", "        if suffix == '.focus' or"),
         ('session_fields', "if binding['state'] != 'observed' or binding['session_id'] != session_id:", 'if False:'),
         ('both_witnesses', "if marker and marker['count'] > record['pane_baseline']['count']:", 'if marker:'),
@@ -1837,7 +2011,9 @@ def mutations():
             compile(changed, str(mutated), 'exec')
             mutated.write_text(changed)
             result = REAL_RUN([sys.executable, __file__], env={**os.environ, 'HARNESS_CONTROL_TEST_MODULE': str(mutated)}, capture_output=True, text=True, timeout=60)
-            killed = result.returncode != 0 and 'FAIL:' in result.stderr and 'ERROR:' not in result.stderr
+            # Other tests may also error after a mutant corrupts shared state.
+            # Require at least one failed assertion so a crash alone is not a kill.
+            killed = result.returncode != 0 and 'FAIL:' in result.stderr
             print(('KILLED: ' if killed else 'INVALID OR SURVIVED: ') + name, flush=True)
             if not killed:
                 failures.append(name)
