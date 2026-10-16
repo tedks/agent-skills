@@ -27,3 +27,15 @@ log_events:
   who: Ted Smith
   what: created
   comment: ""
+- time: 2026-10-16T07:36:26-00:00
+  who: Ted Smith
+  what: commented
+  comment: 'Ruling (dotfiles CTO, 2026-10-16): a scheduled compaction is tied to the
+    checkpoint the caller wrote. Any operator turn (human or peer message) submitted
+    after the request and before dispatch cancels the schedule: the watcher delivers
+    one notice into the pane (''COMPACTION CANCELLED: <n> turn(s) since your checkpoint;
+    re-checkpoint and request again''), records state cancelled with reason intervening_turn,
+    and does not type /compact. If a compaction event is observed anyway (the agent
+    or a peer compacted), record completed_by_other and send the continuation. Rationale:
+    doctrine says compact only after durable state is saved; new work invalidates
+    the checkpoint, and a re-request is cheap.'
