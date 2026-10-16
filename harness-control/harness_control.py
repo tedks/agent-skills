@@ -485,10 +485,6 @@ def _wait_idle(record, identity, observer_deadline, focus_after=None, sends=1, o
         try:
             last = _native_idle(record, focus_after)
         except ControlError as exc:
-            if str(exc) == 'superseded_by_new_input':
-                if record.get('action') == 'compact':
-                    return {'state': 'cancelled', 'reason': 'intervening_turn', 'turns_seen': 1}
-                return {'state': 'deferred', 'reason': str(exc)}
             if record.get('action') == 'compact':
                 try:
                     other_event = _compact_event(record['transcript_path'], record['baseline'], identity.harness,
@@ -497,6 +493,10 @@ def _wait_idle(record, identity, observer_deadline, focus_after=None, sends=1, o
                     other_event = None
                 if other_event:
                     return {'state': 'completed_by_other', 'witness': other_event}
+            if str(exc) == 'superseded_by_new_input':
+                if record.get('action') == 'compact':
+                    return {'state': 'cancelled', 'reason': 'intervening_turn', 'turns_seen': 1}
+                return {'state': 'deferred', 'reason': str(exc)}
             if ((record.get('_idle_cursor') or {}).get('error') == str(exc) or
                     str(exc) in ('idle_record_shape_unknown', 'idle_root_session_unavailable',
                                  'idle_metadata_malformed', 'idle_transcript_replaced_or_truncated',
@@ -720,8 +720,10 @@ class HarnessControl:
         record = _read(self.directory / (operation_id + '.json'))
         if not _same_owner(record['identity'], asdict(self.identity)) or record['session_id'] != self.session_id:
             raise ControlError('operation_identity_mismatch')
-        incomplete_cancel_notice = (record['state'] == 'cancelled' and record.get('reason') == 'intervening_turn' and
-                                    record.get('failure_notice', {}).get('state') in (None, 'dispatching'))
+        notice_state = (record.get('failure_notice') or {}).get('state')
+        incomplete_cancel_notice = (record['state'] == 'cancelled' and
+                                    (notice_state == 'dispatching' or
+                                     (record.get('reason') == 'intervening_turn' and notice_state is None)))
         if (incomplete_cancel_notice or record['state'] == 'warning_dispatching' or
                 (record['state'] not in TERMINAL and time.time() >= record['deadline'])):
             fd = os.open(self.directory / '.worker', os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
@@ -733,10 +735,13 @@ class HarnessControl:
                 # The observer's final write does not take .lock. Reload after
                 # acquiring its lease so a delivered receipt is not downgraded.
                 record = _read(self.directory / (operation_id + '.json'))
-                if record['state'] == 'cancelled' and record.get('reason') == 'intervening_turn':
+                notice_state = (record.get('failure_notice') or {}).get('state')
+                if record['state'] == 'cancelled' and (notice_state == 'dispatching' or
+                                                      (record.get('reason') == 'intervening_turn' and notice_state is None)):
                     _settle_dispatches(record, 'observer_disappeared')
-                    record.setdefault('failure_notice', {'state': 'unavailable',
-                                                         'reason': 'observer_disappeared_before_notice'})
+                    if notice_state is None:
+                        record['failure_notice'] = {'state': 'unavailable',
+                                                    'reason': 'observer_disappeared_before_notice'}
                     record.pop('pending_final_state', None)
                     _write(self.directory / (operation_id + '.json'), record)
                     return record
@@ -746,6 +751,9 @@ class HarnessControl:
                     _settle_dispatches(record, 'observer_disappeared')
                     pending = record.pop('pending_final_state', 'failed')
                     record['state'] = 'cancelled' if pending == 'watching_other' else pending
+                    if pending == 'watching_other' and (record.get('failure_notice') or {}).get('state') is None:
+                        record['failure_notice'] = {'state': 'unavailable',
+                                                    'reason': 'observer_disappeared_before_notice'}
                 elif record['state'] == 'watching_other':
                     record.update(state='cancelled', reason='intervening_turn', completion={'state': 'not_started'})
                 else:
@@ -875,15 +883,15 @@ def _send(directory, record, identity, text, suffix):
         _verify_session(identity, record['session_id'], record.get('claude_state_dir'), record.get('codex_home'))
         if suffix == '.focus' or text in ('/compact', '/exit'):
             idle = _native_idle(record, record.get('focus_after') if suffix != '.focus' else None)
+            if text == '/compact':
+                other_event = _compact_event(record['transcript_path'], record['baseline'], identity.harness,
+                                             record['session_id'])
+                if other_event:
+                    return {'state': 'deferred', 'reason': 'compacted_by_other', 'witness': other_event,
+                            'needs_review': False}
             if record['action'] == 'compact' and idle.get('turns_seen', 0):
                 return {'state': 'deferred', 'reason': 'intervening_turn', 'turns_seen': idle['turns_seen'], 'needs_review': False}
             if idle['state'] != 'idle':
-                if text == '/compact':
-                    other_event = _compact_event(record['transcript_path'], record['baseline'], identity.harness,
-                                                 record['session_id'])
-                    if other_event:
-                        return {'state': 'deferred', 'reason': 'compacted_by_other', 'witness': other_event,
-                                'needs_review': False}
                 reason = 'native_idle_changed_before_focus' if suffix == '.focus' else 'native_idle_changed_before_dispatch'
                 return {'state': 'deferred', 'reason': reason, 'needs_review': False}
         if record['deadline'] - time.time() < SEND_BUDGET + (COMPACT_WATCH if text == '/compact' else 0):
@@ -1046,9 +1054,14 @@ def _failure_notice(directory, path, record, identity):
         notice = f'COMPACTION NOT DISPATCHED: {reason}; run /compact yourself or ask a peer'
     else:
         return
-    record['failure_notice'] = {'state': 'dispatching', 'attempted_at': time.time()}
-    record['deadline'] = time.time() + SEND_BUDGET + PREFLIGHT_BUDGET
-    _write(path, record)
+    with _guard(directory):
+        current = _read(path)
+        if current['state'] == 'cancelled' and current.get('reason') == 'explicit_cancel':
+            record.update(current)
+            return
+        record['failure_notice'] = {'state': 'dispatching', 'attempted_at': time.time()}
+        record['deadline'] = time.time() + SEND_BUDGET + PREFLIGHT_BUDGET
+        _write(path, record)
     try:
         record['failure_notice'] = _send(directory, record, identity, notice, '.failure')
     except Exception:

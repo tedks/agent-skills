@@ -21,12 +21,14 @@ An agent whose self-compaction is interrupted must be able to see the cancellati
 - The old observer deliberately waited in `watching_other` after sending the cancellation notice. That state continued to serialize new requests despite slash dispatch remaining `not_dispatched`.
 - The native transcript records a root input turn but no authenticated origin for tmux-delivered text. Text-matching a purported control message cannot safely distinguish it from an operator's identical input.
 - The Nix flake has no development shell with `mcp` on `python3`'s path. `nix flake check` is the authoritative package and test gate; the offline core suite can run through `nix develop --command python3`.
+- Council review found that a dead observer can leave a cancellation notice in `dispatching`; reconciliation now marks that receipt ambiguous. The incident fixture is also replayed without a worker lease, matching the recorded dead-observer state.
 
 ## Decision Log
 
 - Decision: Persist an intervening cancel as terminal before attempting its single notice; serialize the notice with the sender lease, then attach its receipt. If the observer disappears, mark that notice unavailable. Observe a peer compaction only before cancellation; never reopen a terminal cancel for a later event. Rationale: a durable terminal decision must not strand a second request in warning/watch states. Date/Author: 2026-10-16, Codex lead.
 - Decision: Permit explicit cancellation in scheduled, accepted, idle-waiting, warning, and legacy watching states only when delivery evidence says the slash was never attempted. Rationale: never turn an attempted `/compact` into a safe cancellation. Date/Author: 2026-10-16, Codex lead.
 - Decision: Peer messages should conceptually be excluded when they only direct compaction, but current records cannot prove sender origin. Count every native root input turn until an authenticated peer-delivery receipt is available; keep native metadata and tool results excluded. Rationale: a textual exemption could allow operator work to bypass cancellation. Date/Author: 2026-10-16, Codex lead.
+- Decision: When a peer compaction boundary and root input are both visible in one poll, treat the confirmed compaction as completed by the peer. The transcript does not establish a trustworthy order within that poll. Date/Author: 2026-10-16, Codex lead.
 
 ## Outcomes & Retrospective
 
