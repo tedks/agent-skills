@@ -10,9 +10,11 @@ An agent whose self-compaction is interrupted must be able to see the cancellati
 
 - [x] 2026-10-16: Read project and role instructions, inspect merged PR #7, claim `harness-compact-stale-after-intervening-cancel`, and create `fix/harness-compact-stale-cancel` from master.
 - [x] 2026-10-16: Add the redacted incident fixture, cancellation/second-request regressions, and the terminal-cancel transition.
-- [ ] Verify the new regression fails against the prior module and mutation-check transition guards.
-- [ ] Run the source gates and disposable native test for Claude and Codex.
-- [ ] Push a draft PR, run council review to a clean round, merge normally, install the dotfiles Nix snapshot, and verify installed code.
+- [x] 2026-10-16: Verify the incident and no-watch regressions fail against the previous module.
+- [x] 2026-10-16: Complete the first disposable native Claude/Codex rehearsal, including cancellation and a replacement request; repeat on the final code is in progress.
+- [x] 2026-10-16: Push branch `fix/harness-compact-stale-cancel` and open draft PR #9.
+- [ ] Complete the Nix source gate and final native rehearsal.
+- [ ] Run council review to a clean round, merge normally, install the dotfiles Nix snapshot, and verify installed code.
 
 ## Surprises & Discoveries
 
@@ -22,7 +24,7 @@ An agent whose self-compaction is interrupted must be able to see the cancellati
 
 ## Decision Log
 
-- Decision: Treat an intervening cancel as terminal after its single notice receipt. Observe a peer compaction only before that decision; never reopen a terminal cancel if a later event appears. Rationale: a durable terminal receipt is needed to accept another request without a stale watch. Date/Author: 2026-10-16, Codex lead.
+- Decision: Persist an intervening cancel as terminal before attempting its single notice; serialize the notice with the sender lease, then attach its receipt. If the observer disappears, mark that notice unavailable. Observe a peer compaction only before cancellation; never reopen a terminal cancel for a later event. Rationale: a durable terminal decision must not strand a second request in warning/watch states. Date/Author: 2026-10-16, Codex lead.
 - Decision: Permit explicit cancellation in scheduled, accepted, idle-waiting, warning, and legacy watching states only when delivery evidence says the slash was never attempted. Rationale: never turn an attempted `/compact` into a safe cancellation. Date/Author: 2026-10-16, Codex lead.
 - Decision: Peer messages should conceptually be excluded when they only direct compaction, but current records cannot prove sender origin. Count every native root input turn until an authenticated peer-delivery receipt is available; keep native metadata and tool results excluded. Rationale: a textual exemption could allow operator work to bypass cancellation. Date/Author: 2026-10-16, Codex lead.
 
@@ -36,7 +38,7 @@ Pending gates, review, merge, installation, and report.
 
 ## Plan of Work
 
-Keep the existing single-operation serialization and sender lease. Change the intervening-turn final state from `watching_other` to `cancelled` after the notice, and remove the post-cancel watch. Allow explicit cancellation of pre-dispatch warning and legacy watch records, preserving an explicit cancel if a notice sender finishes concurrently. Make a concurrent-request refusal identify the operation and next action. Check a peer compaction event before deciding to cancel. Extend both offline and native tests and document the provenance limit.
+Keep the existing single-operation serialization and sender lease. Persist an intervening-turn cancellation as terminal before the notice, attach its notice receipt, and remove the post-cancel watch. Allow explicit cancellation of pre-dispatch warning and legacy watch records, preserving an explicit cancel if a notice sender finishes concurrently. Make a concurrent-request refusal identify the operation and next action. Check a peer compaction event before deciding to cancel. Extend both offline and native tests and document the provenance limit.
 
 ## Concrete Steps
 
@@ -54,4 +56,4 @@ The offline tests use temporary directories. The native test uses a newly create
 
 The issue is `harness-compact-stale-after-intervening-cancel`. The redacted incident operation ID and state live in the fixture; no transcript content or live state is copied into the repository. Gate results and final SHAs will be appended here as work finishes.
 
-Revision 2026-10-16: Initial plan and observed implementation state, written after inspecting the merged dispatcher and the incident issue.
+Revision 2026-10-16: Initial plan and observed implementation state, written after inspecting the merged dispatcher and the incident issue. Updated after the first native rehearsal to reflect terminal-before-notice recovery and PR #9.

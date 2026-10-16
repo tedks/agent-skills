@@ -1099,6 +1099,8 @@ class ControlTests(unittest.TestCase):
         row['state'] = 'dispatching'
         h._write(path, row)
         self.assertEqual('refused', self.control.cancel(oid)['state'])
+        with self.assertRaisesRegex(h.OperationInProgress, f'operation_in_progress:{oid}:dispatching; get_operation'):
+            self.request('send', text='next')
 
     def test_incident_warning_can_be_cancelled_and_replaced(self):
         incident = json.loads((MODULE.parent / 'fixtures/compact-stale-cancel.json').read_text())
