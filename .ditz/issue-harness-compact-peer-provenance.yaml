@@ -33,3 +33,9 @@ log_events:
     CONTINUE-, RETIRE-, listed in config) is not an intervening turn for a scheduled
     compaction; everything else cancels with the notice. Separate PR after the stale-cancel
     fix lands; add fixtures for both a control-prefixed turn and an ordinary one.'
+- time: 2026-10-16T17:31:16-00:00
+  who: Ted Smith
+  what: commented
+  comment: 'PR #9 README and plan now acknowledge the CTO 2026-10-16 configured control-prefix
+    follow-up direction. The stale-cancel repair itself continues counting all native
+    root input; no prefix exemption is introduced in that PR.'
