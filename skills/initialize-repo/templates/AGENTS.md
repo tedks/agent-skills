@@ -18,7 +18,7 @@ agent genuinely needs divergent instructions.
 
 ## Project structure
 
-<!-- TODO: directory layout, one line per top-level entry -->
+<!-- REQUIRED; agents read this via the `where` skill before searching. TODO: directory layout, one line per top-level entry -->
 
 ## Environment
 
