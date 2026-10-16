@@ -1554,7 +1554,7 @@ def mutations():
         ('progress_parser', "bool(_CLAUDE_COMPACTING.search(plain))", 'False'),
         ('idle_partial_tail', "incomplete = bool(lines and not lines[-1].endswith(b'\\n'))", 'incomplete = False'),
         ('minimum_request_budget', "minimum = 30 if action == 'compact' else SEND_BUDGET + PREFLIGHT_BUDGET + 5", "minimum = 0 if action == 'compact' else SEND_BUDGET + PREFLIGHT_BUDGET + 5"),
-        ('focus_pair_rearm', "record['deadline'] = time.time() + record['idle_bound_seconds']\n                observer_deadline = time.monotonic() + record['idle_bound_seconds']", "record['deadline'] = time.time() + record['idle_bound_seconds']\n                observer_deadline = time.monotonic()"),
+        ('focus_pair_rearm', "if record['action'] == 'compact':\n                record['deadline'] = time.time() + record['idle_bound_seconds']\n                observer_deadline = time.monotonic() + record['idle_bound_seconds']\n                _write(path, record)", "if record['action'] == 'compact':\n                record['deadline'] = time.time() + record['idle_bound_seconds']\n                observer_deadline = time.monotonic()\n                _write(path, record)"),
         ('typed_request_limit', "if slash_lines and (len(text.encode('utf-8')) > 200 or text != text.rstrip() or text.endswith(';')):", 'if False:'),
         ('ordinary_meta_prefix', "if ordinary and (normalized.startswith('/') or (index == 0 and normalized.startswith(('!', '#')))):", 'if False:'),
         ('input_attempted_receipt', "result.get('input_attempted') is False", "result.get('paste_attempted') is False"),
