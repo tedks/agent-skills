@@ -46,8 +46,10 @@ PREFLIGHT_BUDGET = 15  # pane/session/tail checks and private receipt/payload wr
 TERMINAL = {'completed', 'delivered', 'deferred', 'ambiguous', 'failed', 'cancelled', 'timed_out', 'continuation_failed'}
 _ID = re.compile(r'[0-9a-f]{32}')
 MAX_FILE = 8 * 1024 * 1024
-# Measured on Claude Code 2.1.283 and Codex CLI 0.157.1. Changed UI fails closed.
+# Measured on Claude Code 2.1.283/2.1.301 and Codex CLI 0.157.1/0.163.0.
+# Changed UI fails closed.
 _COMPACT_MARKERS = {'claude': 'Compacted (ctrl+o to see full summary)', 'codex': '• Context compacted'}
+_CLAUDE_COMPACT_ROW = re.compile(r'^[ \t]*⎿[ \t]+Compacted(?: \(ctrl\+o to see full summary\))?[ \t]*$', re.MULTILINE)
 _CLAUDE_COMPACTING = re.compile(r'^\s*[✢✽✻·✶*] Compacting conversation… \([0-9][^()\n]*\)\s*$', re.MULTILINE)
 SAMPLE_JOIN = 7  # verify_pane <=5s plus public read <=1s, then shutdown margin
 
@@ -80,6 +82,18 @@ def _read(path):
 
 
 def _write(path, value):
+    if 'operation_id' in value:
+        fields = ('state', 'reason', 'deadline', 'idle_rearms')
+        nested = ('idle', 'focus_idle', 'focus_delivery', 'delivery', 'completion',
+                  'continuation', 'failure_notice')
+        snapshot = {key: value.get(key) for key in fields}
+        snapshot.update({key: value.get(key, {}).get('state') for key in nested})
+        previous = _read(path) if path.exists() else None
+        old = None if previous is None else {**{key: previous.get(key) for key in fields},
+                                              **{key: previous.get(key, {}).get('state') for key in nested}}
+        value['transitions'] = list(value.get('transitions', previous.get('transitions', []) if previous else []))
+        if snapshot != old:
+            value['transitions'].append({'at': time.time(), **snapshot})
     temporary = path.with_name('.' + uuid.uuid4().hex)
     fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     try:
@@ -224,6 +238,7 @@ def _native_idle(record, focus_after=None):
     cursor = record.get('_idle_cursor')
     key = [baseline['offset'], focus_after]
     fresh = not cursor or cursor['key'] != key
+    rearm = record.get('action') == 'compact' and focus_after is None
     with Path(path).open('rb') as stream:
         info = os.fstat(stream.fileno())
         if ((info.st_dev, info.st_ino) != (baseline['device'], baseline['inode']) or
@@ -233,7 +248,8 @@ def _native_idle(record, focus_after=None):
             start = max(0, baseline['offset'] - MAX_FILE)
             cursor = {'key': key, 'offset': start, 'idle': False, 'turn': None, 'turn_offset': -1,
                       'parent': None, 'focus_seen': focus_after is None, 'final_assistant': False,
-                      'focus_input_seen': False, 'focus_turn_seen': False, 'children': []}
+                      'focus_input_seen': False, 'focus_turn_seen': False,
+                      'turns_seen': 0, 'children': []}
         else:
             start = cursor['offset']
         if info.st_size < start:
@@ -253,6 +269,7 @@ def _native_idle(record, focus_after=None):
     idle, turn, turn_offset = cursor['idle'], cursor['turn'], cursor['turn_offset']
     parent, focus_seen, final_assistant = cursor['parent'], cursor['focus_seen'], cursor['final_assistant']
     focus_input_seen, focus_turn_seen, children = cursor['focus_input_seen'], cursor['focus_turn_seen'], cursor['children']
+    turns_seen = cursor.get('turns_seen', 0)
     for line in lines:
         offset = start
         start += len(line)
@@ -276,9 +293,12 @@ def _native_idle(record, focus_after=None):
                             children.append(candidate)
                             continue
                         if offset >= baseline['offset']:
-                            if focus_after is None or offset < focus_after or focus_turn_seen:
+                            if not rearm and (focus_after is None or offset < focus_after or focus_turn_seen):
                                 raise ControlError('superseded_by_new_input')
-                            focus_turn_seen = True
+                            if rearm:
+                                turns_seen += 1
+                            else:
+                                focus_turn_seen = True
                         turn = payload.get('turn_id')
                         turn_offset = offset
                         if not isinstance(turn, str) or not turn or payload.get('root_turn_id') != turn:
@@ -288,7 +308,16 @@ def _native_idle(record, focus_after=None):
                     elif event == 'task_complete':
                         if payload.get('turn_id') in children:
                             continue
-                        idle = bool(turn and payload.get('turn_id') == turn and focus_seen)
+                        candidate = payload.get('turn_id')
+                        # A long root turn can start more than MAX_FILE before
+                        # the checkpoint. Its own completion is still a native
+                        # root-turn witness when both IDs agree and no newer
+                        # input has appeared since the baseline.
+                        if (turn is None and offset >= baseline['offset'] and
+                                isinstance(candidate, str) and candidate and
+                                payload.get('root_turn_id') == candidate):
+                            turn, turn_offset = candidate, offset
+                        idle = bool(turn and candidate == turn and focus_seen)
                     elif event != 'token_count':
                         idle = False
                 elif kind == 'response_item':
@@ -299,9 +328,10 @@ def _native_idle(record, focus_after=None):
                         content = payload.get('content')
                         exact = (isinstance(content, list) and len(content) == 1 and isinstance(content[0], dict) and
                                  content[0].get('type') == 'input_text' and content[0].get('text') == record.get('focus'))
-                        if focus_after is None or offset < focus_after or focus_input_seen or not focus_turn_seen or not exact:
+                        if not rearm and (focus_after is None or offset < focus_after or focus_input_seen or not focus_turn_seen or not exact):
                             raise ControlError('superseded_by_new_input')
-                        focus_input_seen = True
+                        if not rearm:
+                            focus_input_seen = True
                     if (focus_after is not None and offset >= focus_after and turn_offset >= focus_after and turn and
                             payload.get('type') == 'message' and payload.get('role') == 'user'):
                         content = payload.get('content')
@@ -313,7 +343,13 @@ def _native_idle(record, focus_after=None):
                 elif kind not in ('session_meta', 'token_usage_record', 'world_state'):
                     raise ControlError('idle_record_shape_unknown')
             else:
-                if kind == 'queue-operation' and offset >= baseline['offset']:
+                if kind in ('api-request-shape', 'api-request-blob', 'api-request'):
+                    if row.get('sessionId') != record['session_id']:
+                        raise ControlError('idle_metadata_malformed')
+                    if kind == 'api-request':
+                        idle = False
+                    continue
+                if kind == 'queue-operation' and offset >= baseline['offset'] and not rearm:
                     raise ControlError('superseded_by_new_input')
                 metadata = {'mode': 'mode', 'permission-mode': 'permissionMode', 'atis-latch': 'atis',
                             'ai-title': 'aiTitle', 'last-prompt': 'lastPrompt'}
@@ -331,7 +367,7 @@ def _native_idle(record, focus_after=None):
                     continue
                 if row.get('sessionId') != record['session_id'] or row.get('isSidechain') is not False:
                     raise ControlError('idle_root_session_unavailable')
-                if (kind == 'attachment' and offset >= baseline['offset'] and
+                if (kind == 'attachment' and offset >= baseline['offset'] and not rearm and
                         isinstance(row.get('attachment'), dict) and row['attachment'].get('type') == 'queued_command'):
                     raise ControlError('superseded_by_new_input')
                 identifier = row.get('uuid')
@@ -348,9 +384,12 @@ def _native_idle(record, focus_after=None):
                                       all(isinstance(c, dict) and c.get('type') == 'tool_result' for c in content))
                     if kind == 'user' and user_input and offset >= baseline['offset']:
                         exact = content == record.get('focus') or (isinstance(content, list) and len(content) == 1 and isinstance(content[0], dict) and content[0].get('text') == record.get('focus'))
-                        if focus_after is None or offset < focus_after or focus_input_seen or not exact:
+                        if not rearm and (focus_after is None or offset < focus_after or focus_input_seen or not exact):
                             raise ControlError('superseded_by_new_input')
-                        focus_input_seen = True
+                        if rearm:
+                            turns_seen += 1
+                        else:
+                            focus_input_seen = True
                     if kind == 'user' and focus_after is not None and offset >= focus_after:
                         # Tool-result rows do not begin a new user input generation.
                         if isinstance(content, str):
@@ -381,19 +420,22 @@ def _native_idle(record, focus_after=None):
             focus_seen = focus_after is None
     cursor.update(offset=start, idle=idle, turn=turn, turn_offset=turn_offset, parent=parent,
                   focus_seen=focus_seen, final_assistant=final_assistant,
-                  focus_input_seen=focus_input_seen, focus_turn_seen=focus_turn_seen, children=children)
+                  focus_input_seen=focus_input_seen, focus_turn_seen=focus_turn_seen,
+                  turns_seen=turns_seen, children=children)
     record['_idle_cursor'] = cursor
     if incomplete:
         return {'state': 'unknown', 'reason': 'idle_transcript_incomplete'}
     return {'state': 'idle' if idle else 'busy_or_unknown', 'source': 'native_root_turn',
             'observed_at': time.time(), 'turn_id': turn, 'offset': start,
-            'focus_observed': focus_seen if focus_after is not None else None}
+            'focus_observed': focus_seen if focus_after is not None else None,
+            'turns_seen': turns_seen}
 
 
 def _wait_idle(record, identity, observer_deadline, focus_after=None, sends=1, operation_path=None):
-    """Leave the entire reserved sender budget intact; unknown never dispatches."""
+    """Compact waits for the whole idle bound; dispatch has a fresh budget."""
     last = {'state': 'unknown', 'reason': 'idle_not_observed'}
-    reserve = sends * (SEND_BUDGET + PREFLIGHT_BUDGET) + (COMPACT_WATCH if record.get('action') == 'compact' else 0)
+    observed_turns = 0
+    reserve = 0 if record.get('action') == 'compact' else sends * (SEND_BUDGET + PREFLIGHT_BUDGET)
     while time.monotonic() <= observer_deadline - reserve:
         if operation_path is not None and _read(operation_path)['state'] == 'cancelled':
             return {'state': 'cancelled', 'reason': 'cancelled_before_dispatch'}
@@ -407,13 +449,21 @@ def _wait_idle(record, identity, observer_deadline, focus_after=None, sends=1, o
             last = {'state': 'unknown', 'reason': str(exc)}
         except (OSError, ValueError, KeyError, TypeError):
             last = {'state': 'unknown', 'reason': 'native_idle_evidence_unavailable'}
+        if (record.get('action') == 'compact' and focus_after is None and operation_path is not None and
+                last.get('turns_seen', 0) > observed_turns):
+            record['idle_rearms'] = record.get('idle_rearms', 0) + last['turns_seen'] - observed_turns
+            observed_turns = last['turns_seen']
+            record['deadline'] = time.time() + record['idle_bound_seconds']
+            observer_deadline = time.monotonic() + record['idle_bound_seconds']
+            _write(operation_path, record)
         if last['state'] == 'idle':
             return last
         remaining = observer_deadline - reserve - time.monotonic()
         if remaining <= 0:
             break
         time.sleep(min(.5, remaining))
-    return {**last, 'state': 'deferred', 'evidence_reason': last.get('reason', last['state']), 'reason': 'native_idle_not_observed_with_sender_budget'}
+    return {**last, 'state': 'deferred', 'evidence_reason': last.get('reason', last['state']),
+            'reason': 'native_idle_not_observed_within_bound' if record.get('action') == 'compact' else 'native_idle_not_observed_with_sender_budget'}
 
 
 def _pane_marker(identity, timeout=10):
@@ -423,7 +473,8 @@ def _pane_marker(identity, timeout=10):
         run = subprocess.run([str(TRANSPORT), 'read', identity.pane], env=_environment(identity),
                              capture_output=True, text=True, encoding='utf-8', errors='strict', timeout=timeout, check=True)
         plain = re.sub(r'\x1b\[[0-?]*[ -/]*[@-~]', '', run.stdout)
-        return {'count': plain.count(_COMPACT_MARKERS[identity.harness]),
+        count = len(_CLAUDE_COMPACT_ROW.findall(plain)) if identity.harness == 'claude' else plain.count(_COMPACT_MARKERS[identity.harness])
+        return {'count': count,
                 'progress': identity.harness == 'claude' and bool(_CLAUDE_COMPACTING.search(plain)),
                 'observed_at': time.time(),
                 'source': 'own_pane_marker', 'marker': _COMPACT_MARKERS[identity.harness]}
@@ -476,7 +527,9 @@ def _same_owner(left, right):
 
 def _public(record, path):
     fields = ('operation_id', 'action', 'state', 'delivery', 'completion', 'reason',
-              'created_at', 'updated_at', 'deadline', 'checkpoint_receipt', 'session_id', 'focus_delivery', 'continuation', 'idle', 'focus_idle')
+              'created_at', 'updated_at', 'deadline', 'checkpoint_receipt', 'session_id',
+              'focus_delivery', 'continuation', 'idle', 'focus_idle', 'failure_notice',
+              'watcher_pid', 'idle_bound_seconds')
     return {**{key: record.get(key) for key in fields}, 'result_path': str(path)}
 
 
@@ -515,12 +568,15 @@ class HarnessControl:
             raise ControlError('exit_authority_or_resource_disposition_missing')
         return record
 
-    def request(self, action, checkpoint_receipt=None, text=None, timeout_seconds=300, focus=None, checkpoint_path=None, continuation=None):
+    def request(self, action, checkpoint_receipt=None, text=None, timeout_seconds=None, focus=None, checkpoint_path=None, continuation=None):
         if action not in ('compact', 'exit', 'send'):
             raise ControlError('unsupported_action')
-        minimum = (2 if focus is not None else 1) * (SEND_BUDGET + PREFLIGHT_BUDGET + 5) + (COMPACT_WATCH if action == 'compact' else 0)
-        if type(timeout_seconds) is not int or not minimum <= timeout_seconds <= 600:
-            raise ControlError(f'timeout_must_be_{minimum}_to_600_seconds')
+        if timeout_seconds is None:
+            timeout_seconds = 3600 if action == 'compact' else 300
+        minimum = 30 if action == 'compact' else SEND_BUDGET + PREFLIGHT_BUDGET + 5
+        maximum = 7200 if action == 'compact' else 600
+        if type(timeout_seconds) is not int or not minimum <= timeout_seconds <= maximum:
+            raise ControlError(f'timeout_must_be_{minimum}_to_{maximum}_seconds')
         if focus is not None:
             if action != 'compact':
                 raise ControlError('focus_only_for_compact')
@@ -565,21 +621,25 @@ class HarnessControl:
             baseline = _baseline(self.transcript_path) if action == 'compact' else None
             operation_id = uuid.uuid4().hex
             now = time.time()
-            record = {'operation_id': operation_id, 'action': action, 'state': 'accepted',
+            record = {'operation_id': operation_id, 'action': action,
+                      'state': 'scheduled' if action == 'compact' else 'accepted',
                       'identity': asdict(self.identity), 'session_id': self.session_id,
                       'claude_state_dir': self.claude_state_dir, 'codex_home': self.codex_home, 'transcript_path': self.transcript_path, 'baseline': baseline,
                       'idle_baseline': _baseline(self.transcript_path) if action in ('compact', 'exit') else None,
                       'checkpoint_receipt': checkpoint_receipt, 'payload': text, 'focus': focus, 'resume_message': resume_message,
                       'continuation': {'state': 'not_dispatched' if action == 'compact' else 'not_applicable'},
                       'created_at': now, 'updated_at': now, 'deadline': now + timeout_seconds,
+                      'idle_bound_seconds': timeout_seconds if action == 'compact' else None,
                       'delivery': {'state': 'not_dispatched'}, 'completion': {'state': 'pending'}}
             path = self.directory / (operation_id + '.json')
             _write(path, record)
             _write(active, {'operation_id': operation_id})
             try:
-                subprocess.Popen(_observer_command(self.directory, operation_id),
-                                 stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                                 start_new_session=True, close_fds=True)
+                watcher = subprocess.Popen(_observer_command(self.directory, operation_id),
+                                           stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                                           start_new_session=True, close_fds=True)
+                record['watcher_pid'] = watcher.pid
+                _write(path, record)
             except OSError:
                 record.update(state='failed', reason='observer_start_failed', completion={'state': 'not_started'})
                 _write(path, record)
@@ -617,7 +677,7 @@ class HarnessControl:
     def cancel(self, operation_id):
         with _guard(self.directory):
             record = self._operation(operation_id)
-            if record['state'] not in ('accepted', 'waiting_idle'):
+            if record['state'] not in ('accepted', 'scheduled', 'waiting_idle'):
                 return {'state': 'refused', 'reason': 'cancellation_only_before_dispatch', 'operation_id': operation_id}
             record.update(state='cancelled', updated_at=time.time(), completion={'state': 'cancelled'})
             path = self.directory / (operation_id + '.json')
@@ -752,7 +812,7 @@ def _send(directory, record, identity, text, suffix):
 
 def _settle_dispatches(record, reason):
     """An interrupted dispatch intent cannot prove whether input was delivered."""
-    for key in ('delivery', 'focus_delivery', 'continuation'):
+    for key in ('delivery', 'focus_delivery', 'continuation', 'failure_notice'):
         if record.get(key, {}).get('state') == 'dispatching':
             record[key] = {'state': 'ambiguous', 'needs_review': True, 'reason': reason}
 
@@ -790,7 +850,7 @@ def observe(directory, operation_id):
     try:
         with _guard(directory):
             record = _read(path)
-            if record['state'] != 'accepted' or _read(directory / 'active.json')['operation_id'] != operation_id:
+            if record['state'] not in ('accepted', 'scheduled') or _read(directory / 'active.json')['operation_id'] != operation_id:
                 return
             fd = os.open(directory / '.worker', os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
             try:
@@ -813,6 +873,32 @@ def _claim_dispatch(directory, path, record):
         record.update(state='dispatching', updated_at=time.time())
         _write(path, record)
         return True
+
+
+def _reserve_compact_dispatch(path, record, *, command):
+    """Start sender/confirmation time only after the required native idle."""
+    seconds = SEND_BUDGET + PREFLIGHT_BUDGET + (COMPACT_WATCH if command else 0)
+    record['deadline'] = time.time() + seconds
+    _write(path, record)
+    return time.monotonic() + seconds
+
+
+def _failure_notice(directory, path, record, identity):
+    """One visible best-effort failure receipt; never claim an ambiguous send failed."""
+    if (record['action'] != 'compact' or record.get('delivery', {}).get('state') != 'not_dispatched' or
+            record['state'] != 'warning_dispatching' or
+            record.get('failure_notice', {}).get('state') is not None):
+        return
+    reason = record.get('reason', 'dispatch_unavailable')
+    if not isinstance(reason, str) or not re.fullmatch(r'[a-z][a-z0-9_]*', reason):
+        reason = 'dispatch_unavailable'
+    record['failure_notice'] = {'state': 'dispatching', 'attempted_at': time.time()}
+    record['deadline'] = time.time() + SEND_BUDGET + PREFLIGHT_BUDGET
+    _write(path, record)
+    notice = f'COMPACTION NOT DISPATCHED: {reason}; run /compact yourself or ask a peer'
+    record['failure_notice'] = _send(directory, record, identity, notice, '.failure')
+    record['state'] = record.pop('pending_final_state')
+    _write(path, record)
 
 
 def _observe(directory, operation_id, record):
@@ -839,9 +925,8 @@ def _observe(directory, operation_id, record):
                 record.update(state='cancelled' if record['idle']['state'] == 'cancelled' else 'deferred', reason=record['idle']['reason'], completion={'state': 'not_started'})
                 return
         if record.get('focus'):
-            if record['deadline'] - time.time() < 2 * (SEND_BUDGET + PREFLIGHT_BUDGET) + COMPACT_WATCH:
-                record.update(state='deferred', reason='insufficient_focus_pair_budget', completion={'state': 'not_started'})
-                return
+            if record['action'] == 'compact':
+                observer_deadline = _reserve_compact_dispatch(path, record, command=False)
             if not _claim_dispatch(directory, path, record):
                 return
             record['focus_after'] = _baseline(record['transcript_path'])['offset']
@@ -852,12 +937,18 @@ def _observe(directory, operation_id, record):
             if record['focus_delivery']['state'] != 'delivered':
                 record.update(state='failed' if record['focus_delivery']['state'] == 'not_dispatched' else record['focus_delivery']['state'], reason='focus_not_delivered', completion={'state': 'not_started'})
                 return
+            if record['action'] == 'compact':
+                record['deadline'] = time.time() + record['idle_bound_seconds']
+                observer_deadline = time.monotonic() + record['idle_bound_seconds']
+                _write(path, record)
             record['focus_idle'] = _wait_idle(record, identity, observer_deadline, record['focus_after'])
             if record['focus_idle']['state'] != 'idle':
-                record.update(state='deferred', reason=record['focus_idle']['reason'] if record['focus_idle'].get('reason') == 'superseded_by_new_input' else 'focus_turn_not_completed_with_sender_budget', completion={'state': 'not_started'})
+                reason = record['focus_idle']['reason'] if record['action'] == 'compact' else 'focus_turn_not_completed_with_sender_budget'
+                record.update(state='deferred', reason=reason, completion={'state': 'not_started'})
                 return
         verify_pane(identity)
         if record['action'] == 'compact':
+            observer_deadline = _reserve_compact_dispatch(path, record, command=True)
             record['baseline'] = _baseline(record['transcript_path'])
             record['pane_baseline'] = _pane_marker(identity)
         if record['state'] == 'waiting_idle' and not _claim_dispatch(directory, path, record):
@@ -933,9 +1024,17 @@ def _observe(directory, operation_id, record):
     finally:
         _settle_dispatches(record, 'observer_interrupted_during_dispatch')
         record.update(updated_at=time.time())
+        needs_notice = (record['action'] == 'compact' and
+                        record.get('delivery', {}).get('state') == 'not_dispatched' and
+                        record['state'] in ('deferred', 'failed', 'timed_out'))
+        if needs_notice:
+            record['pending_final_state'] = record['state']
+            record['state'] = 'warning_dispatching'
         with _guard(directory):
             if _read(path)['state'] != 'cancelled':
                 _write(path, record)
+        if needs_notice:
+            _failure_notice(directory, path, record, identity)
 
 
 if __name__ == '__main__':

@@ -412,21 +412,22 @@ async def record_checkpoint(evidence: dict) -> dict:
 @mcp.tool()
 async def self_compact(checkpoint_path: str, checkpoint_receipt: str,
                        continuation: str | None = None, focus: str | None = None,
-                       timeout_seconds: int = 300) -> dict:
+                       timeout_seconds: int = 3600) -> dict:
     """Compact self and re-prompt once after a NEW compaction event. Call LAST.
 
     checkpoint_path must equal the shard in the recorded checkpoint_receipt.
-    Save state first, call this tool, then END THE TURN. Returns an accepted
-    operation handle immediately after validation, not a completion promise.
+    Save state first, call this tool, then END THE TURN. Returns a scheduled
+    operation with the detached watcher PID and idle bound, not completion.
     Optional focus is an ordinary message before bare typed /compact.
-    The operation budget is at most 600 seconds; minimum 150 without focus,
-    270 with focus (including a 30-second compaction observation reserve). Smaller requests are refused before acceptance. The detached
+    The native idle bound defaults to 3600 seconds and accepts 30 to 7200.
+    Focus, when present, starts a fresh idle bound after its own turn. Sender
+    and compaction confirmation time are separate from that bound. The detached
     observer waits for native idle, then sends one ordinary
     CONTINUE with the verified shard path and optional continuation text only
     after a new transcript boundary AND fresh pane completion evidence
     (marker count increase, or observed Claude progress-to-completion transition). That send has an
-    additional bounded 115-second budget. The default operation budget is 300
-    seconds to leave time for the calling turn and optional focus turn to finish.
+    additional bounded 115-second budget. If dispatch is deferred or the idle
+    bound expires, it attempts one visible failure notice in the own pane.
     No event means no re-prompt; a peer may deliberately resume the session.
     Delivery, compaction witness and continuation receipt remain separate.
     """

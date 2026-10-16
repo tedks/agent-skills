@@ -69,7 +69,12 @@ class ControlTests(unittest.TestCase):
         self.watch = patch.object(h, '_watch_compaction', side_effect=lambda *args: nullcontext({'available': False})).start()
         self.addCleanup(patch.stopall)
         self.spawn = Mock()
-        patch.object(h.subprocess, 'Popen', side_effect=lambda args, **kw: self.spawn(args, **kw) if '--observe' in args else REAL_POPEN(args, **kw)).start()
+        def popen(args, **kw):
+            if '--observe' in args:
+                self.spawn(args, **kw)
+                return SimpleNamespace(pid=12345)
+            return REAL_POPEN(args, **kw)
+        patch.object(h.subprocess, 'Popen', side_effect=popen).start()
         self.clock = time.time()
         self.sent = []
         self.commands = []
@@ -99,7 +104,9 @@ class ControlTests(unittest.TestCase):
             if args[0] == 'git':
                 return REAL_RUN(args, **kwargs)
             if args[1] == 'read':
-                return subprocess.CompletedProcess(args, 0, (h._COMPACT_MARKERS[self.identity.harness] + '\n') * self.marker_count, '')
+                marker = h._COMPACT_MARKERS[self.identity.harness]
+                row = ('  ⎿  ' if self.identity.harness == 'claude' else '') + marker + '\n'
+                return subprocess.CompletedProcess(args, 0, row * self.marker_count, '')
             self.sent.append(Path(args[-1]).read_text())
             self.commands.append(args)
             if send:
@@ -171,6 +178,41 @@ class ControlTests(unittest.TestCase):
                 rows[-1]['payload']['turn_id'] = 'wrong'
             self.rows(*rows)
             self.assertNotEqual('idle', self.native_idle_result(self.idle_record(harness))['state'])
+
+    def test_incident_records_root_completion_after_baseline_without_start_in_tail(self):
+        fixtures = json.loads((MODULE.parent / 'fixtures/compact-stalled-records.json').read_text())
+        for incident in fixtures:
+            with self.subTest(operation_id=incident['operation_id']):
+                self.transcript.write_text('')
+                record = self.idle_record('codex')
+                turn = incident['root_turn_id']
+                self.rows({'type': 'event_msg', 'payload': {'type': 'task_complete',
+                                                            'turn_id': turn, 'root_turn_id': turn}})
+                result = self.native_idle_result(record)
+                self.assertEqual('idle', result['state'])
+                self.assertEqual(turn, result['turn_id'])
+                self.assertEqual(145, incident['remaining_sender_reserve_seconds'])
+
+    def test_compact_idle_parser_follows_new_root_turns(self):
+        for harness in ('codex', 'claude'):
+            with self.subTest(harness=harness):
+                self.transcript.write_text('')
+                record = self.idle_record(harness)
+                record['action'] = 'compact'
+                rows = (self.codex_idle_rows('one') + self.codex_idle_rows('two') if harness == 'codex'
+                        else self.claude_idle_rows('one') + self.claude_idle_rows('two'))
+                self.rows(*rows)
+                result = self.native_idle_result(record)
+                self.assertEqual('idle', result['state'])
+                self.assertEqual(2, result['turns_seen'])
+
+    def test_claude_request_metadata_before_focus_turn(self):
+        record = self.idle_record('claude', focus='focus')
+        self.rows(*[{'type': kind, 'sessionId': SID} for kind in
+                    ('api-request-shape', 'api-request-blob', 'api-request')],
+                  *self.claude_idle_rows(focus='focus'))
+        result = self.native_idle_result(record, 0)
+        self.assertEqual('idle', result['state'])
 
     def test_native_idle_tail_bounds_partial_and_rotation(self):
         self.rows(*self.claude_idle_rows())
@@ -284,6 +326,46 @@ class ControlTests(unittest.TestCase):
         h.observe(self.control.directory, oid)
         self.assertEqual([], self.sent)
 
+    def test_compact_idle_bound_warns_once_and_records_transitions(self):
+        oid = self.request(timeout_seconds=30)
+        self.native_idle.return_value = {'state': 'busy_or_unknown', 'reason': 'busy_or_unknown'}
+        def notice_in_flight(args):
+            current = self.control.operation(oid)
+            self.assertEqual('warning_dispatching', current['state'])
+            return subprocess.CompletedProcess(args, 0, '{"status":"delivered","receipt":"queued","pane":"%999"}', '')
+        result = self.observe(oid, notice_in_flight)
+        self.assertEqual('deferred', result['state'])
+        self.assertEqual('native_idle_not_observed_within_bound', result['reason'])
+        self.assertEqual('delivered', (result.get('failure_notice') or {}).get('state'))
+        self.assertEqual(1, len(self.sent))
+        self.assertEqual('COMPACTION NOT DISPATCHED: native_idle_not_observed_within_bound; '
+                         'run /compact yourself or ask a peer', self.sent[0])
+        record = h._read(self.control.directory / (oid + '.json'))
+        states = [step['state'] for step in record['transitions']]
+        self.assertEqual('scheduled', states[0])
+        self.assertIn('waiting_idle', states)
+        self.assertEqual('deferred', states[-1])
+        self.assertEqual('delivered', record['transitions'][-1]['failure_notice'])
+        before = len(record['transitions'])
+        h.observe(self.control.directory, oid)
+        self.assertEqual(before, len(h._read(self.control.directory / (oid + '.json'))['transitions']))
+        self.assertEqual(1, len(self.sent))
+
+    def test_new_root_turn_rearms_compact_idle_deadline(self):
+        oid = self.request(timeout_seconds=30)
+        path = self.control.directory / (oid + '.json')
+        record = h._read(path)
+        first_deadline = record['deadline']
+        self.native_idle.side_effect = [
+            {'state': 'busy_or_unknown', 'turns_seen': 1},
+            {'state': 'idle', 'turns_seen': 1},
+        ]
+        result = h._wait_idle(record, self.identity, time.monotonic() + 30, operation_path=path)
+        self.assertEqual('idle', result['state'])
+        self.assertEqual(1, record['idle_rearms'])
+        self.assertGreater(record['deadline'], first_deadline)
+        self.assertEqual(1, h._read(path)['idle_rearms'])
+
     def test_focus_waits_for_new_completed_turn(self):
         oid = self.request(focus='focus')
         calls = []
@@ -294,9 +376,10 @@ class ControlTests(unittest.TestCase):
             return {'state': 'busy_or_unknown'}
         self.native_idle.side_effect = idle
         result = self.observe(oid)
-        self.assertEqual(['focus'], self.sent)
+        self.assertEqual('focus', self.sent[0])
+        self.assertEqual(1, sum(message.startswith('COMPACTION NOT DISPATCHED:') for message in self.sent))
         self.assertEqual('deferred', result['state'])
-        self.assertEqual('focus_turn_not_completed_with_sender_budget', result['reason'])
+        self.assertEqual('native_idle_not_observed_within_bound', result['reason'])
         self.assertTrue(any(value is not None for value in calls))
 
     def test_idle_rechecked_before_focus_transport(self):
@@ -305,7 +388,8 @@ class ControlTests(unittest.TestCase):
         result = self.observe(oid)
         self.assertEqual('deferred', result['state'])
         self.assertEqual('native_idle_changed_before_focus', result['focus_delivery'].get('reason'))
-        self.assertEqual([], self.sent)
+        self.assertEqual(1, len(self.sent))
+        self.assertTrue(self.sent[0].startswith('COMPACTION NOT DISPATCHED:'))
 
     def test_queue_activity_supersedes_original_turn_without_dispatch(self):
         for operation in ('enqueue', 'dequeue', 'remove', 'unknown'):
@@ -336,7 +420,7 @@ class ControlTests(unittest.TestCase):
         self.assertEqual('deferred', result['state'])
         self.assertEqual([], self.sent)
 
-    def test_new_input_before_focus_prevents_partial_focus_delivery(self):
+    def test_new_input_before_focus_rearms_then_waits_for_focus_completion(self):
         self.rows(*self.claude_idle_rows())
         oid = self.request(focus='focus')
         injected = False
@@ -350,9 +434,10 @@ class ControlTests(unittest.TestCase):
         self.native_idle.side_effect = idle
         result = self.observe(oid)
         self.assertEqual('deferred', result['state'])
-        self.assertIsInstance(result['focus_delivery'], dict)
-        self.assertEqual('superseded_by_new_input', result['focus_delivery'].get('reason'))
-        self.assertEqual([], self.sent)
+        self.assertEqual('delivered', result['focus_delivery']['state'])
+        self.assertEqual('focus', self.sent[0])
+        self.assertNotIn('/compact', self.sent)
+        self.assertEqual(1, sum(message.startswith('COMPACTION NOT DISPATCHED:') for message in self.sent))
 
     def test_idle_rechecked_before_lifecycle_transport(self):
         oid = self.request('exit')
@@ -380,18 +465,20 @@ class ControlTests(unittest.TestCase):
     def test_default_operation_budget_leaves_idle_wait(self):
         oid = self.request()
         record = h._read(self.control.directory / (oid + '.json'))
-        self.assertEqual(300, record['deadline'] - record['created_at'])
-        self.assertGreater(record['deadline'] - record['created_at'], h.SEND_BUDGET + h.PREFLIGHT_BUDGET + 60)
+        self.assertEqual(3600, record['deadline'] - record['created_at'])
+        self.assertEqual(3600, record['idle_bound_seconds'])
+        self.assertEqual(12345, record['watcher_pid'])
+        self.assertEqual('scheduled', record['state'])
 
     def test_request_minimum_budget_is_synchronous(self):
-        for action, kwargs, minimum in (('send', {'text': 'hello'}, 120), ('compact', {}, 150), ('compact', {'focus': 'focus'}, 270)):
+        for action, kwargs, minimum in (('send', {'text': 'hello'}, 120), ('compact', {}, 30), ('compact', {'focus': 'focus'}, 30)):
             with self.subTest(action=action, kwargs=kwargs), self.assertRaisesRegex(h.ControlError, f'timeout_must_be_{minimum}'):
                 self.request(action, timeout_seconds=minimum - 1, **kwargs)
         self.spawn.assert_not_called()
         self.assertFalse((self.control.directory / 'active.json').exists())
 
     def test_exact_minimum_allows_idle_and_dispatch_after_queue_overhead(self):
-        for action, kwargs, minimum in (('exit', {}, 120), ('compact', {'focus': 'focus'}, 270)):
+        for action, kwargs, minimum in (('exit', {}, 120), ('compact', {'focus': 'focus'}, 30)):
             oid = self.request(action, timeout_seconds=minimum, **kwargs)
             path = self.control.directory / (oid + '.json')
             record = h._read(path)
@@ -402,16 +489,18 @@ class ControlTests(unittest.TestCase):
             self.assertEqual('idle', result['state'])
             self.control.cancel(oid)
 
-    def test_focus_pair_budget_refuses_before_focus(self):
+    def test_focus_pair_rearms_idle_bound_after_focus(self):
         oid = self.request(focus='focus')
+        deadlines = []
         def wait(*args, **kwargs):
+            deadlines.append(args[2])
             self.clock += 2
             return {'state': 'idle'}
         with patch.object(h, '_wait_idle', side_effect=wait):
             result = self.observe(oid)
-        self.assertEqual('deferred', result['state'])
-        self.assertEqual('insufficient_focus_pair_budget', result['reason'])
-        self.assertEqual([], self.sent)
+        self.assertEqual(2, len(deadlines))
+        self.assertGreater(deadlines[1], deadlines[0])
+        self.assertEqual(['focus', '/compact'], self.sent)
 
     def test_typed_limits_and_ordinary_meta_prefixes(self):
         for value in ('/model x ', '/model x\u3000', '/model x;', '/model ' + 'a' * 194):
@@ -534,6 +623,14 @@ class ControlTests(unittest.TestCase):
                 marker = h._pane_marker(self.identity)
             self.assertEqual(expected, marker['progress'])
             self.assertNotIn(line, json.dumps(marker))
+
+    def test_claude_current_compaction_row_is_counted(self):
+        for line, expected in (('  ⎿  Compacted', 1),
+                               ('  ⎿  Compacted (ctrl+o to see full summary)', 1),
+                               ('assistant said Compacted', 0)):
+            with patch.object(h.subprocess, 'run', return_value=subprocess.CompletedProcess([], 0, line, '')):
+                marker = h._pane_marker(self.identity)
+            self.assertEqual(expected, marker['count'])
 
     def test_new_input_supersedes_without_dispatch(self):
         self.rows(*self.claude_idle_rows())
@@ -800,11 +897,11 @@ class ControlTests(unittest.TestCase):
         with self.assertRaisesRegex(h.ControlError, 'exit_authority'):
             self.request('exit')
         oid = self.request()
-        self.assertEqual('accepted', self.control.operation(oid)['state'])
+        self.assertEqual('scheduled', self.control.operation(oid)['state'])
 
     def test_prompt_return_serialization_cancellation(self):
         oid = self.request()
-        self.assertEqual('accepted', self.control.operation(oid)['state'])
+        self.assertEqual('scheduled', self.control.operation(oid)['state'])
         self.assertTrue(self.spawn.call_args.kwargs['start_new_session'])
         self.assertTrue(self.spawn.call_args.kwargs['close_fds'])
         with self.assertRaisesRegex(h.ControlError, 'operation_in_progress'):
@@ -1017,7 +1114,8 @@ class ControlTests(unittest.TestCase):
         self.sent.clear()
         oid = self.request(focus='focus')
         result = self.observe(oid, lambda args: subprocess.CompletedProcess(args, 2, '', json.dumps({'status': 'deferred', 'paste_attempted': False, 'input_attempted': False})))
-        self.assertEqual(['focus'], self.sent)
+        self.assertEqual('focus', self.sent[0])
+        self.assertEqual(1, sum(message.startswith('COMPACTION NOT DISPATCHED:') for message in self.sent))
         self.assertEqual('focus_not_delivered', result['reason'])
         self.assertEqual('not_dispatched', result['delivery']['state'])
 
@@ -1212,7 +1310,7 @@ def live_integration():
                 before = time.monotonic()
                 operation = control.request(action, receipt, timeout_seconds=300)
                 assert time.monotonic() - before < 2, 'request blocked for delivery'
-                assert operation['state'] == 'accepted'
+                assert operation['state'] == ('scheduled' if action == 'compact' else 'accepted')
                 deadline = time.monotonic() + 60
                 while time.monotonic() < deadline:
                     result = control.operation(operation['operation_id'])
@@ -1246,7 +1344,7 @@ def mutations():
     source = MODULE.read_text()
     atomic_claim = """        with _guard(directory):
             record = _read(path)
-            if record['state'] != 'accepted' or _read(directory / 'active.json')['operation_id'] != operation_id:
+            if record['state'] not in ('accepted', 'scheduled') or _read(directory / 'active.json')['operation_id'] != operation_id:
                 return
             fd = os.open(directory / '.worker', os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
             try:
@@ -1263,18 +1361,18 @@ def mutations():
             return
         with _guard(directory):
             record = _read(path)
-            if record['state'] != 'accepted':
+            if record['state'] not in ('accepted', 'scheduled'):
                 return
             record.update(state='waiting_idle', updated_at=time.time())
             _write(path, record)  # lease claimed; cancellation remains safe before input
 """
     cases = [
         ('queued_attachment', "row['attachment'].get('type') == 'queued_command'", 'False'),
-        ('queue_supersession', "if kind == 'queue-operation' and offset >= baseline['offset']:", 'if False:'),
+        ('queue_supersession', "if kind == 'queue-operation' and offset >= baseline['offset'] and not rearm:", 'if False:'),
         ('focus_idle_recheck', "if suffix == '.focus' and _native_idle(record)['state'] != 'idle':", 'if False:'),
         ('focus_original_generation', "suffix == '.focus' and _native_idle(record)['state']", "suffix == '.focus' and _native_idle(record, record.get('focus_after'))['state']"),
         ('nontext_supersession', "user_input = not (isinstance(content, list) and bool(content) and\n                                      all(isinstance(c, dict) and c.get('type') == 'tool_result' for c in content))", "user_input = isinstance(content, str) or (isinstance(content, list) and any(isinstance(c, dict) and c.get('type') == 'text' for c in content))"),
-        ('waiting_cancel', "if record['state'] not in ('accepted', 'waiting_idle'):", "if record['state'] != 'accepted':"),
+        ('waiting_cancel', "if record['state'] not in ('accepted', 'scheduled', 'waiting_idle'):", "if record['state'] != 'accepted':"),
         ('cancel_preserved', "if _read(path)['state'] != 'cancelled':", 'if True:'),
         ('historical_leniency', "if start > baseline['offset']:", 'if True:'),
         ('incremental_cursor', "fresh = not cursor or cursor['key'] != key", 'fresh = True'),
@@ -1289,17 +1387,22 @@ def mutations():
         ('progress_baseline', "'progress_armed': not baseline.get('progress', False)", "'progress_armed': True"),
         ('progress_parser', "bool(_CLAUDE_COMPACTING.search(plain))", 'False'),
         ('idle_partial_tail', "incomplete = bool(lines and not lines[-1].endswith(b'\\n'))", 'incomplete = False'),
-        ('minimum_request_budget', 'not minimum <= timeout_seconds <= 600', 'not 60 <= timeout_seconds <= 600'),
-        ('focus_pair_budget', "if record['deadline'] - time.time() < 2 * (SEND_BUDGET + PREFLIGHT_BUDGET) + COMPACT_WATCH:", 'if False:'),
+        ('minimum_request_budget', "minimum = 30 if action == 'compact' else SEND_BUDGET + PREFLIGHT_BUDGET + 5", "minimum = 0 if action == 'compact' else SEND_BUDGET + PREFLIGHT_BUDGET + 5"),
+        ('focus_pair_rearm', "record['deadline'] = time.time() + record['idle_bound_seconds']\n                observer_deadline = time.monotonic() + record['idle_bound_seconds']", "record['deadline'] = time.time() + record['idle_bound_seconds']\n                observer_deadline = time.monotonic()"),
         ('typed_request_limit', "if slash_lines and (len(text.encode('utf-8')) > 200 or text != text.rstrip() or text.endswith(';')):", 'if False:'),
         ('ordinary_meta_prefix', "if ordinary and (normalized.startswith('/') or (index == 0 and normalized.startswith(('!', '#')))):", 'if False:'),
         ('input_attempted_receipt', "result.get('input_attempted') is False", "result.get('paste_attempted') is False"),
         ('final_drain_bound', 'process.communicate(timeout=SEND_DRAIN)', 'process.communicate()'),
-        ('default_idle_budget', 'timeout_seconds=300, focus=', 'timeout_seconds=280, focus='),
+        ('default_idle_budget', "timeout_seconds = 3600 if action == 'compact' else 300", "timeout_seconds = 300"),
+        ('compact_idle_bound', "reserve = 0 if record.get('action') == 'compact' else sends * (SEND_BUDGET + PREFLIGHT_BUDGET)", "reserve = sends * (SEND_BUDGET + PREFLIGHT_BUDGET)"),
+        ('root_complete_without_start', "if (turn is None and offset >= baseline['offset'] and", "if (False and offset >= baseline['offset'] and"),
+        ('new_turn_rearm', 'turns_seen += 1', 'turns_seen += 0', 2),
+        ('claude_api_metadata', "if kind in ('api-request-shape', 'api-request-blob', 'api-request'):", 'if False:'),
+        ('claude_current_marker', 'len(_CLAUDE_COMPACT_ROW.findall(plain))', '0'),
         ('continuation_preflight', 'deadline=time.time() + SEND_BUDGET + PREFLIGHT_BUDGET,', 'deadline=time.time() + SEND_BUDGET + 1,'),
         ('idle_dispatch', "if text in ('/compact', '/exit') and _native_idle(record, record.get('focus_after'))['state'] != 'idle':", 'if False:'),
         ('idle_wait', "if last['state'] == 'idle':", 'if True:'),
-        ('idle_codex_match', "payload.get('turn_id') == turn and focus_seen", 'focus_seen'),
+        ('idle_codex_match', "candidate == turn and focus_seen", 'focus_seen'),
         ('idle_claude_parent', "linked = parent is not None and row.get('parentUuid') == parent", 'linked = True'),
         ('idle_focus_generation', ' or not focus_turn_seen', ''),
         ('idle_focus_text', ' or not exact', '', 2),
@@ -1326,7 +1429,9 @@ def mutations():
         ('process', 'None if same_process(identity) else', 'None if not same_process(identity) else'),
         ('stderr', 'run.stdout if run.returncode == 0 else run.stderr', 'run.stdout'),
         ('pane', "and result.get('pane') == identity.pane", ''),
-        ('cancel', "if record['state'] not in ('accepted', 'waiting_idle'):\n                return", "if False:\n                return"),
+        ('cancel', "if record['state'] not in ('accepted', 'scheduled', 'waiting_idle'):\n                return", "if False:\n                return"),
+        ('failure_notice', "            _failure_notice(directory, path, record, identity)", "            pass"),
+        ('warning_before_terminal', "record['state'] = 'warning_dispatching'", "record['state'] = 'deferred'"),
         ('focus', "if record['focus_delivery']['state'] != 'delivered':", 'if False:'),
         ('socket', "env['SPAWN_TMUX_SOCKET'] = identity.socket", "env['SPAWN_TMUX_SOCKET'] = '/wrong'"),
         ('attestation', "if evidence.get(key) is not True:", 'if False:'),
