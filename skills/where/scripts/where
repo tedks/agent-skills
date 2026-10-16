@@ -10,6 +10,7 @@ this many tracked files, default 20000).
 """
 import argparse
 import hashlib
+import math
 import os
 import re
 import subprocess
@@ -36,12 +37,18 @@ class Fail(Exception):
     pass
 
 
-def env_num(name, default, kind):
+def env_num(name, default, kind, minimum, strict=False):
+    """Parse a numeric env var; a bad value is a one-line Fail naming it."""
     raw = os.environ.get(name, default)
     try:
-        return kind(raw)
-    except ValueError:
-        raise Fail(f"{name}={raw!r} is not a number")
+        val = kind(raw)
+        ok = math.isfinite(val) and (val > minimum if strict else val >= minimum)
+    except (ValueError, OverflowError):
+        ok = False
+    if not ok:
+        want = f"> {minimum}" if strict else f">= {minimum}"
+        raise Fail(f"{name}={raw!r} is not a finite number {want}")
+    return val
 
 
 def die(msg):
@@ -56,7 +63,7 @@ def git_env():
 
 
 def run_git(cwd, *args, text=True):
-    timeout = env_num("WHERE_GIT_TIMEOUT", "30", float)
+    timeout = env_num("WHERE_GIT_TIMEOUT", "30", float, 0, strict=True)
     try:
         return subprocess.run(["git", "-C", str(cwd), *args], capture_output=True,
                               text=text, timeout=timeout, env=git_env())
@@ -124,13 +131,8 @@ def tree_lines(worktree):
         raise Fail(f"git ls-files failed in {worktree}")
     rels = [x for x in r.stdout.decode(errors="replace").split("\0")
             if x and not SKIP.match(x.split("/", 1)[0])]
-    max_stat = env_num("WHERE_MAX_STAT", "20000", int)
+    max_stat = env_num("WHERE_MAX_STAT", "20000", int, 0)
     sized = len(rels) <= max_stat
-    if not sized:
-        # Skip sizes, but still drop tracked files that are deleted from disk.
-        d = run_git(worktree, "ls-files", "-d", "-z", text=False)
-        deleted = set(d.stdout.decode(errors="replace").split("\0")) if d.returncode == 0 else set()
-        rels = [x for x in rels if x not in deleted]
     top = {}  # name -> file size (int) or {"size", "n", "dirs", "files"}
     for rel in rels:
         size = 0
@@ -192,7 +194,8 @@ def tree_lines(worktree):
         out.append(f"... truncated: contents of {plural(len(omitted), 'directory')} not shown "
                    f"(first: {omitted[0]}/); run git ls-files <dir>")
     if not sized:
-        out.append(f"... sizes skipped: more than {max_stat} tracked files (WHERE_MAX_STAT)")
+        out.append(f"... sizes skipped: more than {max_stat} tracked files (WHERE_MAX_STAT); "
+                   "deleted files not filtered")
     return out, budget
 
 
@@ -279,8 +282,8 @@ def main():
     ap.add_argument("--max-age", type=float, default=10.0, metavar="MIN",
                     help="reuse a cached map younger than MIN minutes with the same HEAD (default 10)")
     a = ap.parse_args()
-    env_num("WHERE_GIT_TIMEOUT", "30", float)  # fail early on a bad value
-    env_num("WHERE_MAX_STAT", "20000", int)
+    env_num("WHERE_GIT_TIMEOUT", "30", float, 0, strict=True)  # fail early on a bad value
+    env_num("WHERE_MAX_STAT", "20000", int, 0)
 
     path = Path(a.path)
     if not path.is_dir():

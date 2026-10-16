@@ -30,7 +30,8 @@ every top-level directory appears (up to about 90 lines); top-level files
 are shown while space remains and the rest collapse into one counted line.
 When space runs out, the notice names the command that shows the rest
 (`git ls-files <dir>`, `git worktree list`). Past `WHERE_MAX_STAT` sizes
-are skipped (shown as `?`) but deleted tracked files are still dropped.
+are skipped (shown as `?`) and the tree is the index unfiltered, so files
+deleted from disk may be listed (the output says so).
 Needs git 2.31 or later. `WHERE_GIT_TIMEOUT` (seconds, default 30) and
 `WHERE_MAX_STAT` (tracked-file count past which sizes are skipped, default
 20000) bound the work; a failure prints one line and exits 1.
