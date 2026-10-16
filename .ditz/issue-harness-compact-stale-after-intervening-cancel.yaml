@@ -1,0 +1,18 @@
+id: harness-compact-stale-after-intervening-cancel
+title: 'harness-control: after an intervening-turn cancel the compact operation stays
+  registered (state warning_dispatching / watching_other); cancel_operation refuses
+  (cancellation_only_before_dispatch) and every new self_compact is refused as operation_in_progress'
+desc: ""
+type: bugfix
+component: default
+release:
+reporter: Ted Smith <tedks@riseup.net>
+status: unstarted
+disposition:
+creation_time: 2026-10-16T16:43:43-00:00
+references: []
+log_events:
+- time: 2026-10-16T16:43:43-00:00
+  who: Ted Smith
+  what: created
+  comment: ""
