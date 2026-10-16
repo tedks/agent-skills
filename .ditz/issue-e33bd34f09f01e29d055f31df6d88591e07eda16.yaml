@@ -42,3 +42,17 @@ log_events:
   who: Ted Smith
   what: started
   comment: ""
+- time: 2026-10-16T06:19:02-00:00
+  who: Ted Smith
+  what: commented
+  comment: 'Diagnosis from both read-only incident records: each request used the
+    300 s operation budget, stopped idle polling at 155 s because 145 s was reserved
+    for sender/preflight/compaction observation, and delivered nothing. Both native
+    root task_complete events were written 2.54-3.34 s after request, with turn_id=root_turn_id;
+    the idle cursor nevertheless held turn=null because the corresponding task_started
+    had fallen outside the 8 MiB tail. New regression fixture reproduces that parser
+    miss and failed before the fix. Code now accepts a post-baseline root completion,
+    separates idle bound (3600 s default) from fresh sender budget, re-arms on new
+    root turns, persists transitions and watcher PID, and attempts one visible warning
+    on deferred dispatch. Synthetic tmux compact+exit integration passed; remaining:
+    native Claude/Codex disposable tests, mutation checks, Nix gates and council.'
