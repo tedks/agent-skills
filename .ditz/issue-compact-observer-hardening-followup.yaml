@@ -40,3 +40,14 @@ log_events:
   who: Ted Smith
   what: created
   comment: ""
+- time: 2026-10-16T08:16:32-00:00
+  who: Ted Smith
+  what: commented
+  comment: 'R1 council nits to consider in a later hardening pass: _compact_event
+    rescans from the request baseline every 0.5s during idle/watch (bounded at 8 MiB,
+    but potentially wasteful over a 3600s wait); use an incremental event cursor without
+    losing the baseline or malformed-record checks. Audit the rare identity-failure
+    plus peer-boundary path for a useful recorded notice result when continuation
+    cannot reach the pane. The exact CTO cancellation notice can be followed by a
+    continuation when an event arrives during the 30s watch; wording/timing is separately
+    filed as compact-peer-watch-window-and-notice. These do not block PR #7.'
