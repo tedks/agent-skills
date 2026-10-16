@@ -69,3 +69,12 @@ log_events:
     are running at c37b260. Two operator product rulings block merge: compact-intervening-turn-policy
     and compact-unconfirmed-review-notice. No live affected pane or operation record
     was changed.'
+- time: 2026-10-16T07:11:01-00:00
+  who: Ted Smith
+  what: commented
+  comment: 'HCOMPACT-RATE tripwire at 338 turns/hour: I polled the running nix flake
+    check/mutation process with repeated short tool waits while it produced no output.
+    I stopped that polling pattern. I will use one bounded blocking wait for the existing
+    gate, and any further repeated test cycle goes to a fresh Luna worker with a small
+    brief. The gate process is owned by this lane; branch source remains unchanged
+    at 40405c3 while it runs.'
