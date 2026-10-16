@@ -491,6 +491,7 @@ class ControlTests(unittest.TestCase):
              patch.object(h, '_send', side_effect=RuntimeError('transport failed')):
             result = self.observe(oid)
         self.assertEqual('deferred', result['state'])
+        self.assertIsNotNone(result.get('failure_notice'))
         self.assertEqual('ambiguous', result['failure_notice']['state'])
         self.assertTrue(result['failure_notice']['needs_review'])
 
@@ -1250,6 +1251,7 @@ class ControlTests(unittest.TestCase):
         result = self.observe(oid, deferred)
         self.assertEqual('deferred', result['state'])
         self.assertEqual('not_started', result['completion']['state'])
+        self.assertIsNotNone(result.get('failure_notice'))
         self.assertEqual('delivered', result['failure_notice']['state'])
         self.assertEqual(1, sum(message.startswith('COMPACTION NOT DISPATCHED:') for message in self.sent))
         self.sent.clear()
