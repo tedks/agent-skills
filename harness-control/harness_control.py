@@ -352,9 +352,14 @@ def _native_idle(record, focus_after=None):
                         idle = False
                     continue
                 if kind == 'queue-operation' and offset >= baseline['offset']:
-                    if not rearm:
-                        raise ControlError('superseded_by_new_input')
-                    idle = False
+                    if row.get('isSidechain') is True:
+                        continue
+                    if row.get('sessionId') != record['session_id']:
+                        raise ControlError('idle_metadata_malformed')
+                    # Queue ops can precede the current turn's duration and
+                    # describe several pending inputs. Native rows do not
+                    # establish that the whole queue drained before dispatch.
+                    raise ControlError('superseded_by_new_input')
                 metadata = {'mode': 'mode', 'permission-mode': 'permissionMode', 'atis-latch': 'atis',
                             'ai-title': 'aiTitle', 'last-prompt': 'lastPrompt'}
                 if kind in metadata:
@@ -373,9 +378,7 @@ def _native_idle(record, focus_after=None):
                     raise ControlError('idle_root_session_unavailable')
                 if (kind == 'attachment' and offset >= baseline['offset'] and
                         isinstance(row.get('attachment'), dict) and row['attachment'].get('type') == 'queued_command'):
-                    if not rearm:
-                        raise ControlError('superseded_by_new_input')
-                    idle = False
+                    raise ControlError('superseded_by_new_input')
                 identifier = row.get('uuid')
                 if not isinstance(identifier, str) or not identifier:
                     raise ControlError('idle_row_identity_unavailable')
@@ -452,8 +455,9 @@ def _wait_idle(record, identity, observer_deadline, focus_after=None, sends=1, o
         except ControlError as exc:
             if str(exc) == 'superseded_by_new_input':
                 return {'state': 'deferred', 'reason': str(exc)}
-            if str(exc) in ('idle_record_shape_unknown', 'idle_root_session_unavailable',
-                            'idle_metadata_malformed'):
+            if ((record.get('_idle_cursor') or {}).get('error') == str(exc) or
+                    str(exc) in ('idle_record_shape_unknown', 'idle_root_session_unavailable',
+                                 'idle_metadata_malformed')):
                 return {'state': 'deferred', 'reason': str(exc), 'evidence_reason': str(exc)}
             last = {'state': 'unknown', 'reason': str(exc)}
         except (OSError, ValueError, KeyError, TypeError):
@@ -670,6 +674,11 @@ class HarnessControl:
                     fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
                 except BlockingIOError:
                     return record  # live observer owns the final receipt, including continuation
+                # The observer's final write does not take .lock. Reload after
+                # acquiring its lease so a delivered receipt is not downgraded.
+                record = _read(self.directory / (operation_id + '.json'))
+                if record['state'] in TERMINAL:
+                    return record
                 if record['state'] == 'warning_dispatching':
                     _settle_dispatches(record, 'observer_disappeared')
                     record['state'] = record.pop('pending_final_state', 'failed')

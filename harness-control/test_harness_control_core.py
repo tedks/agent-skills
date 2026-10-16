@@ -413,17 +413,40 @@ class ControlTests(unittest.TestCase):
                 result = h._wait_idle(record, self.identity, time.monotonic() + 30, operation_path=path)
                 self.assertEqual({'state': 'deferred', 'reason': reason, 'evidence_reason': reason}, result)
 
-    def test_queued_claude_input_remains_busy_until_next_turn_finishes(self):
+    def test_persisted_native_parse_error_defers_immediately(self):
+        record = self.idle_record('codex')
+        record['action'] = 'compact'
+        self.rows({'type': 'event_msg', 'payload': []})
+        self.native_idle.side_effect = self.real_native_idle
+        result = h._wait_idle(record, self.identity, time.monotonic() + 30)
+        self.assertEqual('deferred', result['state'])
+        self.assertEqual('idle_event_malformed', result['reason'])
+
+    def test_queued_claude_input_supersedes_before_current_turn_finishes(self):
         for queued in ({'type': 'queue-operation', 'sessionId': SID},
-                       self.claude_row('attachment', 'queued', 'one-d', attachment={'type': 'queued_command'})):
+                       self.claude_row('attachment', 'queued', 'one-x', attachment={'type': 'queued_command'})):
             with self.subTest(kind=queued['type']):
                 self.transcript.write_text('')
                 record = self.idle_record()
                 record['action'] = 'compact'
-                self.rows(*self.claude_idle_rows(), queued)
-                self.assertNotEqual('idle', self.native_idle_result(record)['state'])
-                self.rows(*self.claude_idle_rows('two'))
-                self.assertEqual('idle', self.native_idle_result(record)['state'])
+                rows = self.claude_idle_rows()
+                if queued['type'] == 'attachment':
+                    rows[-1]['parentUuid'] = 'queued'
+                self.rows(*rows[:-1], queued, rows[-1])
+                with self.assertRaisesRegex(h.ControlError, 'superseded_by_new_input'):
+                    self.real_native_idle(record)
+
+    def test_queued_input_defers_compact_without_sending_command(self):
+        rows = self.claude_idle_rows()
+        self.rows(*rows[:-1])
+        oid = self.request(timeout_seconds=30)
+        self.rows({'type': 'queue-operation', 'sessionId': SID, 'operation': 'enqueue'}, rows[-1])
+        self.native_idle.side_effect = self.real_native_idle
+        result = self.observe(oid)
+        self.assertEqual('deferred', result['state'])
+        self.assertEqual('superseded_by_new_input', result['reason'])
+        self.assertEqual('not_dispatched', result['delivery']['state'])
+        self.assertNotIn('/compact', self.sent)
 
     def test_cancellation_during_idle_rearm_cannot_restore_waiting_state(self):
         oid = self.request(timeout_seconds=30)
@@ -480,6 +503,26 @@ class ControlTests(unittest.TestCase):
         self.assertEqual('deferred', result['state'])
         self.assertEqual('ambiguous', result['failure_notice']['state'])
         self.assertTrue(result['failure_notice']['needs_review'])
+
+    def test_final_notice_receipt_wins_reconciler_race(self):
+        oid = self.request(timeout_seconds=30)
+        path = self.control.directory / (oid + '.json')
+        record = h._read(path)
+        record.update(state='warning_dispatching', pending_final_state='deferred',
+                      failure_notice={'state': 'dispatching'})
+        h._write(path, record)
+        real_flock = h.fcntl.flock
+        def finish_before_lease(fd, mode):
+            if mode == (h.fcntl.LOCK_EX | h.fcntl.LOCK_NB):
+                final = h._read(path)
+                final['failure_notice'] = {'state': 'delivered'}
+                final['state'] = final.pop('pending_final_state')
+                h._write(path, final)
+            return real_flock(fd, mode)
+        with patch.object(h.fcntl, 'flock', side_effect=finish_before_lease):
+            result = self.control.operation(oid)
+        self.assertEqual('deferred', result['state'])
+        self.assertEqual('delivered', result['failure_notice']['state'])
 
     def test_focus_waits_for_new_completed_turn(self):
         oid = self.request(focus='focus')
@@ -1489,7 +1532,7 @@ def mutations():
 """
     cases = [
         ('queued_attachment', "row['attachment'].get('type') == 'queued_command'", 'False'),
-        ('queue_supersession', "if kind == 'queue-operation' and offset >= baseline['offset'] and not rearm:", 'if False:'),
+        ('queue_supersession', "if kind == 'queue-operation' and offset >= baseline['offset']:", 'if False:'),
         ('focus_idle_recheck', "if suffix == '.focus' and _native_idle(record)['state'] != 'idle':", 'if False:'),
         ('focus_original_generation', "suffix == '.focus' and _native_idle(record)['state']", "suffix == '.focus' and _native_idle(record, record.get('focus_after'))['state']"),
         ('nontext_supersession', "user_input = not (isinstance(content, list) and bool(content) and\n                                      all(isinstance(c, dict) and c.get('type') == 'tool_result' for c in content))", "user_input = isinstance(content, str) or (isinstance(content, list) and any(isinstance(c, dict) and c.get('type') == 'text' for c in content))"),
