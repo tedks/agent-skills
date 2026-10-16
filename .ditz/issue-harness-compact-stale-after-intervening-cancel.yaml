@@ -7,7 +7,7 @@ type: bugfix
 component: default
 release:
 reporter: Ted Smith <tedks@riseup.net>
-status: unstarted
+status: in_progress
 disposition:
 creation_time: 2026-10-16T16:43:43-00:00
 references: []
@@ -28,3 +28,7 @@ log_events:
     for a new request; cancel_operation must be allowed for a watching/warning operation
     that has not dispatched; add a fixture from this record and a regression test.
     The CTO compacted the lane by hand.'
+- time: 2026-10-16T16:45:45-00:00
+  who: Ted Smith
+  what: started
+  comment: ""
