@@ -19,11 +19,21 @@ lines and says what it truncated:
 
 - the project root and, for a bare-repo + worktrees layout, `git worktree list`;
 - a depth-2 tree of the current worktree's tracked files with sizes;
-- the "Project structure" section of the worktree's `AGENTS.md` (or
-  `CLAUDE.md`) verbatim, or a one-line note that it is missing.
+- the body of the worktree's structure section in `AGENTS.md` (or
+  `CLAUDE.md` when AGENTS.md has none): a `##` heading matching, case
+  insensitively, `[Project |Repository |Directory ]Structure|Layout`, or a
+  one-line note that it is missing. A symlink that leaves the project is not
+  read.
+
+The tree lists tracked files only (untracked directories are not shown) and
+every top-level entry always appears; when space runs out the notice names
+the command that shows the rest (`git ls-files <dir>`, `git worktree list`).
+Needs git 2.31 or later. `WHERE_GIT_TIMEOUT` (seconds, default 30) and
+`WHERE_MAX_STAT` (tracked-file count past which sizes are skipped, default
+20000) bound the work; a failure prints one line and exits 1.
 
 The map is cached under `${XDG_CACHE_HOME:-~/.cache}/where/` and reused for
-10 minutes while HEAD is unchanged (uncommitted edits are not noticed; use
+10 minutes while HEAD, the worktree list and the git directory are unchanged (uncommitted edits are not noticed; use
 `--refresh`). It reads git metadata and the tracked-file list only and never
 walks outside the project root. It exits 2 with a hint when pointed at a
 broad root (`~`, `~/Projects`, `/`, `/tmp`, and similar) or at a directory

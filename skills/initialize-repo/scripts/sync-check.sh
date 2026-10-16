@@ -125,9 +125,15 @@ done
 # where skill before searching. Presence-only: reports a missing section or
 # one that still holds only the template placeholder.
 if [[ -f "$REPO/AGENTS.md" ]]; then
+  # Heading definition shared with the where skill: case-insensitive
+  # (Project|Repository|Directory )?(structure|layout); a "## " line inside
+  # a code fence neither starts nor ends the section.
   structure=$(awk '
-    /^## Project structure[[:space:]]*$/ { found = 1; next }
-    found && /^## / { exit }
+    /^[[:space:]]*(```|~~~)/ { if (found) print; fence = !fence; next }
+    !fence && /^## / {
+      if (found) exit
+      if (tolower($0) ~ /^##[[:space:]]+((project|repository|directory)[[:space:]]+)?(structure|layout)[[:space:]]*$/) { found = 1; next }
+    }
     found { print }
     END { if (!found) exit 3 }
   ' "$REPO/AGENTS.md") && has_section=1 || has_section=0

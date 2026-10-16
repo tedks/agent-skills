@@ -4,6 +4,9 @@
 Reads only git metadata, the tracked-file list, and the worktree's
 AGENTS.md/CLAUDE.md. It never walks the filesystem, so it cannot become the
 broad find/rg it exists to replace. Refuses broad roots (exit 2).
+Needs git >= 2.31 (rev-parse --path-format). Environment: WHERE_GIT_TIMEOUT
+(seconds per git call, default 30), WHERE_MAX_STAT (skip per-file sizes past
+this many tracked files, default 20000).
 """
 import argparse
 import hashlib
@@ -15,9 +18,24 @@ import time
 from pathlib import Path
 
 EXIT_REFUSED = 2
-LIMITS = {"worktrees": 15, "tree": 55, "structure": 35}
+CACHE_VERSION = 2
+TOTAL_LINES = 120
+WORKTREES_IN_TREE_MODE = 15
+WORKTREES_IN_ROOT_MODE = 60
+TREE_MIN, TREE_MAX = 55, 90
+STRUCTURE_MAX, STRUCTURE_MIN = 35, 10
 KIDS_PER_DIR = 6
+MAX_BYTES = 1 << 20
+GIT_TIMEOUT = float(os.environ.get("WHERE_GIT_TIMEOUT", "30"))
+MAX_STAT = int(os.environ.get("WHERE_MAX_STAT", "20000"))
+HEADING = re.compile(r"^##\s+((project|repository|directory)\s+)?(structure|layout)\s*$", re.I)
+SCRUB = ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_COMMON_DIR",
+         "GIT_OBJECT_DIRECTORY", "GIT_NAMESPACE", "GIT_CEILING_DIRECTORIES")
 SKIP = re.compile(r"^(\.git|node_modules|\.venv|__pycache__|bazel-.*|result(-.*)?)$")
+
+
+class Fail(Exception):
+    pass
 
 
 def die(msg):
@@ -25,10 +43,25 @@ def die(msg):
     sys.exit(EXIT_REFUSED)
 
 
+def git_env():
+    env = {k: v for k, v in os.environ.items() if k not in SCRUB}
+    env["GIT_OPTIONAL_LOCKS"] = "0"
+    return env
+
+
+def run_git(cwd, *args, text=True):
+    try:
+        return subprocess.run(["git", "-C", str(cwd), *args], capture_output=True,
+                              text=text, timeout=GIT_TIMEOUT, env=git_env())
+    except subprocess.TimeoutExpired:
+        raise Fail(f"git {args[0]} timed out after {GIT_TIMEOUT:g}s in {cwd}; "
+                   "the repo may be huge or locked (WHERE_GIT_TIMEOUT raises the limit).")
+    except OSError as e:
+        raise Fail(f"cannot run git: {e}")
+
+
 def git(cwd, *args):
-    env = dict(os.environ, GIT_OPTIONAL_LOCKS="0")
-    r = subprocess.run(["git", "-C", str(cwd), *args], capture_output=True,
-                       text=True, timeout=30, env=env)
+    r = run_git(cwd, *args)
     return r.returncode, r.stdout.strip()
 
 
@@ -55,16 +88,20 @@ def fmt_size(n):
             return f"{n:.1f}{unit}"
 
 
-def cap(lines, limit, what):
+def plural(n, word):
+    return f"{n} {word}" if n == 1 else f"{n} {word}s"
+
+
+def cap(lines, limit, what, how):
     if len(lines) <= limit:
         return lines
-    return lines[:limit - 1] + [f"... truncated {len(lines) - limit + 1} more {what} lines"]
+    return lines[:limit - 1] + [f"... truncated {len(lines) - limit + 1} more {what} lines; {how}"]
 
 
 def locate(path):
     rc, common = git(path, "rev-parse", "--path-format=absolute", "--git-common-dir")
     if rc != 0:
-        die(f"{path} is not inside a git project; cd into one or pass its path.")
+        die(f"{path} is not inside a git project (or git is older than 2.31); cd into one or pass its path.")
     common = Path(common)
     root = common.parent if common.name in (".git", ".bare") else common
     rc, top = git(path, "rev-parse", "--show-toplevel")
@@ -73,65 +110,119 @@ def locate(path):
 
 
 def tree_lines(worktree):
-    r = subprocess.run(["git", "-C", str(worktree), "ls-files", "-z"],
-                       capture_output=True, timeout=60)
-    top = {}  # name -> [size, nfiles, {child: [size, nfiles]}] ; files have None kids
-    for rel in r.stdout.decode(errors="replace").split("\0"):
-        if not rel:
-            continue
+    r = run_git(worktree, "ls-files", "-z", text=False)
+    if r.returncode != 0:
+        raise Fail(f"git ls-files failed in {worktree}")
+    rels = [x for x in r.stdout.decode(errors="replace").split("\0")
+            if x and not SKIP.match(x.split("/", 1)[0])]
+    sized = len(rels) <= MAX_STAT
+    top = {}  # name -> {"size", "n", "dirs": {name: [size, n]}, "files": {name: size}} or file size int
+    for rel in rels:
+        size = 0
+        if sized:
+            try:
+                size = os.lstat(worktree / rel).st_size
+            except OSError:
+                continue
         parts = rel.split("/")
-        if any(SKIP.match(p) for p in parts[:1]):
-            continue
-        try:
-            size = os.lstat(worktree / rel).st_size
-        except OSError:
-            continue
         if len(parts) == 1:
-            top[parts[0]] = [size, 1, None]
+            top[parts[0]] = size
             continue
-        ent = top.setdefault(parts[0], [0, 0, {}])
-        ent[0] += size
-        ent[1] += 1
-        if len(parts) > 2:
-            kid = ent[2].setdefault(parts[1], [0, 0])
-            kid[0] += size
-            kid[1] += 1
-    out = []
-    for name in sorted(top):
-        size, n, kids = top[name]
-        if kids is None:
-            out.append(f"  {name} {fmt_size(size)}")
+        ent = top.setdefault(parts[0], {"size": 0, "n": 0, "dirs": {}, "files": {}})
+        ent["size"] += size
+        ent["n"] += 1
+        if len(parts) == 2:
+            ent["files"][parts[1]] = size
+        else:
+            d = ent["dirs"].setdefault(parts[1], [0, 0])
+            d[0] += size
+            d[1] += 1
+
+    def sz(n):
+        return fmt_size(n) if sized else "?"
+
+    names = sorted(top)
+    budget = min(TREE_MAX, max(TREE_MIN, len(names) + 1))
+    remaining = budget - len(names) - 1  # one line reserved for the omission notice
+    out, omitted = [], []
+    for name in names:
+        ent = top[name]
+        if isinstance(ent, int):
+            out.append(f"  {name} {sz(ent)}")
             continue
-        out.append(f"  {name}/ {fmt_size(size)} {n} files")
-        names = sorted(kids)
-        for k in names[:KIDS_PER_DIR]:
-            out.append(f"    {k}/ {fmt_size(kids[k][0])} {kids[k][1]} files")
-        if len(names) > KIDS_PER_DIR:
-            out.append(f"    ... {len(names) - KIDS_PER_DIR} more subdirectories")
-    return out
+        out.append(f"  {name}/ {sz(ent['size'])} {plural(ent['n'], 'file')}")
+        kids = [f"    {k}/ {sz(v[0])} {plural(v[1], 'file')}" for k, v in sorted(ent["dirs"].items())]
+        kids += [f"    {k} {sz(v)}" for k, v in sorted(ent["files"].items())]
+        if not kids:
+            continue
+        if len(kids) <= KIDS_PER_DIR and len(kids) <= remaining:
+            show = kids
+        else:
+            n = min(KIDS_PER_DIR, remaining - 1)
+            if n <= 0:
+                omitted.append(name)
+                continue
+            show = kids[:n] + [f"    ... {len(kids) - n} more entries (git ls-files {name}/)"]
+        remaining -= len(show)
+        out += show
+    if omitted:
+        out.append(f"... truncated: contents of {plural(len(omitted), 'directory')} not shown "
+                   f"(first: {omitted[0]}/); run git ls-files <dir>")
+    if not sized:
+        out.append(f"... sizes skipped: more than {MAX_STAT} tracked files (WHERE_MAX_STAT)")
+    return out, budget
+
+
+def section_of(lines):
+    """Body of the first structure/layout section, or None. A '## ' line inside a
+    code fence neither starts nor ends a section."""
+    fence, start = False, None
+    for i, line in enumerate(lines):
+        if re.match(r"^\s*(```|~~~)", line):
+            fence = not fence
+            continue
+        if fence or not line.startswith("## "):
+            continue
+        if start is not None:
+            return strip_blank(lines[start:i]), lines[start - 1]
+        if HEADING.match(line):
+            start = i + 1
+    return (strip_blank(lines[start:]), lines[start - 1]) if start is not None else None
+
+
+def strip_blank(body):
+    body = list(body)
+    while body and not body[0].strip():
+        body.pop(0)
+    while body and not body[-1].strip():
+        body.pop()
+    return body
 
 
 def structure_section(worktree):
+    """(title, body). Falls through AGENTS.md to CLAUDE.md; never reads a file
+    whose real path leaves the worktree."""
+    base = Path(os.path.realpath(worktree))
+    notes = []
     for name in ("AGENTS.md", "CLAUDE.md"):
         f = worktree / name
-        if not f.is_file():
+        if not (f.is_symlink() or f.exists()):
             continue
-        lines = f.read_text(errors="replace").splitlines()
-        for i, line in enumerate(lines):
-            if re.match(r"^##\s+Project structure\s*$", line, re.I):
-                end = len(lines)
-                for j in range(i + 1, len(lines)):
-                    if lines[j].startswith("## "):
-                        end = j
-                        break
-                body = lines[i + 1:end]
-                while body and not body[0].strip():
-                    body.pop(0)
-                while body and not body[-1].strip():
-                    body.pop()
-                return body
-        return [f'({name} has no "Project structure" section; add one so agents can target searches)']
-    return ["(no AGENTS.md or CLAUDE.md in this worktree; add one with a Project structure section)"]
+        real = Path(os.path.realpath(f))
+        if base != real and base not in real.parents:
+            notes.append(f"({name} is a symlink to outside the project; not read)")
+            continue
+        if not real.is_file():
+            continue
+        with open(real, "rb") as fh:
+            text = fh.read(MAX_BYTES).decode(errors="replace")
+        found = section_of(text.splitlines())
+        if found:
+            body, heading = found
+            return f'{name} "{heading.strip()}" section:', body
+        notes.append(f'({name} has no "Project structure" section; add one so agents can target searches)')
+    return "Project structure:", notes[:1] or [
+        "(no AGENTS.md or CLAUDE.md in this worktree; add one with a Project structure section)"]
 
 
 def build(root, worktree, common):
@@ -142,12 +233,16 @@ def build(root, worktree, common):
     wt = wl.splitlines() if rc == 0 and wl else []
     if len(wt) > 1 or not worktree:
         out.append("worktrees:")
-        out += ["  " + ln for ln in cap(wt, LIMITS["worktrees"], "worktree")]
+        limit = WORKTREES_IN_TREE_MODE if worktree else WORKTREES_IN_ROOT_MODE
+        out += ["  " + ln for ln in cap(wt, limit, "worktree", "run git worktree list")]
     if worktree:
-        out.append("tree (tracked files, depth 2):")
-        out += cap(tree_lines(worktree), LIMITS["tree"], "tree")
-        out.append('Project structure (from AGENTS.md/CLAUDE.md):')
-        out += cap(structure_section(worktree), LIMITS["structure"], "structure")
+        out.append("tree (tracked files only, depth 2; untracked dirs are not shown):")
+        tree, _ = tree_lines(worktree)
+        out += tree
+        title, body = structure_section(worktree)
+        out.append(title)
+        room = max(STRUCTURE_MIN, min(STRUCTURE_MAX, TOTAL_LINES - len(out) - 1))
+        out += cap(body, room, "structure", "read the full section in the file")
     else:
         out.append("tree: skipped, no worktree at this path")
     return out
@@ -173,15 +268,21 @@ def main():
     key_path = worktree or root
     rc, head = git(key_path if worktree else common, "rev-parse", "HEAD")
     head = head if rc == 0 else "unknown"
+    _, porcelain = git(common, "worktree", "list", "--porcelain")
+    wt_hash = hashlib.sha1(porcelain.encode()).hexdigest()[:12]
+    stamp = f"# v{CACHE_VERSION} head={head} wt={wt_hash} common={common}"
     cache_dir = Path(os.environ.get("XDG_CACHE_HOME") or Path.home() / ".cache") / "where"
     safe = re.sub(r"[^A-Za-z0-9]+", "_", str(key_path)).strip("_")[-80:]
     cache = cache_dir / f"{safe}-{hashlib.sha1(str(key_path).encode()).hexdigest()[:8]}.txt"
 
     if not a.refresh and cache.is_file():
         age = (time.time() - cache.stat().st_mtime) / 60
-        text = cache.read_text()
+        try:
+            text = cache.read_text()
+        except (OSError, UnicodeDecodeError):
+            text = ""
         first, _, body = text.partition("\n")
-        if first == f"# head={head}" and age < a.max_age:
+        if first == stamp and age < a.max_age:
             print(f"where: cached map, {age:.0f} min old (--refresh to rebuild)", file=sys.stderr)
             sys.stdout.write(body)
             return
@@ -190,7 +291,7 @@ def main():
     try:
         cache_dir.mkdir(parents=True, exist_ok=True)
         tmp = cache.with_suffix(f".{os.getpid()}.tmp")
-        tmp.write_text(f"# head={head}\n{body}")
+        tmp.write_text(f"{stamp}\n{body}")
         os.replace(tmp, cache)
     except OSError as e:
         print(f"where: cache not written: {e}", file=sys.stderr)
@@ -198,4 +299,8 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except Fail as e:
+        print(f"where: {e}", file=sys.stderr)
+        sys.exit(1)
