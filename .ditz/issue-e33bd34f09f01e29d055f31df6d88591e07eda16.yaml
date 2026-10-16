@@ -100,3 +100,18 @@ log_events:
     by two Ted product rulings in compact-intervening-turn-policy and compact-unconfirmed-review-notice.
     The three open question/follow-up issues are synced in ditz-metadata. No live
     affected panes or records were touched.'
+- time: 2026-10-16T08:16:43-00:00
+  who: Ted Smith
+  what: commented
+  comment: 'HCOMPACT-R1 rulings applied at branch commit 63369fd (PR #7, not merged
+    yet): intervening operator turn cancels the scheduled command with one notice
+    and reason intervening_turn; a bounded peer-event watch can mark completed_by_other
+    and send continuation. Delivered but unconfirmed /compact records unconfirmed
+    with receipt, one distinct notice, and no automatic retry or continuation. Real
+    Claude boundary/summary and Codex peer-event fixtures, focus-triggered compaction,
+    cancellation race, reaper, and typed pane error contract are covered. Focused
+    core suite passes 104 tests. Available Codex native and Claude Opus council seats
+    reached CLEAN on the final logic and fix delta; agy unavailable due quota. Exact-head
+    nix flake check/build are running on 63369fd. Product ruling issues are answered;
+    follow-up wording/window question compact-peer-watch-window-and-notice does not
+    block merge. No affected live pane/state was touched.'
