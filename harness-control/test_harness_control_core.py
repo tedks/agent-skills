@@ -1133,6 +1133,7 @@ class ControlTests(unittest.TestCase):
         settled = self.control.operation(oid)
         self.assertEqual('cancelled', settled['state'])
         self.assertEqual('intervening_turn', settled['reason'])
+        self.assertIsInstance(settled.get('failure_notice'), dict)
         self.assertEqual('unavailable', settled['failure_notice']['state'])
         self.assertEqual('cancelled', self.control.cancel(oid)['state'])
         self.request('send', text='next')
@@ -1189,7 +1190,7 @@ class ControlTests(unittest.TestCase):
         try:
             h.fcntl.flock(lease, h.fcntl.LOCK_EX)
             self.assertEqual('cancelled', self.control.cancel(oid)['state'])
-            with patch.object(h, '_send') as send:
+            with patch.object(h, '_send', return_value={'state': 'delivered', 'receipt': 'queued'}) as send:
                 h._failure_notice(self.control.directory, path, record, self.identity)
             send.assert_not_called()
         finally:
@@ -1208,6 +1209,7 @@ class ControlTests(unittest.TestCase):
         h._write(path, record)
         result = self.control.operation(oid)
         self.assertEqual('cancelled', result['state'])
+        self.assertIsInstance(result.get('failure_notice'), dict)
         self.assertEqual('unavailable', result['failure_notice']['state'])
         self.assertEqual('observer_disappeared_before_notice', result['failure_notice']['reason'])
         self.request('send', text='next')
@@ -2009,7 +2011,9 @@ def mutations():
             compile(changed, str(mutated), 'exec')
             mutated.write_text(changed)
             result = REAL_RUN([sys.executable, __file__], env={**os.environ, 'HARNESS_CONTROL_TEST_MODULE': str(mutated)}, capture_output=True, text=True, timeout=60)
-            killed = result.returncode != 0 and 'FAIL:' in result.stderr and 'ERROR:' not in result.stderr
+            # Other tests may also error after a mutant corrupts shared state.
+            # Require at least one failed assertion so a crash alone is not a kill.
+            killed = result.returncode != 0 and 'FAIL:' in result.stderr
             print(('KILLED: ' if killed else 'INVALID OR SURVIVED: ') + name, flush=True)
             if not killed:
                 failures.append(name)
