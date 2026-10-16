@@ -18,8 +18,8 @@ type: task
 component: open-questions
 release:
 reporter: Ted Smith <tedks@riseup.net>
-status: unstarted
-disposition:
+status: closed
+disposition: fixed
 creation_time: 2026-10-16T07:00:37-00:00
 references: []
 log_events:
@@ -39,3 +39,9 @@ log_events:
     or a peer compacted), record completed_by_other and send the continuation. Rationale:
     doctrine says compact only after durable state is saved; new work invalidates
     the checkpoint, and a re-request is cheap.'
+- time: 2026-10-16T08:36:51-00:00
+  who: Ted Smith
+  what: 'closed: fixed'
+  comment: 'Ruling implemented in merged PR #7 (996a24f): intervening operator turn
+    cancels scheduled command, records intervening_turn, and sends one notice; peer
+    event records completed_by_other.'
