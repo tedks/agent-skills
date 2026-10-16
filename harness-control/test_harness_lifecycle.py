@@ -15,7 +15,7 @@ MODULE = Path(os.environ.get('HARNESS_LIFECYCLE_TEST_MODULE', Path(__file__).wit
 spec = importlib.util.spec_from_file_location('server', MODULE)
 server = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(server)
-from harness_control import ControlError
+from harness_control import ControlError, OperationInProgress
 from harness_identity import Identity, IdentityError
 
 SID = '11111111-1111-1111-1111-111111111111'
@@ -136,6 +136,16 @@ class LifecycleTests(unittest.IsolatedAsyncioTestCase):
             with patch.object(server, '_own_control', side_effect=error):
                 self.assertEqual({'state': state, 'reason': reason}, await server.self_exit('receipt'))
 
+    async def test_in_progress_result_names_blocker_and_clearance(self):
+        self.control.request.side_effect = OperationInProgress(
+            'a' * 32, 'warning_dispatching', 'cancel_operation(' + 'a' * 32 + ') then retry')
+        result = await server.self_compact('/private/shard', 'receipt')
+        self.assertEqual('refused', result['state'])
+        self.assertEqual('operation_in_progress', result['reason'])
+        self.assertEqual('a' * 32, result['blocking_operation_id'])
+        self.assertEqual('warning_dispatching', result['blocking_state'])
+        self.assertIn('cancel_operation', result['next_action'])
+
     async def test_compact_forwards_recovery_and_continuation(self):
         result = await server.self_compact('/private/shard', 'receipt', continuation='Resume bounded work.', focus='Preserve pauses.', timeout_seconds=90)
         self.assertEqual({'state': 'test_result', 'method': 'request'}, result)
@@ -174,6 +184,7 @@ MUTANTS = {
     'test_codex_unique_live_rollout_binding': ("transcript = binding.get('transcript_path')", "transcript = '/wrong/rollout.jsonl'"),
     'test_codex_unknown_rollout_never_dispatches': ("if not isinstance(transcript, str) or not Path(transcript).is_absolute():", 'if False:'),
     'test_errors_are_typed_and_private_details_omitted': ("return {'state': 'refused', 'reason': str(exc)}", "return {'state': 'unavailable', 'reason': str(exc)}"),
+    'test_in_progress_result_names_blocker_and_clearance': ("'blocking_state': exc.state, 'next_action': exc.next_action", "'blocking_state': exc.state, 'next_action': 'wait'"),
     'test_compact_forwards_recovery_and_continuation': ('continuation=continuation, focus=focus, timeout_seconds=timeout_seconds,', 'continuation=None, focus=focus, timeout_seconds=timeout_seconds,'),
     'test_exit_and_send_forward_exact_controls': ("_control_call, 'request', 'exit',", "_control_call, 'request', 'send',"),
     'test_receipt_operation_cancel_and_read_forward': ("_control_call, 'cancel', operation_id", "_control_call, 'operation', operation_id"),

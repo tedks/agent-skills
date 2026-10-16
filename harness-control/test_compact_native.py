@@ -16,8 +16,11 @@ import subprocess
 import sys
 import tempfile
 import time
+from types import SimpleNamespace
+from unittest.mock import patch
 
 sys.dont_write_bytecode = True
+import harness_control
 from harness_control import HarnessControl, TERMINAL
 from harness_identity import discover
 from session_binding import observe_native_session
@@ -86,6 +89,11 @@ def main():
     commit = run(['git', '-C', repo, 'rev-parse', 'HEAD']).stdout.strip()
     report = {'root': str(root), 'results': [], 'server_released': False}
     environment = {**os.environ, 'SPAWN_TMUX_SOCKET': str(socket)}
+    real_popen = subprocess.Popen
+    def hold_observer(command, *args, **kwargs):
+        if '--observe' in command:
+            return SimpleNamespace(pid=os.getpid())
+        return real_popen(command, *args, **kwargs)
     created = False
     try:
         run([*tmux, 'new-session', '-d', '-s', 'compact-native', '-x', '240', '-y', '60'])
@@ -193,6 +201,33 @@ def main():
             wait_until(lambda: re.search(r'[●•] NATIVE-COMPACT-CONTINUED\b', screen()), 120,
                        harness + ' continuation reply')
             print(harness + ': native compact and continuation confirmed', flush=True)
+            # Hold only the second observer launch. The first operation above
+            # exercised the real detached watcher; this barrier makes a native
+            # intervening message deterministic without touching another pane.
+            with patch.object(harness_control.subprocess, 'Popen', side_effect=hold_observer):
+                interrupted = control.request('compact', receipt, timeout_seconds=180)
+            if interrupted['state'] != 'scheduled':
+                raise RuntimeError(harness + ' intervening operation was not scheduled')
+            intervening_file = root / (harness + '-intervening.txt')
+            intervening_file.write_text('Disposable operator update: reply NATIVE-INTERVENING-READY. Make no file changes.')
+            run([MESSAGE, 'send', pane, '--prompt-file', intervening_file,
+                 '--backoff', '--max-wait', '60'], env=environment, timeout=120)
+            wait_until(lambda: re.search(r'[●•] NATIVE-INTERVENING-READY\b', screen()), 180,
+                       harness + ' intervening reply')
+            harness_control.observe(control.directory, interrupted['operation_id'])
+            cancelled = control.operation(interrupted['operation_id'])
+            if (cancelled['state'] != 'cancelled' or cancelled['reason'] != 'intervening_turn' or
+                    cancelled['delivery']['state'] != 'not_dispatched' or
+                    (cancelled.get('failure_notice') or {}).get('state') != 'delivered'):
+                raise RuntimeError(harness + ' intervening message did not settle cancellation')
+            with patch.object(harness_control.subprocess, 'Popen', side_effect=hold_observer):
+                replacement = control.request('compact', receipt, timeout_seconds=180)
+            if replacement['state'] != 'scheduled' or control.cancel(replacement['operation_id'])['state'] != 'cancelled':
+                raise RuntimeError(harness + ' refused a new compact after cancellation')
+            report['results'].append({'harness': harness, 'intervening_state': cancelled['state'],
+                                      'notice': cancelled['failure_notice']['state'],
+                                      'replacement_state': replacement['state']})
+            print(harness + ': intervening message cancelled; replacement accepted', flush=True)
     finally:
         if created:
             listed = run([*tmux, 'list-panes', '-a', '-F', '#{pane_id} #{pane_pid} #{pane_current_command}'], check=False)
