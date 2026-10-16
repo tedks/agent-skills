@@ -82,15 +82,15 @@ def _read(path):
 
 
 def _write(path, value):
-    if 'operation_id' in value:
+    if value.get('action') in ('compact', 'exit', 'send'):
         fields = ('state', 'reason', 'deadline', 'idle_rearms')
         nested = ('idle', 'focus_idle', 'focus_delivery', 'delivery', 'completion',
                   'continuation', 'failure_notice')
         snapshot = {key: value.get(key) for key in fields}
-        snapshot.update({key: value.get(key, {}).get('state') for key in nested})
+        snapshot.update({key: value.get(key, {}).get('state') if isinstance(value.get(key), dict) else None for key in nested})
         previous = _read(path) if path.exists() else None
         old = None if previous is None else {**{key: previous.get(key) for key in fields},
-                                              **{key: previous.get(key, {}).get('state') for key in nested}}
+                                              **{key: previous.get(key, {}).get('state') if isinstance(previous.get(key), dict) else None for key in nested}}
         value['transitions'] = list(value.get('transitions', previous.get('transitions', []) if previous else []))
         if snapshot != old:
             value['transitions'].append({'at': time.time(), **snapshot})
@@ -344,13 +344,17 @@ def _native_idle(record, focus_after=None):
                     raise ControlError('idle_record_shape_unknown')
             else:
                 if kind in ('api-request-shape', 'api-request-blob', 'api-request'):
+                    if row.get('isSidechain') is True:
+                        continue
                     if row.get('sessionId') != record['session_id']:
                         raise ControlError('idle_metadata_malformed')
                     if kind == 'api-request':
                         idle = False
                     continue
-                if kind == 'queue-operation' and offset >= baseline['offset'] and not rearm:
-                    raise ControlError('superseded_by_new_input')
+                if kind == 'queue-operation' and offset >= baseline['offset']:
+                    if not rearm:
+                        raise ControlError('superseded_by_new_input')
+                    idle = False
                 metadata = {'mode': 'mode', 'permission-mode': 'permissionMode', 'atis-latch': 'atis',
                             'ai-title': 'aiTitle', 'last-prompt': 'lastPrompt'}
                 if kind in metadata:
@@ -367,9 +371,11 @@ def _native_idle(record, focus_after=None):
                     continue
                 if row.get('sessionId') != record['session_id'] or row.get('isSidechain') is not False:
                     raise ControlError('idle_root_session_unavailable')
-                if (kind == 'attachment' and offset >= baseline['offset'] and not rearm and
+                if (kind == 'attachment' and offset >= baseline['offset'] and
                         isinstance(row.get('attachment'), dict) and row['attachment'].get('type') == 'queued_command'):
-                    raise ControlError('superseded_by_new_input')
+                    if not rearm:
+                        raise ControlError('superseded_by_new_input')
+                    idle = False
                 identifier = row.get('uuid')
                 if not isinstance(identifier, str) or not identifier:
                     raise ControlError('idle_row_identity_unavailable')
@@ -446,6 +452,9 @@ def _wait_idle(record, identity, observer_deadline, focus_after=None, sends=1, o
         except ControlError as exc:
             if str(exc) == 'superseded_by_new_input':
                 return {'state': 'deferred', 'reason': str(exc)}
+            if str(exc) in ('idle_record_shape_unknown', 'idle_root_session_unavailable',
+                            'idle_metadata_malformed'):
+                return {'state': 'deferred', 'reason': str(exc), 'evidence_reason': str(exc)}
             last = {'state': 'unknown', 'reason': str(exc)}
         except (OSError, ValueError, KeyError, TypeError):
             last = {'state': 'unknown', 'reason': 'native_idle_evidence_unavailable'}
@@ -654,19 +663,23 @@ class HarnessControl:
         record = _read(self.directory / (operation_id + '.json'))
         if not _same_owner(record['identity'], asdict(self.identity)) or record['session_id'] != self.session_id:
             raise ControlError('operation_identity_mismatch')
-        if record['state'] not in TERMINAL and time.time() >= record['deadline']:
+        if record['state'] == 'warning_dispatching' or (record['state'] not in TERMINAL and time.time() >= record['deadline']):
             fd = os.open(self.directory / '.worker', os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
             try:
                 try:
                     fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
                 except BlockingIOError:
                     return record  # live observer owns the final receipt, including continuation
-                record.update(state='timed_out', reason='observer_deadline_elapsed')
-                if record['completion'].get('state') != 'confirmed':
-                    record['completion'] = {'state': 'unknown'}
-                _settle_dispatches(record, 'observer_disappeared')
-                if record['action'] == 'compact' and record['completion'].get('state') == 'confirmed' and record['continuation']['state'] != 'not_dispatched':
-                    record['state'] = 'continuation_failed'
+                if record['state'] == 'warning_dispatching':
+                    _settle_dispatches(record, 'observer_disappeared')
+                    record['state'] = record.pop('pending_final_state', 'failed')
+                else:
+                    record.update(state='timed_out', reason='observer_deadline_elapsed')
+                    if record['completion'].get('state') != 'confirmed':
+                        record['completion'] = {'state': 'unknown'}
+                    _settle_dispatches(record, 'observer_disappeared')
+                    if record['action'] == 'compact' and record['completion'].get('state') == 'confirmed' and record['continuation']['state'] != 'not_dispatched':
+                        record['state'] = 'continuation_failed'
                 _write(self.directory / (operation_id + '.json'), record)
             finally:
                 os.close(fd)
@@ -908,9 +921,14 @@ def _failure_notice(directory, path, record, identity):
     record['deadline'] = time.time() + SEND_BUDGET + PREFLIGHT_BUDGET
     _write(path, record)
     notice = f'COMPACTION NOT DISPATCHED: {reason}; run /compact yourself or ask a peer'
-    record['failure_notice'] = _send(directory, record, identity, notice, '.failure')
-    record['state'] = record.pop('pending_final_state')
-    _write(path, record)
+    try:
+        record['failure_notice'] = _send(directory, record, identity, notice, '.failure')
+    except Exception:
+        record['failure_notice'] = {'state': 'ambiguous', 'needs_review': True,
+                                    'reason': 'failure_notice_receipt_unavailable'}
+    finally:
+        record['state'] = record.pop('pending_final_state')
+        _write(path, record)
 
 
 def _observe(directory, operation_id, record):
@@ -1040,14 +1058,15 @@ def _observe(directory, operation_id, record):
     finally:
         _settle_dispatches(record, 'observer_interrupted_during_dispatch')
         record.update(updated_at=time.time())
-        needs_notice = (record['action'] == 'compact' and
-                        _definitely_not_dispatched(record.get('delivery', {})) and
-                        record['state'] in ('deferred', 'failed', 'timed_out'))
-        if needs_notice:
-            record['pending_final_state'] = record['state']
-            record['state'] = 'warning_dispatching'
+        needs_notice = False
         with _guard(directory):
             if _read(path)['state'] != 'cancelled':
+                needs_notice = (record['action'] == 'compact' and
+                                _definitely_not_dispatched(record.get('delivery', {})) and
+                                record['state'] in ('deferred', 'failed', 'timed_out'))
+                if needs_notice:
+                    record['pending_final_state'] = record['state']
+                    record['state'] = 'warning_dispatching'
                 _write(path, record)
         if needs_notice:
             _failure_notice(directory, path, record, identity)

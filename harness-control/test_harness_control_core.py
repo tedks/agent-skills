@@ -186,12 +186,11 @@ class ControlTests(unittest.TestCase):
                 self.transcript.write_text('')
                 record = self.idle_record('codex')
                 turn = incident['root_turn_id']
-                self.rows({'type': 'event_msg', 'payload': {'type': 'task_complete',
-                                                            'turn_id': turn, 'root_turn_id': turn}})
+                self.rows(incident['native_completion_row'])
                 result = self.native_idle_result(record)
                 self.assertEqual('idle', result['state'])
                 self.assertEqual(turn, result['turn_id'])
-                self.assertEqual(145, incident['remaining_sender_reserve_seconds'])
+                self.assertEqual(turn, incident['native_completion_row']['payload']['root_turn_id'])
 
     def test_compact_idle_parser_follows_new_root_turns(self):
         for harness in ('codex', 'claude'):
@@ -213,6 +212,22 @@ class ControlTests(unittest.TestCase):
                   *self.claude_idle_rows(focus='focus'))
         result = self.native_idle_result(record, 0)
         self.assertEqual('idle', result['state'])
+
+    def test_claude_post_duration_request_stays_busy_until_next_turn(self):
+        record = self.idle_record()
+        record['action'] = 'compact'
+        self.rows(*self.claude_idle_rows(),
+                  {'type': 'api-request', 'sessionId': SID, 'querySource': 'repl_main_thread'})
+        self.assertNotEqual('idle', self.native_idle_result(record)['state'])
+        self.rows(*self.claude_idle_rows('next'))
+        self.assertEqual('idle', self.native_idle_result(record)['state'])
+
+    def test_sidechain_api_request_does_not_clear_root_idle(self):
+        record = self.idle_record()
+        record['action'] = 'compact'
+        self.rows(*self.claude_idle_rows(),
+                  {'type': 'api-request', 'sessionId': SID, 'isSidechain': True})
+        self.assertEqual('idle', self.native_idle_result(record)['state'])
 
     def test_native_idle_tail_bounds_partial_and_rotation(self):
         self.rows(*self.claude_idle_rows())
@@ -368,6 +383,48 @@ class ControlTests(unittest.TestCase):
         self.assertGreater(record['deadline'], first_deadline)
         self.assertEqual(1, h._read(path)['idle_rearms'])
 
+    def test_rearmed_wait_continues_past_original_bound(self):
+        oid = self.request(timeout_seconds=30)
+        path = self.control.directory / (oid + '.json')
+        record = h._read(path)
+        record['state'] = 'waiting_idle'
+        h._write(path, record)
+        clock = [100.0]
+        self.native_idle.side_effect = [
+            {'state': 'busy_or_unknown', 'turns_seen': 1},
+            {'state': 'idle', 'turns_seen': 1},
+        ]
+        def advance(seconds):
+            clock[0] += seconds
+        with patch.object(h, 'time', SimpleNamespace(time=lambda: clock[0], monotonic=lambda: clock[0], sleep=advance)):
+            result = h._wait_idle(record, self.identity, clock[0] + .1, operation_path=path)
+        self.assertEqual('idle', result['state'])
+        self.assertGreater(clock[0], 100.1)
+
+    def test_permanent_native_shape_error_defers_immediately(self):
+        oid = self.request(timeout_seconds=30)
+        path = self.control.directory / (oid + '.json')
+        record = h._read(path)
+        record['state'] = 'waiting_idle'
+        h._write(path, record)
+        for reason in ('idle_record_shape_unknown', 'idle_root_session_unavailable', 'idle_metadata_malformed'):
+            with self.subTest(reason=reason):
+                self.native_idle.side_effect = h.ControlError(reason)
+                result = h._wait_idle(record, self.identity, time.monotonic() + 30, operation_path=path)
+                self.assertEqual({'state': 'deferred', 'reason': reason, 'evidence_reason': reason}, result)
+
+    def test_queued_claude_input_remains_busy_until_next_turn_finishes(self):
+        for queued in ({'type': 'queue-operation', 'sessionId': SID},
+                       self.claude_row('attachment', 'queued', 'one-d', attachment={'type': 'queued_command'})):
+            with self.subTest(kind=queued['type']):
+                self.transcript.write_text('')
+                record = self.idle_record()
+                record['action'] = 'compact'
+                self.rows(*self.claude_idle_rows(), queued)
+                self.assertNotEqual('idle', self.native_idle_result(record)['state'])
+                self.rows(*self.claude_idle_rows('two'))
+                self.assertEqual('idle', self.native_idle_result(record)['state'])
+
     def test_cancellation_during_idle_rearm_cannot_restore_waiting_state(self):
         oid = self.request(timeout_seconds=30)
         path = self.control.directory / (oid + '.json')
@@ -391,6 +448,38 @@ class ControlTests(unittest.TestCase):
         self.control.cancel(oid)
         self.assertIsNone(h._reserve_compact_dispatch(path, record, command=True))
         self.assertEqual('cancelled', h._read(path)['state'])
+
+    def test_cancellation_before_failure_notice_sends_nothing(self):
+        oid = self.request(timeout_seconds=30)
+        def cancel_during_wait(*args, **kwargs):
+            self.control.cancel(oid)
+            return {'state': 'deferred', 'reason': 'native_idle_not_observed_within_bound'}
+        with patch.object(h, '_wait_idle', side_effect=cancel_during_wait):
+            result = self.observe(oid)
+        self.assertEqual('cancelled', result['state'])
+        self.assertEqual([], self.sent)
+        self.assertIsNone(result.get('failure_notice'))
+
+    def test_failure_notice_exception_restores_terminal_state(self):
+        oid = self.request(timeout_seconds=30)
+        with patch.object(h, '_wait_idle', return_value={'state': 'deferred', 'reason': 'idle_record_shape_unknown'}), \
+             patch.object(h, '_send', side_effect=RuntimeError('transport failed')):
+            result = self.observe(oid)
+        self.assertEqual('deferred', result['state'])
+        self.assertEqual('ambiguous', result['failure_notice']['state'])
+        self.assertTrue(result['failure_notice']['needs_review'])
+
+    def test_interrupted_failure_notice_is_settled_on_read(self):
+        oid = self.request(timeout_seconds=30)
+        path = self.control.directory / (oid + '.json')
+        record = h._read(path)
+        record.update(state='warning_dispatching', pending_final_state='deferred',
+                      failure_notice={'state': 'dispatching'})
+        h._write(path, record)
+        result = self.control.operation(oid)
+        self.assertEqual('deferred', result['state'])
+        self.assertEqual('ambiguous', result['failure_notice']['state'])
+        self.assertTrue(result['failure_notice']['needs_review'])
 
     def test_focus_waits_for_new_completed_turn(self):
         oid = self.request(focus='focus')

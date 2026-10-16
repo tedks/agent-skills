@@ -16,6 +16,12 @@ Claude findings still to triage and fix: I1 cancellation race in `_observe` fina
 
 Read-only verification of BOTH real incident transcripts found post-baseline `event_msg` / `task_complete` rows with both `turn_id` and `root_turn_id` equal to the fixture ID. First timestamp `2026-10-15T21:17:08.227Z`, second `2026-10-16T03:22:30.982Z`. Add sanitized rows to fixture and use them in the regression test. Never mutate the affected live panes or records.
 
+### Post-compaction review follow-up (2026-10-16)
+
+The Claude C1/I1/I2/I3/I4/I6/I7 findings have code and test fixes pending full gate. The final warning decision is made under the state guard, and a crashed warning send recovers to its prior terminal state with an ambiguous notice receipt. Queued Claude input stays busy in re-arm mode; deterministic transcript shape errors defer immediately. The incident fixture now contains sanitized real completion rows. Core suite: 86 passed.
+
+I5 was investigated read-only in seven native Claude runs and 40 bounded recent transcripts: 17 `api-request` rows after a root `turn_duration` all preceded a new root user row. Seven `querySource: sdk` rows occurred within active root turns. Sampled request rows had no `isSidechain` property. Keep post-duration `api-request` busy; explicit sidechain rows are ignored. A hypothetical orphan background request remains a fail-closed long wait, with no observed example. Product decisions I8(a)/(b) remain with Ted; the questions were re-sent after compaction. No live affected pane or record was changed.
+
 Next: finish triage/fixes and tests, run Nix check/build at final head, run council convergence on fix delta to CLEAN, mark PR ready and merge normally only with green gates, close/sync ditz issue `e33bd34f09f01e29d055f31df6d88591e07eda16`, notify CTO tmux `%321` with `LANDED #7 <sha>` (or BLOCKED), then file and push retirement shard and send RETIRE-READY. The private native reports are `/home/tedks/.local/state/hcompact-native-ycmcc16p/report.json` (Claude) and `/home/tedks/.local/state/hcompact-native-a_ogrjrb/report.json` (Codex). Native Codex used direct interactive launch; `--no-daemon` blank startup UI was not pasted into.
 
 - [x] (2026-10-16 06:15 UTC) Claimed an isolated agent-skills worktree and ditz issue. Read the two incident records without changing live panes or state.
