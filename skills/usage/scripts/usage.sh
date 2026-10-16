@@ -41,9 +41,6 @@ if ! TU="$(find_cli token-usage)"; then
 fi
 TW="$(find_cli token-tripwire || true)"
 
-scan=(--no-scan)
-$fresh && scan=()
-
 # How old is the store? Without a scan (and without the cron row) it can be
 # hours stale, and an empty view would read as "no lanes running".
 age_minutes() {
@@ -64,7 +61,7 @@ elif [ "$age" -gt 20 ]; then
 else
   stale_note=""
 fi
-scan=(--no-scan)  # scanned just above when --fresh
+scan=(--no-scan)  # --fresh scanned once, just above
 sessions=("$TU" sessions "${scan[@]}")
 [ -n "$project" ] && sessions+=(--project "$project")
 totals=("$TU" totals --no-scan)
