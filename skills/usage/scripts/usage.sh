@@ -58,7 +58,7 @@ PY
 if $fresh; then "$TU" scan > /dev/null; fi
 age="$(age_minutes)"
 if [ "$age" = unknown ]; then
-  stale_note="store never scanned on this host: run with --fresh (and enable the cron row)"
+  stale_note="store age unknown (never scanned on this host, or unreadable): run with --fresh (and enable the cron row)"
 elif [ "$age" -gt 20 ]; then
   stale_note="store last scanned ${age} min ago: numbers are that old; run with --fresh, and check the token-tripwire cron row (install-token-tripwire --enable)"
 else
@@ -77,7 +77,7 @@ if $json; then
   "${sessions[@]}" --json > "$dir/sessions"
   "${totals[@]}" --by project --json > "$dir/totals_project"
   "${totals[@]}" --by model --json > "$dir/totals_model"
-  "$TU" meters --json > "$dir/meters"
+  "$TU" meters --no-scan --json > "$dir/meters"
   if [ -n "$TW" ]; then "$TW" status --json > "$dir/incidents"; else echo null > "$dir/incidents"; fi
   python3 -c 'import json, os, sys
 names = ("sessions", "totals_project", "totals_model", "meters", "incidents")
@@ -109,7 +109,7 @@ echo "== Totals by model${day:+ ($day)} =="
 "${totals[@]}" --by model
 echo
 echo "== Quota meters (account-wide; note the observed time) =="
-"$TU" meters
+"$TU" meters --no-scan
 echo
 if [ -n "$TW" ]; then
   echo "== Tripwire incidents =="

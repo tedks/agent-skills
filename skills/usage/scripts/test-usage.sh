@@ -20,10 +20,10 @@ check() { local what="$1"; shift; if "$@"; then echo "ok   $what"; else echo "FA
 BASEPATH="/usr/bin:/bin"
 
 PATH="$WORK/bin:$BASEPATH" "$HERE/usage.sh" --project chaos > "$WORK/out"
-check "an unknown store age is called out, not hidden" grep -q 'store never scanned' "$WORK/out"
+check "an unknown store age is called out, not hidden" grep -q 'store age unknown' "$WORK/out"
 check "sessions read without scanning, for the project" grep -qx 'token-usage sessions --no-scan --project chaos' "$LOG"
 check "totals by project and model" grep -qx 'token-usage totals --no-scan --by model' "$LOG"
-check "meters read" grep -qx 'token-usage meters' "$LOG"
+check "meters read" grep -qx 'token-usage meters --no-scan' "$LOG"
 check "incidents read" grep -qx 'token-tripwire status' "$LOG"
 
 : > "$LOG"
@@ -37,7 +37,7 @@ check "json combines all five, with the store age" python3 -c 'import json,sys; 
 : > "$LOG"
 mv "$WORK/bin/token-usage" "$HOME/.bin/token-usage"
 PATH="$WORK/bin:$BASEPATH" "$HERE/usage.sh" > /dev/null
-check "falls back to ~/.bin" grep -qx 'token-usage meters' "$LOG"
+check "falls back to ~/.bin" grep -qx 'token-usage meters --no-scan' "$LOG"
 rm "$HOME/.bin/token-usage"
 if PATH="$WORK/bin:$BASEPATH" "$HERE/usage.sh" 2>/dev/null; then rc=0; else rc=$?; fi
 check "missing token-usage exits 3" [ "$rc" -eq 3 ]
