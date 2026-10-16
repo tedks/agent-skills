@@ -88,3 +88,15 @@ log_events:
     test assertions in test_harness_control_core.py only and running targeted mutation
     evidence; lead will inspect the diff and rerun the exact-head full gate. Product
     rulings remain pending.'
+- time: 2026-10-16T07:35:02-00:00
+  who: Ted Smith
+  what: commented
+  comment: 'Final gate receipt at pushed branch HEAD b6104ed3af2e1ff3c42608ed77836b25f9b96b6b:
+    nix flake check exited 0 with harness-control transport/unit/package checks; nix
+    build .#harness-control exited 0. Git pull --rebase made no changes, git push
+    succeeded, and local branch is up to date with origin. Council available seats
+    (Codex native Lead, Claude Opus foreign) reached CLEAN on production fix deltas;
+    Google agy unavailable due quota. PR #7 is still draft and merge is blocked solely
+    by two Ted product rulings in compact-intervening-turn-policy and compact-unconfirmed-review-notice.
+    The three open question/follow-up issues are synced in ditz-metadata. No live
+    affected panes or records were touched.'
