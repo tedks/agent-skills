@@ -129,8 +129,13 @@ if [[ -f "$REPO/AGENTS.md" ]]; then
   # (Project|Repository|Directory )?(structure|layout); a "## " line inside
   # a code fence neither starts nor ends the section.
   structure=$(awk '
-    /^[[:space:]]*(```|~~~)/ { if (found) print; fence = !fence; next }
-    !fence && /^## / {
+    /^[[:space:]]*(```|~~~)/ {
+      m = ($0 ~ /^[[:space:]]*```/) ? "`" : "~"
+      if (found) print
+      if (fence == "") fence = m; else if (fence == m) fence = ""
+      next
+    }
+    fence == "" && /^## / {
       if (found) exit
       if (tolower($0) ~ /^##[[:space:]]+((project|repository|directory)[[:space:]]+)?(structure|layout)[[:space:]]*$/) { found = 1; next }
     }

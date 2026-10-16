@@ -26,8 +26,6 @@ TREE_MIN, TREE_MAX = 55, 90
 STRUCTURE_MAX, STRUCTURE_MIN = 35, 10
 KIDS_PER_DIR = 6
 MAX_BYTES = 1 << 20
-GIT_TIMEOUT = float(os.environ.get("WHERE_GIT_TIMEOUT", "30"))
-MAX_STAT = int(os.environ.get("WHERE_MAX_STAT", "20000"))
 HEADING = re.compile(r"^##\s+((project|repository|directory)\s+)?(structure|layout)\s*$", re.I)
 SCRUB = ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_COMMON_DIR",
          "GIT_OBJECT_DIRECTORY", "GIT_NAMESPACE", "GIT_CEILING_DIRECTORIES")
@@ -36,6 +34,14 @@ SKIP = re.compile(r"^(\.git|node_modules|\.venv|__pycache__|bazel-.*|result(-.*)
 
 class Fail(Exception):
     pass
+
+
+def env_num(name, default, kind):
+    raw = os.environ.get(name, default)
+    try:
+        return kind(raw)
+    except ValueError:
+        raise Fail(f"{name}={raw!r} is not a number")
 
 
 def die(msg):
@@ -50,11 +56,12 @@ def git_env():
 
 
 def run_git(cwd, *args, text=True):
+    timeout = env_num("WHERE_GIT_TIMEOUT", "30", float)
     try:
         return subprocess.run(["git", "-C", str(cwd), *args], capture_output=True,
-                              text=text, timeout=GIT_TIMEOUT, env=git_env())
+                              text=text, timeout=timeout, env=git_env())
     except subprocess.TimeoutExpired:
-        raise Fail(f"git {args[0]} timed out after {GIT_TIMEOUT:g}s in {cwd}; "
+        raise Fail(f"git {args[0]} timed out after {timeout:g}s in {cwd}; "
                    "the repo may be huge or locked (WHERE_GIT_TIMEOUT raises the limit).")
     except OSError as e:
         raise Fail(f"cannot run git: {e}")
@@ -89,7 +96,9 @@ def fmt_size(n):
 
 
 def plural(n, word):
-    return f"{n} {word}" if n == 1 else f"{n} {word}s"
+    if n == 1:
+        return f"{n} {word}"
+    return f"{n} {word[:-1]}ies" if word.endswith("y") else f"{n} {word}s"
 
 
 def cap(lines, limit, what, how):
@@ -115,8 +124,14 @@ def tree_lines(worktree):
         raise Fail(f"git ls-files failed in {worktree}")
     rels = [x for x in r.stdout.decode(errors="replace").split("\0")
             if x and not SKIP.match(x.split("/", 1)[0])]
-    sized = len(rels) <= MAX_STAT
-    top = {}  # name -> {"size", "n", "dirs": {name: [size, n]}, "files": {name: size}} or file size int
+    max_stat = env_num("WHERE_MAX_STAT", "20000", int)
+    sized = len(rels) <= max_stat
+    if not sized:
+        # Skip sizes, but still drop tracked files that are deleted from disk.
+        d = run_git(worktree, "ls-files", "-d", "-z", text=False)
+        deleted = set(d.stdout.decode(errors="replace").split("\0")) if d.returncode == 0 else set()
+        rels = [x for x in rels if x not in deleted]
+    top = {}  # name -> file size (int) or {"size", "n", "dirs", "files"}
     for rel in rels:
         size = 0
         if sized:
@@ -141,11 +156,15 @@ def tree_lines(worktree):
     def sz(n):
         return fmt_size(n) if sized else "?"
 
-    names = sorted(top)
-    budget = min(TREE_MAX, max(TREE_MIN, len(names) + 1))
-    remaining = budget - len(names) - 1  # one line reserved for the omission notice
+    dirs = sorted(n for n, e in top.items() if not isinstance(e, int))
+    files = sorted(n for n, e in top.items() if isinstance(e, int))
+    budget = min(TREE_MAX, max(TREE_MIN, len(top) + 1))
+    shown_dirs = dirs[:max(1, budget - 2)]
+    shown_files = files[:max(0, budget - len(shown_dirs) - 2)]
+    shown = set(shown_dirs) | set(shown_files)
+    remaining = budget - len(shown) - 1  # one line reserved for the children notice
     out, omitted = [], []
-    for name in names:
+    for name in sorted(shown):
         ent = top[name]
         if isinstance(ent, int):
             out.append(f"  {name} {sz(ent)}")
@@ -165,21 +184,26 @@ def tree_lines(worktree):
             show = kids[:n] + [f"    ... {len(kids) - n} more entries (git ls-files {name}/)"]
         remaining -= len(show)
         out += show
+    if len(dirs) > len(shown_dirs):
+        out.append(f"... truncated: {plural(len(dirs) - len(shown_dirs), 'top-level directory')} not shown; run git ls-files")
+    if len(files) > len(shown_files):
+        out.append(f"... {plural(len(files) - len(shown_files), 'more top-level file')} (git ls-files ':(top,glob)*')")
     if omitted:
         out.append(f"... truncated: contents of {plural(len(omitted), 'directory')} not shown "
                    f"(first: {omitted[0]}/); run git ls-files <dir>")
     if not sized:
-        out.append(f"... sizes skipped: more than {MAX_STAT} tracked files (WHERE_MAX_STAT)")
+        out.append(f"... sizes skipped: more than {max_stat} tracked files (WHERE_MAX_STAT)")
     return out, budget
 
 
 def section_of(lines):
     """Body of the first structure/layout section, or None. A '## ' line inside a
     code fence neither starts nor ends a section."""
-    fence, start = False, None
+    fence, start = None, None
     for i, line in enumerate(lines):
-        if re.match(r"^\s*(```|~~~)", line):
-            fence = not fence
+        m = re.match(r"^\s*(```|~~~)", line)
+        if m:
+            fence = m.group(1) if fence is None else (None if m.group(1) == fence else fence)
             continue
         if fence or not line.startswith("## "):
             continue
@@ -255,6 +279,8 @@ def main():
     ap.add_argument("--max-age", type=float, default=10.0, metavar="MIN",
                     help="reuse a cached map younger than MIN minutes with the same HEAD (default 10)")
     a = ap.parse_args()
+    env_num("WHERE_GIT_TIMEOUT", "30", float)  # fail early on a bad value
+    env_num("WHERE_MAX_STAT", "20000", int)
 
     path = Path(a.path)
     if not path.is_dir():
