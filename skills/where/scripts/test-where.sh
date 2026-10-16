@@ -111,6 +111,19 @@ git -C "$BIG" commit -q -m big
 check "output is capped near 120 lines" test "$(wc -l < "$WORK/out11")" -le 125
 check "truncation is announced" grep -qi 'truncated' "$WORK/out11"
 
+# Paths with spaces: bare layout and worktree
+SP="$HOME/Projects/my proj"
+mkdir -p "$SP"
+git clone -q --bare "$SEED" "$SP/.git"
+git -C "$SP/.git" worktree add -q "$SP/work tree" master
+"$WHERE" "$SP/work tree" > "$WORK/outsp" 2> /dev/null
+check "spaces: root and worktree named intact" grep -q "root: $SP\$" "$WORK/outsp"
+check "spaces: worktree path intact" grep -q "worktree: $SP/work tree\$" "$WORK/outsp"
+check "spaces: worktree list shows the spaced path" grep -q "$SP/work tree" "$WORK/outsp"
+check "spaces: tree built" grep -q 'src/' "$WORK/outsp"
+(cd "$SP/work tree/src/core" && "$WHERE" > "$WORK/outsp2" 2> /dev/null)
+check "spaces: run from a subdirectory maps the worktree" grep -q "worktree: $SP/work tree\$" "$WORK/outsp2"
+
 # Refusal at broad roots (exit 2 with a hint, nothing mapped)
 for broad in "$HOME" "$HOME/Projects" / /tmp; do
   set +e
