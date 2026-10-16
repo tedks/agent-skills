@@ -48,3 +48,12 @@ log_events:
     cannot support exemption, so root input still cancels. Follow-up open question
     harness-compact-peer-provenance. Core suite 107 tests green; previous-head regressions
     fail as intended; mutation and native tests running. No live pane/state touched.'
+- time: 2026-10-16T17:23:25-00:00
+  who: Ted Smith
+  what: commented
+  comment: 'PR #9 at d35d547: council fixpoint CLEAN with Codex Sol and Claude Opus;
+    agy seat unavailable (quota). Offline core 113 tests pass; native disposable Claude/Codex
+    compaction plus intervening cancel/notice/replacement pass; Nix source gate mutation
+    suite is running. Product ordering question tracked separately as compact-peer-boundary-vs-new-input-order;
+    peer control-prefix ruling tracked in harness-compact-peer-provenance for a later
+    PR.'
