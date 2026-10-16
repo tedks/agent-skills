@@ -56,3 +56,16 @@ log_events:
     root turns, persists transitions and watcher PID, and attempts one visible warning
     on deferred dispatch. Synthetic tmux compact+exit integration passed; remaining:
     native Claude/Codex disposable tests, mutation checks, Nix gates and council.'
+- time: 2026-10-16T07:02:30-00:00
+  who: Ted Smith
+  what: commented
+  comment: 'Implementation and review status at c37b260 (branch fix/harness-compact-dispatch,
+    draft PR #7): Both incident task_complete rows are fixture-backed; 3600-second
+    native idle bound and guarded detached dispatch are implemented. Disposable native
+    Claude/Codex direct-launch compact+continuation passed; the no-daemon Codex startup
+    remained unsupported in the disposable test, with no paste to that pane. Core
+    suite passed 89 tests. Council Codex and Claude seats converged CLEAN on successive
+    fix deltas; Google seat unavailable due provider quota. Final nix flake check/build
+    are running at c37b260. Two operator product rulings block merge: compact-intervening-turn-policy
+    and compact-unconfirmed-review-notice. No live affected pane or operation record
+    was changed.'
