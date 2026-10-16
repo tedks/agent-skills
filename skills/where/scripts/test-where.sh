@@ -249,8 +249,11 @@ echo a > "$DEL/keep.txt"; echo b > "$DEL/gone.txt"
 git -C "$DEL" add -A; git -C "$DEL" commit -q -m del
 rm "$DEL/gone.txt"
 WHERE_MAX_STAT=1 "$WHERE" --refresh "$DEL" > "$WORK/odel" 2> /dev/null
-check "past the stat bound, deleted tracked files are not listed" not grep -q gone.txt "$WORK/odel"
-check "past the stat bound, live files still are" grep -q keep.txt "$WORK/odel"
+check "past the stat bound, the index is listed unfiltered" grep -q gone.txt "$WORK/odel"
+check "past the stat bound, the skip line says deleted files are not filtered" grep -q 'deleted files not filtered' "$WORK/odel"
+check "past the stat bound, live files are listed" grep -q keep.txt "$WORK/odel"
+"$WHERE" --refresh "$DEL" > "$WORK/odel2" 2> /dev/null
+check "below the bound, deleted files are still dropped" not grep -q gone.txt "$WORK/odel2"
 
 # Bad numeric env: one line, exit 1.
 WHERE_GIT_TIMEOUT=abc "$WHERE" "$PLAIN" > /dev/null 2> "$WORK/eb1"; rc=$?
@@ -265,5 +268,20 @@ printf '# A\n\n## Structure\n~~~\n```\n## inside\n~~~\nafter-tilde\n\n## Next\n'
 rm -f "$H/CLAUDE.md"
 "$WHERE" --refresh "$H" > "$WORK/oh4" 2> /dev/null
 check "fence closes only on its own type" grep -q after-tilde "$WORK/oh4"
+
+# Bad numbers: non-finite, non-positive timeout, negative stat bound.
+for bad in nan inf -inf 0 -1; do
+  WHERE_GIT_TIMEOUT=$bad "$WHERE" "$PLAIN" > /dev/null 2> "$WORK/eg"; rc=$?
+  check "WHERE_GIT_TIMEOUT=$bad exits 1" test "$rc" -eq 1
+  check "WHERE_GIT_TIMEOUT=$bad is one line naming the variable" bash -c "test \$(wc -l < '$WORK/eg') -eq 1 && grep -q WHERE_GIT_TIMEOUT '$WORK/eg'"
+done
+for bad in -1 1.5; do
+  WHERE_MAX_STAT=$bad "$WHERE" "$PLAIN" > /dev/null 2> "$WORK/eg"; rc=$?
+  check "WHERE_MAX_STAT=$bad exits 1" test "$rc" -eq 1
+  check "WHERE_MAX_STAT=$bad is one line naming the variable" bash -c "test \$(wc -l < '$WORK/eg') -eq 1 && grep -q WHERE_MAX_STAT '$WORK/eg'"
+done
+WHERE_MAX_STAT=0 "$WHERE" --refresh "$PLAIN" > "$WORK/ez" 2> /dev/null; rc=$?
+check "WHERE_MAX_STAT=0 is valid (never stat)" test "$rc" -eq 0
+check "WHERE_MAX_STAT=0 skips sizes" grep -q 'sizes skipped' "$WORK/ez"
 
 exit "$fail"
