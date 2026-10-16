@@ -1,0 +1,201 @@
+#!/usr/bin/env python3
+"""where - print a small map of the project containing a path.
+
+Reads only git metadata, the tracked-file list, and the worktree's
+AGENTS.md/CLAUDE.md. It never walks the filesystem, so it cannot become the
+broad find/rg it exists to replace. Refuses broad roots (exit 2).
+"""
+import argparse
+import hashlib
+import os
+import re
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+EXIT_REFUSED = 2
+LIMITS = {"worktrees": 15, "tree": 55, "structure": 35}
+KIDS_PER_DIR = 6
+SKIP = re.compile(r"^(\.git|node_modules|\.venv|__pycache__|bazel-.*|result(-.*)?)$")
+
+
+def die(msg):
+    print(f"where: {msg}", file=sys.stderr)
+    sys.exit(EXIT_REFUSED)
+
+
+def git(cwd, *args):
+    env = dict(os.environ, GIT_OPTIONAL_LOCKS="0")
+    r = subprocess.run(["git", "-C", str(cwd), *args], capture_output=True,
+                       text=True, timeout=30, env=env)
+    return r.returncode, r.stdout.strip()
+
+
+def broad_roots():
+    home = Path(os.path.realpath(os.environ.get("HOME", "/")))
+    roots = {Path("/"), home, home / "Projects", Path("/tmp"), Path("/nix"),
+             Path("/home"), Path("/usr"), Path("/var"), Path("/opt"), Path("/etc")}
+    return {Path(os.path.realpath(r)) for r in roots}
+
+
+def refuse_if_broad(path):
+    if Path(os.path.realpath(path)) in broad_roots():
+        die(f"refusing {path}: it is a broad root, not a project. Search inside "
+            "the worktree you own (cd there, or pass its path); do not map or "
+            "enumerate this directory.")
+
+
+def fmt_size(n):
+    if n < 1024:
+        return f"{n}B"
+    for unit in "KMGT":
+        n /= 1024
+        if n < 1024 or unit == "T":
+            return f"{n:.1f}{unit}"
+
+
+def cap(lines, limit, what):
+    if len(lines) <= limit:
+        return lines
+    return lines[:limit - 1] + [f"... truncated {len(lines) - limit + 1} more {what} lines"]
+
+
+def locate(path):
+    rc, common = git(path, "rev-parse", "--path-format=absolute", "--git-common-dir")
+    if rc != 0:
+        die(f"{path} is not inside a git project; cd into one or pass its path.")
+    common = Path(common)
+    root = common.parent if common.name in (".git", ".bare") else common
+    rc, top = git(path, "rev-parse", "--show-toplevel")
+    worktree = Path(top) if rc == 0 and top else None
+    return root, worktree, common
+
+
+def tree_lines(worktree):
+    r = subprocess.run(["git", "-C", str(worktree), "ls-files", "-z"],
+                       capture_output=True, timeout=60)
+    top = {}  # name -> [size, nfiles, {child: [size, nfiles]}] ; files have None kids
+    for rel in r.stdout.decode(errors="replace").split("\0"):
+        if not rel:
+            continue
+        parts = rel.split("/")
+        if any(SKIP.match(p) for p in parts[:1]):
+            continue
+        try:
+            size = os.lstat(worktree / rel).st_size
+        except OSError:
+            continue
+        if len(parts) == 1:
+            top[parts[0]] = [size, 1, None]
+            continue
+        ent = top.setdefault(parts[0], [0, 0, {}])
+        ent[0] += size
+        ent[1] += 1
+        if len(parts) > 2:
+            kid = ent[2].setdefault(parts[1], [0, 0])
+            kid[0] += size
+            kid[1] += 1
+    out = []
+    for name in sorted(top):
+        size, n, kids = top[name]
+        if kids is None:
+            out.append(f"  {name} {fmt_size(size)}")
+            continue
+        out.append(f"  {name}/ {fmt_size(size)} {n} files")
+        names = sorted(kids)
+        for k in names[:KIDS_PER_DIR]:
+            out.append(f"    {k}/ {fmt_size(kids[k][0])} {kids[k][1]} files")
+        if len(names) > KIDS_PER_DIR:
+            out.append(f"    ... {len(names) - KIDS_PER_DIR} more subdirectories")
+    return out
+
+
+def structure_section(worktree):
+    for name in ("AGENTS.md", "CLAUDE.md"):
+        f = worktree / name
+        if not f.is_file():
+            continue
+        lines = f.read_text(errors="replace").splitlines()
+        for i, line in enumerate(lines):
+            if re.match(r"^##\s+Project structure\s*$", line, re.I):
+                end = len(lines)
+                for j in range(i + 1, len(lines)):
+                    if lines[j].startswith("## "):
+                        end = j
+                        break
+                body = lines[i + 1:end]
+                while body and not body[0].strip():
+                    body.pop(0)
+                while body and not body[-1].strip():
+                    body.pop()
+                return body
+        return [f'({name} has no "Project structure" section; add one so agents can target searches)']
+    return ["(no AGENTS.md or CLAUDE.md in this worktree; add one with a Project structure section)"]
+
+
+def build(root, worktree, common):
+    out = [f"root: {root}"]
+    out.append(f"worktree: {worktree}" if worktree else
+               "worktree: none (no worktree here; cd into one of the worktrees below)")
+    rc, wl = git(common, "worktree", "list")
+    wt = wl.splitlines() if rc == 0 and wl else []
+    if len(wt) > 1 or not worktree:
+        out.append("worktrees:")
+        out += ["  " + ln for ln in cap(wt, LIMITS["worktrees"], "worktree")]
+    if worktree:
+        out.append("tree (tracked files, depth 2):")
+        out += cap(tree_lines(worktree), LIMITS["tree"], "tree")
+        out.append('Project structure (from AGENTS.md/CLAUDE.md):')
+        out += cap(structure_section(worktree), LIMITS["structure"], "structure")
+    else:
+        out.append("tree: skipped, no worktree at this path")
+    return out
+
+
+def main():
+    ap = argparse.ArgumentParser(description="Print a small map of the project containing PATH (default: cwd).")
+    ap.add_argument("path", nargs="?", default=".")
+    ap.add_argument("--refresh", action="store_true", help="ignore and rewrite the cache")
+    ap.add_argument("--max-age", type=float, default=10.0, metavar="MIN",
+                    help="reuse a cached map younger than MIN minutes with the same HEAD (default 10)")
+    a = ap.parse_args()
+
+    path = Path(a.path)
+    if not path.is_dir():
+        die(f"{a.path} is not a directory.")
+    refuse_if_broad(path)
+    root, worktree, common = locate(path)
+    for p in (root, worktree):
+        if p:
+            refuse_if_broad(p)
+
+    key_path = worktree or root
+    rc, head = git(key_path if worktree else common, "rev-parse", "HEAD")
+    head = head if rc == 0 else "unknown"
+    cache_dir = Path(os.environ.get("XDG_CACHE_HOME") or Path.home() / ".cache") / "where"
+    safe = re.sub(r"[^A-Za-z0-9]+", "_", str(key_path)).strip("_")[-80:]
+    cache = cache_dir / f"{safe}-{hashlib.sha1(str(key_path).encode()).hexdigest()[:8]}.txt"
+
+    if not a.refresh and cache.is_file():
+        age = (time.time() - cache.stat().st_mtime) / 60
+        text = cache.read_text()
+        first, _, body = text.partition("\n")
+        if first == f"# head={head}" and age < a.max_age:
+            print(f"where: cached map, {age:.0f} min old (--refresh to rebuild)", file=sys.stderr)
+            sys.stdout.write(body)
+            return
+
+    body = "\n".join(build(root, worktree, common)) + "\n"
+    try:
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        tmp = cache.with_suffix(f".{os.getpid()}.tmp")
+        tmp.write_text(f"# head={head}\n{body}")
+        os.replace(tmp, cache)
+    except OSError as e:
+        print(f"where: cache not written: {e}", file=sys.stderr)
+    sys.stdout.write(body)
+
+
+if __name__ == "__main__":
+    main()
