@@ -407,7 +407,9 @@ class ControlTests(unittest.TestCase):
         record = h._read(path)
         record['state'] = 'waiting_idle'
         h._write(path, record)
-        for reason in ('idle_record_shape_unknown', 'idle_root_session_unavailable', 'idle_metadata_malformed'):
+        for reason in ('idle_record_shape_unknown', 'idle_root_session_unavailable',
+                       'idle_metadata_malformed', 'idle_transcript_replaced_or_truncated',
+                       'idle_observation_limit'):
             with self.subTest(reason=reason):
                 self.native_idle.side_effect = h.ControlError(reason)
                 result = h._wait_idle(record, self.identity, time.monotonic() + 30, operation_path=path)

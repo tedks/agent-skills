@@ -457,7 +457,8 @@ def _wait_idle(record, identity, observer_deadline, focus_after=None, sends=1, o
                 return {'state': 'deferred', 'reason': str(exc)}
             if ((record.get('_idle_cursor') or {}).get('error') == str(exc) or
                     str(exc) in ('idle_record_shape_unknown', 'idle_root_session_unavailable',
-                                 'idle_metadata_malformed')):
+                                 'idle_metadata_malformed', 'idle_transcript_replaced_or_truncated',
+                                 'idle_observation_limit')):
                 return {'state': 'deferred', 'reason': str(exc), 'evidence_reason': str(exc)}
             last = {'state': 'unknown', 'reason': str(exc)}
         except (OSError, ValueError, KeyError, TypeError):
