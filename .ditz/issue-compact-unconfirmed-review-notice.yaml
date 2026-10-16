@@ -28,3 +28,13 @@ log_events:
   who: Ted Smith
   what: created
   comment: ""
+- time: 2026-10-16T07:36:27-00:00
+  who: Ted Smith
+  what: commented
+  comment: 'Ruling (dotfiles CTO, 2026-10-16): never silent. When /compact was delivered
+    (typed/pasted and submitted) but no compaction event is observed within the bound,
+    the watcher delivers one notice into the pane (''COMPACTION UNCONFIRMED: delivered
+    at <time>, no compaction event within <bound>; check /status, then re-request
+    or compact manually''), records state unconfirmed with the delivery receipt, and
+    does not retry on its own. The continuation message is not sent, because the checkpoint
+    may now be stale.'
