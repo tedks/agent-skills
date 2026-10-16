@@ -8,6 +8,14 @@ An agent that calls `self_compact` as its last tool action should receive a sche
 
 ## Progress
 
+### R1 ruling and merge gate (2026-10-16)
+
+Ted ruled both product questions on the ditz issues. A submitted intervening operator turn now cancels the scheduled `/compact`, records `cancelled/intervening_turn`, and sends one pane notice. The observer watches briefly for a compaction event from another actor; when observed it records `completed_by_other` and sends one continuation. A delivered `/compact` with no confirmed completion records `unconfirmed` with its delivery receipt, sends a distinct one-time notice, and does not retry or continue. The watch uses an explicit nonterminal `watching_other` state, so a fresh request cannot race it. Claude's real boundary and compact-summary row shapes are covered, along with Codex peer events and focus-triggered compaction.
+
+The focused core suite passes 103 tests. Available Codex native and Claude Opus council seats converged CLEAN on the R1 delta and the final narrow dispatch fix; Google agy remains unavailable due quota. A full `nix flake check` and `nix build .#harness-control` are running on a changing diff and will be rerun at the exact final commit before merge. The draft PR remains #7. No affected live pane or operation record was used in tests.
+
+Next: obtain exact-head green Nix gates, push and ready PR #7, merge normally, close/sync the main ditz issue and the answered product questions, send `LANDED #7 <sha>` to the CTO pane, then complete the private retirement shard and `RETIRE-READY` handoff.
+
 ### Checkpoint for session 01a14353 (2026-10-16)
 
 Worktree: `/home/tedks/Projects/agent-skills/harness-compact-dispatch`, branch `fix/harness-compact-dispatch`, draft PR #7. Head `6b7e8d5` is pushed. The initial implementation and native Claude/Codex disposable tests are complete. A full Codex core suite passed at the current head: 78 tests. An earlier `nix flake check` is still running as unified exec session 5661; it checks pre-review commit `a858308`, so the final head needs a fresh gate anyway. Foreign Claude Opus review completed and reported 1 Critical, 7 Important, plus nits; Google agy seat was unavailable (individual quota, reset ~42 h). Native Codex seat reported 2 Important. The two Codex findings were fixed in `6b7e8d5`: guarded cancellation on idle re-arm and sender-budget reservation; visible notice for a definite deferred sender refusal. Tests cover both. Claude's C1 overlaps this fix, except its focus re-arm note still needs inspection.

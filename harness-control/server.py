@@ -421,13 +421,17 @@ async def self_compact(checkpoint_path: str, checkpoint_receipt: str,
     Optional focus is an ordinary message before bare typed /compact.
     The native idle bound defaults to 3600 seconds and accepts 30 to 7200.
     Focus, when present, starts a fresh idle bound after its own turn. Sender
-    and compaction confirmation time are separate from that bound. The detached
-    observer waits for native idle, then sends one ordinary
+    and compaction confirmation time are separate from that bound. A new
+    operator turn cancels the scheduled command and emits one visible notice;
+    a peer compaction observed during the bounded follow-up sends continuation.
+    The detached observer waits for native idle, then sends one ordinary
     CONTINUE with the verified shard path and optional continuation text only
     after a new transcript boundary AND fresh pane completion evidence
     (marker count increase, or observed Claude progress-to-completion transition). That send has an
     additional bounded 115-second budget. If dispatch is deferred or the idle
-    bound expires, it attempts one visible failure notice in the own pane.
+    bound expires, it attempts one visible notice in the own pane. If /compact
+    was delivered without confirmed completion, it records unconfirmed with
+    the delivery receipt, emits one notice, and never retries or continues.
     No event means no re-prompt; a peer may deliberately resume the session.
     Delivery, compaction witness and continuation receipt remain separate.
     """

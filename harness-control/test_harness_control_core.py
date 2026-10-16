@@ -114,7 +114,7 @@ class ControlTests(unittest.TestCase):
             return subprocess.CompletedProcess(args, 0, json.dumps({'status': 'delivered', 'receipt': 'queued', 'pane': '%999'}), '')
         def sleep(seconds):
             self.clock += seconds
-        with patch.object(h, '_transport_run', side_effect=lambda args, identity: run(args)), patch.object(h.subprocess, 'run', side_effect=run), patch.object(h, 'time', SimpleNamespace(time=lambda: self.clock, monotonic=lambda: self.clock, sleep=sleep)), patch.object(h, 'same_process', side_effect=alive if callable(alive) else lambda _: alive):
+        with patch.object(h, '_transport_run', side_effect=lambda args, identity: run(args)), patch.object(h.subprocess, 'run', side_effect=run), patch.object(h, 'time', SimpleNamespace(time=lambda: self.clock, monotonic=lambda: self.clock, sleep=sleep, strftime=time.strftime, gmtime=time.gmtime)), patch.object(h, 'same_process', side_effect=alive if callable(alive) else lambda _: alive):
             h.observe(self.control.directory, oid)
         return self.control.operation(oid)
 
@@ -366,40 +366,19 @@ class ControlTests(unittest.TestCase):
         self.assertEqual(before, len(h._read(self.control.directory / (oid + '.json'))['transitions']))
         self.assertEqual(1, len(self.sent))
 
-    def test_new_root_turn_rearms_compact_idle_deadline(self):
+    def test_intervening_root_turn_cancels_compact_with_one_notice(self):
+        self.rows(*self.claude_idle_rows('before'))
         oid = self.request(timeout_seconds=30)
-        path = self.control.directory / (oid + '.json')
-        record = h._read(path)
-        record['state'] = 'waiting_idle'
-        h._write(path, record)
-        first_deadline = record['deadline']
-        self.native_idle.side_effect = [
-            {'state': 'busy_or_unknown', 'turns_seen': 1},
-            {'state': 'idle', 'turns_seen': 1},
-        ]
-        result = h._wait_idle(record, self.identity, time.monotonic() + 30, operation_path=path)
-        self.assertEqual('idle', result['state'])
-        self.assertEqual(1, record['idle_rearms'])
-        self.assertGreater(record['deadline'], first_deadline)
-        self.assertEqual(1, h._read(path)['idle_rearms'])
-
-    def test_rearmed_wait_continues_past_original_bound(self):
-        oid = self.request(timeout_seconds=30)
-        path = self.control.directory / (oid + '.json')
-        record = h._read(path)
-        record['state'] = 'waiting_idle'
-        h._write(path, record)
-        clock = [100.0]
-        self.native_idle.side_effect = [
-            {'state': 'busy_or_unknown', 'turns_seen': 1},
-            {'state': 'idle', 'turns_seen': 1},
-        ]
-        def advance(seconds):
-            clock[0] += seconds
-        with patch.object(h, 'time', SimpleNamespace(time=lambda: clock[0], monotonic=lambda: clock[0], sleep=advance)):
-            result = h._wait_idle(record, self.identity, clock[0] + .1, operation_path=path)
-        self.assertEqual('idle', result['state'])
-        self.assertGreater(clock[0], 100.1)
+        self.rows(*self.claude_idle_rows('after'))
+        self.native_idle.side_effect = self.real_native_idle
+        result = self.observe(oid)
+        self.assertEqual('cancelled', result['state'])
+        self.assertEqual('intervening_turn', result['reason'])
+        self.assertEqual('not_dispatched', result['delivery']['state'])
+        self.assertNotIn('/compact', self.sent)
+        notices = [message for message in self.sent if message.startswith('COMPACTION CANCELLED:')]
+        self.assertEqual(1, len(notices))
+        self.assertEqual('COMPACTION CANCELLED: 1 turn(s) since your checkpoint; re-checkpoint and request again', notices[0])
 
     def test_permanent_native_shape_error_defers_immediately(self):
         oid = self.request(timeout_seconds=30)
@@ -435,22 +414,46 @@ class ControlTests(unittest.TestCase):
                 if queued['type'] == 'attachment':
                     rows[-1]['parentUuid'] = 'queued'
                 self.rows(*rows[:-1], queued, rows[-1])
-                with self.assertRaisesRegex(h.ControlError, 'superseded_by_new_input'):
-                    self.real_native_idle(record)
+                result = self.native_idle_result(record)
+                self.assertGreaterEqual(result.get('turns_seen', 0), 1)
 
-    def test_queued_input_defers_compact_without_sending_command(self):
+    def test_queued_input_cancels_compact_with_one_notice(self):
         rows = self.claude_idle_rows()
         self.rows(*rows[:-1])
         oid = self.request(timeout_seconds=30)
         self.rows({'type': 'queue-operation', 'sessionId': SID, 'operation': 'enqueue'}, rows[-1])
         self.native_idle.side_effect = self.real_native_idle
         result = self.observe(oid)
-        self.assertEqual('deferred', result['state'])
-        self.assertEqual('superseded_by_new_input', result['reason'])
+        self.assertEqual('cancelled', result['state'])
+        self.assertEqual('intervening_turn', result['reason'])
         self.assertEqual('not_dispatched', result['delivery']['state'])
         self.assertNotIn('/compact', self.sent)
+        self.assertEqual(1, sum(message.startswith('COMPACTION CANCELLED:') for message in self.sent))
 
-    def test_cancellation_during_idle_rearm_cannot_restore_waiting_state(self):
+    def test_codex_root_start_without_user_message_cancels_compact(self):
+        self.rows(*self.codex_idle_rows('before'))
+        record = self.idle_record('codex')
+        record['action'] = 'compact'
+        self.rows(self.codex_idle_rows('after')[0])
+        result = self.native_idle_result(record)
+        self.assertEqual(1, result['turns_seen'])
+
+    def test_generated_user_rows_do_not_count_as_operator_turns(self):
+        self.rows(*self.claude_idle_rows('before'))
+        record = self.idle_record()
+        record['action'] = 'compact'
+        self.rows(self.claude_row('user', 'meta', 'before-d', isMeta=True,
+                                  message={'content': 'system reminder'}))
+        self.assertEqual(0, self.native_idle_result(record)['turns_seen'])
+        self.transcript.write_text('')
+        self.rows(*self.codex_idle_rows('before'))
+        record = self.idle_record('codex')
+        record['action'] = 'compact'
+        self.rows({'type': 'response_item', 'payload': {'type': 'message', 'role': 'user',
+                  'content': [{'type': 'input_text', 'text': '<environment_context>generated</environment_context>'}]}})
+        self.assertEqual(0, self.native_idle_result(record)['turns_seen'])
+
+    def test_cancellation_during_idle_wait_cannot_restore_waiting_state(self):
         oid = self.request(timeout_seconds=30)
         path = self.control.directory / (oid + '.json')
         record = h._read(path)
@@ -594,11 +597,13 @@ class ControlTests(unittest.TestCase):
             return result
         self.native_idle.side_effect = idle
         result = self.observe(oid)
-        self.assertEqual('deferred', result['state'])
-        self.assertEqual('delivered', result['focus_delivery']['state'])
-        self.assertEqual('focus', self.sent[0])
+        self.assertEqual('cancelled', result['state'])
+        self.assertEqual('intervening_turn', result['reason'])
+        self.assertIsNotNone(result['focus_delivery'])
+        self.assertEqual('deferred', result['focus_delivery']['state'])
+        self.assertNotIn('focus', self.sent)
         self.assertNotIn('/compact', self.sent)
-        self.assertEqual(1, sum(message.startswith('COMPACTION NOT DISPATCHED:') for message in self.sent))
+        self.assertEqual(1, sum(message.startswith('COMPACTION CANCELLED:') for message in self.sent))
 
     def test_idle_rechecked_before_lifecycle_transport(self):
         oid = self.request('exit')
@@ -661,7 +666,8 @@ class ControlTests(unittest.TestCase):
             result = self.observe(oid)
         self.assertEqual(2, len(deadlines))
         self.assertGreater(deadlines[1], deadlines[0])
-        self.assertEqual(['focus', '/compact'], self.sent)
+        self.assertEqual(['focus', '/compact'], self.sent[:2])
+        self.assertEqual(1, sum(message.startswith('COMPACTION UNCONFIRMED:') for message in self.sent))
 
     def test_typed_limits_and_ordinary_meta_prefixes(self):
         for value in ('/model x ', '/model x\u3000', '/model x;', '/model ' + 'a' * 194):
@@ -716,7 +722,7 @@ class ControlTests(unittest.TestCase):
 
     def test_same_count_requires_new_native_progress_and_transcript(self):
         self.marker_count = 1
-        for watched, started, event, expected in ((False, False, True, 'timed_out'), (True, False, True, 'timed_out'), (True, True, False, 'timed_out'), (True, True, True, 'completed')):
+        for watched, started, event, expected in ((False, False, True, 'unconfirmed'), (True, False, True, 'unconfirmed'), (True, True, False, 'unconfirmed'), (True, True, True, 'completed')):
             oid = self.request()
             self.watch.side_effect = lambda *args: nullcontext({'available': watched, 'progress_started_at': self.clock if started else None, 'progress_armed': True, 'samples': 0})
             def send(args):
@@ -731,7 +737,8 @@ class ControlTests(unittest.TestCase):
                 self.assertEqual(2, len(self.sent))
             else:
                 self.assertEqual('not_dispatched', result['continuation']['state'])
-                self.assertEqual(1, len(self.sent))
+                self.assertEqual(1, sum(message == '/compact' for message in self.sent))
+                self.assertEqual(1, sum(message.startswith('COMPACTION UNCONFIRMED:') for message in self.sent))
             self.sent.clear()
 
     def test_progress_must_end_before_same_count_completion(self):
@@ -745,8 +752,8 @@ class ControlTests(unittest.TestCase):
             return subprocess.CompletedProcess(args, 0, '{"status":"delivered","receipt":"queued","pane":"%999"}', '')
         with patch.object(h, '_pane_marker', side_effect=marker):
             result = self.observe(oid, send)
-        self.assertEqual('timed_out', result['state'])
-        self.assertEqual('confirmed', result['completion']['state'])
+        self.assertEqual('unconfirmed', result['state'])
+        self.assertEqual('unconfirmed', result['completion']['state'])
         self.assertEqual('not_dispatched', result['continuation']['state'])
 
     def test_sampler_shutdown_is_bounded_and_stall_has_no_authority(self):
@@ -1004,9 +1011,16 @@ class ControlTests(unittest.TestCase):
             return original(identity)
         with patch.object(h, '_pane_marker', side_effect=marker):
             result = self.observe(oid, send)
-        self.assertEqual('timed_out', result['state'])
-        self.assertEqual('confirmed', result['completion']['state'])
+        self.assertEqual('unconfirmed', result['state'])
+        self.assertEqual('unconfirmed', result['completion']['state'])
         self.assertEqual('not_dispatched', result['continuation']['state'])
+
+    def test_pane_marker_classifies_invalid_encoding(self):
+        failure = UnicodeDecodeError('utf-8', b'\xff', 0, 1, 'fixture')
+        with patch.object(h.subprocess, 'run', side_effect=failure):
+            with self.assertRaisesRegex(h.ControlError, 'pane_compaction_marker_unavailable') as caught:
+                h._pane_marker(self.identity)
+        self.assertIs(caught.exception.__cause__, failure)
 
     def test_reaper_settles_abandoned_dispatch_intents(self):
         oid = self.request()
@@ -1092,13 +1106,176 @@ class ControlTests(unittest.TestCase):
                 self.control.cancel(h._read(active)['operation_id'])
         self.request('send', text='/status')
 
-    def test_transport_success_is_not_completion(self):
+    def test_delivered_compact_without_confirmation_is_unconfirmed_and_not_retried(self):
         oid = self.request()
         result = self.observe(oid)
         self.assertEqual('delivered', result['delivery']['state'])
-        self.assertEqual('timed_out', result['state'])
-        self.assertEqual('unknown', result['completion']['state'])
-        self.assertEqual(['/compact'], self.sent)
+        self.assertEqual('queued', result['delivery']['receipt'])
+        self.assertEqual('unconfirmed', result['state'])
+        self.assertEqual('unconfirmed', result['completion']['state'])
+        self.assertEqual(['/compact'], self.sent[:1])
+        self.assertEqual(1, sum(message == '/compact' for message in self.sent))
+        self.assertEqual(1, sum(message.startswith('COMPACTION UNCONFIRMED:') for message in self.sent))
+        self.assertEqual('not_dispatched', result['continuation']['state'])
+
+    def test_delivered_compact_with_unreadable_completion_evidence_is_unconfirmed(self):
+        oid = self.request()
+        def send(args):
+            if self.sent[-1] == '/compact':
+                with self.transcript.open('a') as stream:
+                    stream.write('invalid\n')
+            return subprocess.CompletedProcess(args, 0, json.dumps({'status': 'delivered', 'receipt': 'queued', 'pane': '%999'}), '')
+        result = self.observe(oid, send)
+        self.assertEqual('unconfirmed', result['state'])
+        self.assertEqual('queued', result['delivery']['receipt'])
+        self.assertEqual('not_dispatched', result['continuation']['state'])
+        self.assertEqual(1, sum(message.startswith('COMPACTION UNCONFIRMED:') for message in self.sent))
+
+    def test_intervening_turn_with_compaction_event_continues_by_other(self):
+        self.rows(*self.claude_idle_rows('before'))
+        oid = self.request(timeout_seconds=30)
+        self.rows(*self.claude_idle_rows('after'))
+        self.event()
+        self.native_idle.side_effect = self.real_native_idle
+        result = self.observe(oid)
+        self.assertEqual('completed_by_other', result['state'])
+        self.assertTrue(result['completion']['by_other'])
+        self.assertEqual('delivered', result['continuation']['state'])
+        self.assertEqual(1, sum(message.startswith('COMPACTION CANCELLED:') for message in self.sent))
+        self.assertEqual(1, sum(message.startswith('CONTINUE:') for message in self.sent))
+        self.assertNotIn('/compact', self.sent)
+
+    def test_compaction_event_after_cancellation_notice_continues_by_other(self):
+        self.rows(*self.claude_idle_rows('before'))
+        oid = self.request(timeout_seconds=30)
+        self.rows(*self.claude_idle_rows('after'))
+        self.native_idle.side_effect = self.real_native_idle
+        def send(args):
+            if self.sent[-1].startswith('COMPACTION CANCELLED:'):
+                self.event()
+            return subprocess.CompletedProcess(args, 0, json.dumps({'status': 'delivered', 'receipt': 'queued', 'pane': '%999'}), '')
+        result = self.observe(oid, send)
+        self.assertEqual('completed_by_other', result['state'])
+        self.assertEqual(1, sum(message.startswith('CONTINUE:') for message in self.sent))
+        self.assertNotIn('/compact', self.sent)
+
+    def test_intervening_watch_blocks_new_operation_until_final_cancel(self):
+        self.rows(*self.claude_idle_rows('before'))
+        oid = self.request(timeout_seconds=30)
+        self.rows(*self.claude_idle_rows('after'))
+        self.native_idle.side_effect = self.real_native_idle
+        checked = False
+        original = h._compact_event
+        def event(*args):
+            nonlocal checked
+            if self.sent and not checked:
+                checked = True
+                self.assertEqual('watching_other', self.control.operation(oid)['state'])
+                with self.assertRaisesRegex(h.ControlError, 'operation_in_progress'):
+                    self.request('send', text='hello')
+            return original(*args)
+        with patch.object(h, '_compact_event', side_effect=event):
+            result = self.observe(oid)
+        self.assertTrue(checked)
+        self.assertEqual('cancelled', result['state'])
+        self.request('send', text='hello')
+
+    def test_explicit_cancel_wins_over_intervening_turn_and_peer_event(self):
+        self.rows(*self.claude_idle_rows('before'))
+        oid = self.request(timeout_seconds=30)
+        self.rows(*self.claude_idle_rows('after'))
+        self.event()
+        self.native_idle.side_effect = self.real_native_idle
+        def wait(*args, **kwargs):
+            self.control.cancel(oid)
+            return {'state': 'cancelled', 'reason': 'intervening_turn', 'turns_seen': 1}
+        with patch.object(h, '_wait_idle', side_effect=wait):
+            result = self.observe(oid)
+        self.assertEqual('cancelled', result['state'])
+        self.assertEqual([], self.sent)
+
+    def test_peer_compaction_event_before_dispatch_continues_by_other(self):
+        self.rows(*self.claude_idle_rows('before'))
+        oid = self.request(timeout_seconds=30)
+        self.event()
+        self.native_idle.side_effect = self.real_native_idle
+        result = self.observe(oid)
+        self.assertEqual('completed_by_other', result['state'])
+        self.assertTrue(result['completion']['by_other'])
+        self.assertEqual('delivered', result['continuation']['state'])
+        self.assertEqual(1, sum(message.startswith('CONTINUE:') for message in self.sent))
+        self.assertNotIn('/compact', self.sent)
+
+    def test_codex_peer_compaction_event_is_detected(self):
+        self.rows(*self.codex_idle_rows('before'))
+        record = self.idle_record('codex')
+        record['action'] = 'compact'
+        record['baseline'] = h._baseline(self.transcript)
+        self.event('codex')
+        codex_identity = h.Identity(**{**self.identity.public(), 'harness': 'codex'})
+        with patch.object(h, '_native_idle', side_effect=self.real_native_idle):
+            result = h._wait_idle(record, codex_identity, time.monotonic() + 30)
+        self.assertEqual('completed_by_other', result['state'])
+        self.assertEqual('compacted', result['witness']['event'])
+
+    def test_focus_compaction_event_prevents_second_compact(self):
+        self.rows(*self.claude_idle_rows('before'))
+        oid = self.request(focus='focus')
+        def send(args):
+            if self.sent[-1] == 'focus':
+                self.event()
+            return subprocess.CompletedProcess(args, 0, json.dumps({'status': 'delivered', 'receipt': 'queued', 'pane': '%999'}), '')
+        self.native_idle.side_effect = self.real_native_idle
+        result = self.observe(oid, send)
+        self.assertEqual('completed_by_other', result['state'])
+        self.assertEqual('delivered', result['focus_delivery']['state'])
+        self.assertNotIn('/compact', self.sent)
+        self.assertEqual(1, sum(message.startswith('CONTINUE:') for message in self.sent))
+
+    def test_real_claude_boundary_and_summary_are_not_operator_turns(self):
+        self.rows(*self.claude_idle_rows('before'))
+        oid = self.request(timeout_seconds=30)
+        self.rows(self.claude_row('system', 'boundary', subtype='compact_boundary',
+                                  compactMetadata={'trigger': 'manual'}),
+                  self.claude_row('user', 'summary', 'boundary', isCompactSummary=True,
+                                  message={'content': 'generated summary'}))
+        self.native_idle.side_effect = self.real_native_idle
+        result = self.observe(oid)
+        self.assertEqual('completed_by_other', result['state'])
+        self.assertEqual(0, sum(message.startswith('COMPACTION CANCELLED:') for message in self.sent))
+        self.assertEqual(1, sum(message.startswith('CONTINUE:') for message in self.sent))
+
+    def test_peer_boundary_between_idle_and_send_continues_by_other(self):
+        self.rows(*self.claude_idle_rows('before'))
+        oid = self.request(timeout_seconds=30)
+        injected = False
+        def idle(record, after=None):
+            nonlocal injected
+            if not injected:
+                self.rows(self.claude_row('system', 'boundary', subtype='compact_boundary'))
+                injected = True
+            return self.real_native_idle(record, after)
+        self.native_idle.side_effect = idle
+        with patch.object(h, '_wait_idle', return_value={'state': 'idle'}):
+            result = self.observe(oid)
+        self.assertEqual('completed_by_other', result['state'])
+        self.assertEqual('compacted_by_other', result['delivery']['reason'])
+        self.assertNotIn('/compact', self.sent)
+        self.assertEqual(1, sum(message.startswith('CONTINUE:') for message in self.sent))
+
+    def test_peer_boundary_on_send_parser_error_continues_by_other(self):
+        self.rows(*self.claude_idle_rows('before'))
+        oid = self.request(timeout_seconds=30)
+        def idle(*args):
+            self.rows(self.claude_row('system', 'boundary', subtype='compact_boundary'))
+            raise h.ControlError('idle_record_shape_unknown')
+        self.native_idle.side_effect = idle
+        with patch.object(h, '_wait_idle', return_value={'state': 'idle'}):
+            result = self.observe(oid)
+        self.assertEqual('completed_by_other', result['state'])
+        self.assertEqual('compacted_by_other', result['delivery']['reason'])
+        self.assertNotIn('/compact', self.sent)
+        self.assertEqual(1, sum(message.startswith('CONTINUE:') for message in self.sent))
 
     def test_new_claude_event_confirms(self):
         oid = self.request()
@@ -1141,10 +1318,11 @@ class ControlTests(unittest.TestCase):
             self.event()
             return subprocess.CompletedProcess(args, 0, json.dumps({'status': 'delivered', 'receipt': 'command', 'pane': '%999'}), '')
         result = self.observe(oid, send)
-        self.assertEqual('timed_out', result['state'])
-        self.assertEqual('confirmed', result['completion']['state'])
+        self.assertEqual('unconfirmed', result['state'])
+        self.assertEqual('unconfirmed', result['completion']['state'])
         self.assertEqual('not_dispatched', result['continuation']['state'])
-        self.assertEqual(['/compact'], self.sent)
+        self.assertEqual(['/compact'], self.sent[:1])
+        self.assertEqual(1, sum(message.startswith('COMPACTION UNCONFIRMED:') for message in self.sent))
         self.assertEqual('transcript_compacted_but_new_pane_marker_not_observed', result['reason'])
 
     def test_session_switch_before_dispatch_and_continuation(self):
@@ -1185,7 +1363,7 @@ class ControlTests(unittest.TestCase):
         self.event()
         oid = self.request()
         result = self.observe(oid)
-        self.assertEqual('timed_out', result['state'])
+        self.assertEqual('unconfirmed', result['state'])
 
     def test_wrong_session_and_event_shapes_ignored(self):
         baseline = h._baseline(self.transcript)
@@ -1242,6 +1420,16 @@ class ControlTests(unittest.TestCase):
         self.assertEqual('unknown', result['completion']['state'])
         self.assertNotEqual('completed', result['state'])
 
+    def test_exit_defers_on_new_native_compaction_boundary(self):
+        self.rows(*self.claude_idle_rows('before'))
+        oid = self.request('exit')
+        self.rows(self.claude_row('system', 'boundary', subtype='compact_boundary'))
+        self.native_idle.side_effect = self.real_native_idle
+        result = self.observe(oid, alive=False)
+        self.assertEqual('deferred', result['state'])
+        self.assertEqual('native_compaction_boundary', result['reason'])
+        self.assertEqual([], self.sent)
+
     def test_deferred_stderr_and_ambiguous_never_replayed(self):
         oid = self.request()
         def deferred(args):
@@ -1278,7 +1466,8 @@ class ControlTests(unittest.TestCase):
                 self.assertEqual('dispatching', record.get('focus_delivery', {}).get('state'))
             return subprocess.CompletedProcess(args, 0, '{"status":"delivered","receipt":"queued","pane":"%999"}', '')
         self.observe(oid, send)
-        self.assertEqual(['Preserve checkpoint obligations.', '/compact'], self.sent)
+        self.assertEqual(['Preserve checkpoint obligations.', '/compact'], self.sent[:2])
+        self.assertEqual(1, sum(message.startswith('COMPACTION UNCONFIRMED:') for message in self.sent))
         self.sent.clear()
         oid = self.request(focus='focus')
         result = self.observe(oid, lambda args: subprocess.CompletedProcess(args, 2, '', json.dumps({'status': 'deferred', 'paste_attempted': False, 'input_attempted': False})))
@@ -1416,6 +1605,19 @@ class ControlTests(unittest.TestCase):
         self.assertEqual([], self.sent)
         self.request('send', text='hello')
 
+    def test_expired_delivered_compact_keeps_receipt_and_becomes_unconfirmed(self):
+        oid = self.request()
+        path = self.control.directory / (oid + '.json')
+        row = h._read(path)
+        row.update(state='observing', deadline=0,
+                   delivery={'state': 'delivered', 'receipt': 'queued', 'delivered_at': self.clock})
+        h._write(path, row)
+        result = self.control.operation(oid)
+        self.assertEqual('unconfirmed', result['state'])
+        self.assertEqual('queued', result['delivery']['receipt'])
+        self.assertEqual('unavailable', result['failure_notice']['state'])
+        self.assertEqual([], self.sent)
+
 
 def live_integration():
     """Real private tmux + real detached worker + public transport, stand-in TUI."""
@@ -1537,14 +1739,14 @@ def mutations():
     cases = [
         ('queued_attachment', "row['attachment'].get('type') == 'queued_command'", 'False'),
         ('queue_supersession', "if kind == 'queue-operation' and offset >= baseline['offset']:", 'if False:'),
-        ('focus_idle_recheck', "if suffix == '.focus' and _native_idle(record)['state'] != 'idle':", 'if False:'),
-        ('focus_original_generation', "suffix == '.focus' and _native_idle(record)['state']", "suffix == '.focus' and _native_idle(record, record.get('focus_after'))['state']"),
+        ('focus_idle_recheck', "if suffix == '.focus' or text in ('/compact', '/exit'):", 'if False:'),
+        ('focus_original_generation', "record.get('focus_after') if suffix != '.focus' else None", "record.get('focus_after')"),
         ('nontext_supersession', "user_input = not (isinstance(content, list) and bool(content) and\n                                      all(isinstance(c, dict) and c.get('type') == 'tool_result' for c in content))", "user_input = isinstance(content, str) or (isinstance(content, list) and any(isinstance(c, dict) and c.get('type') == 'text' for c in content))"),
         ('waiting_cancel', "if record['state'] not in ('accepted', 'scheduled', 'waiting_idle'):", "if record['state'] != 'accepted':"),
         ('cancel_preserved', "if _read(path)['state'] != 'cancelled':", 'if True:'),
         ('historical_leniency', "if start > baseline['offset']:", 'if True:'),
         ('incremental_cursor', "fresh = not cursor or cursor['key'] != key", 'fresh = True'),
-        ('superseding_claude', "if kind == 'user' and user_input and offset >= baseline['offset']:", 'if False:'),
+        ('superseding_claude', "if (kind == 'user' and user_input and row.get('isMeta') is not True and\n                            row.get('isCompactSummary') is not True and offset >= baseline['offset']):", 'if False:'),
         ('superseding_codex', "if offset >= baseline['offset']:", 'if False:'),
         ('focus_whitespace', 'if focus != focus.strip():', 'if False:'),
         ('raw_zero_width', "if unicodedata.category(c) != 'Cf'", 'if True', 2),
@@ -1564,11 +1766,12 @@ def mutations():
         ('default_idle_budget', "timeout_seconds = 3600 if action == 'compact' else 300", "timeout_seconds = 300"),
         ('compact_idle_bound', "reserve = 0 if record.get('action') == 'compact' else sends * (SEND_BUDGET + PREFLIGHT_BUDGET)", "reserve = sends * (SEND_BUDGET + PREFLIGHT_BUDGET)"),
         ('root_complete_without_start', "if (turn is None and offset >= baseline['offset'] and", "if (False and offset >= baseline['offset'] and"),
-        ('new_turn_rearm', 'turns_seen += 1', 'turns_seen += 0', 2),
+        ('new_codex_turn_cancellation', '                                turns_seen += 1\n', '                                turns_seen += 0\n'),
+        ('new_claude_turn_cancellation', '                            user_turns_seen += 1\n', '                            user_turns_seen += 0\n'),
         ('claude_api_metadata', "if kind in ('api-request-shape', 'api-request-blob', 'api-request'):", 'if False:'),
         ('claude_current_marker', 'len(_CLAUDE_COMPACT_ROW.findall(plain))', '0'),
-        ('continuation_preflight', 'deadline=time.time() + SEND_BUDGET + PREFLIGHT_BUDGET,', 'deadline=time.time() + SEND_BUDGET + 1,'),
-        ('idle_dispatch', "if text in ('/compact', '/exit') and _native_idle(record, record.get('focus_after'))['state'] != 'idle':", 'if False:'),
+        ('continuation_preflight', 'deadline=time.time() + SEND_BUDGET + PREFLIGHT_BUDGET,', 'deadline=time.time() + SEND_BUDGET + 1,', 3),
+        ('idle_dispatch', "if idle['state'] != 'idle':", 'if False:'),
         ('idle_wait', "if last['state'] == 'idle':", 'if True:'),
         ('idle_codex_match', "candidate == turn and focus_seen", 'focus_seen'),
         ('idle_claude_parent', "linked = parent is not None and row.get('parentUuid') == parent", 'linked = True'),
@@ -1592,7 +1795,7 @@ def mutations():
         ('alias_prefix', "lifecycle = (normalized.startswith('/') and any(name.startswith(normalized.split()[0][1:])\n                     for name in ('compact', 'exit', 'quit', 'q')))", "lifecycle = re.match(r'^/(?:compact|exit|quit|q)(?:\\s|$)', normalized)"),
         ('serialization', "if prior['state'] not in TERMINAL:", 'if False:'),
         ('old_event', "'offset': end,", "'offset': 0,"),
-        ('wrong_session', "and row.get('sessionId') == session_id", ''),
+        ('wrong_session', "row.get('sessionId') == session_id and row.get('isSidechain') is not True", "row.get('isSidechain') is not True"),
         ('codex_event', "row.get('type') == 'compacted'", "row.get('type') == 'event_msg'"),
         ('process', 'None if same_process(identity) else', 'None if not same_process(identity) else'),
         ('stderr', 'run.stdout if run.returncode == 0 else run.stderr', 'run.stdout'),
@@ -1610,7 +1813,7 @@ def mutations():
         ('replaced', "if (info.st_dev, info.st_ino) != (baseline['device'], baseline['inode']) or info.st_size < baseline['offset']:", 'if False:'),
         ('private_directory', "info.st_mode & 0o077:\n        raise ControlError('state_directory_not_private')", "False:\n        raise ControlError('state_directory_not_private')"),
         ('no_event_no_continue', 'if witness:', 'if True:'),
-        ('session_before_send', "        _verify_session(identity, record['session_id'], record.get('claude_state_dir'), record.get('codex_home'))\n        if suffix ==", "        if suffix =="),
+        ('session_before_send', "        _verify_session(identity, record['session_id'], record.get('claude_state_dir'), record.get('codex_home'))\n        if suffix == '.focus' or", "        if suffix == '.focus' or"),
         ('session_fields', "if binding['state'] != 'observed' or binding['session_id'] != session_id:", 'if False:'),
         ('both_witnesses', "if marker and marker['count'] > record['pane_baseline']['count']:", 'if marker:'),
         ('typed_command', "command.append('--typed-command')", 'pass'),
