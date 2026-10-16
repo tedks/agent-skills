@@ -78,3 +78,13 @@ log_events:
     gate, and any further repeated test cycle goes to a fresh Luna worker with a small
     brief. The gate process is owned by this lane; branch source remains unchanged
     at 40405c3 while it runs.'
+- time: 2026-10-16T07:14:33-00:00
+  who: Ted Smith
+  what: commented
+  comment: 'Gate at 40405c3: nix build .#harness-control passed; nix flake check reached
+    full unit mutation suite and failed because two existing mutation cases survived:
+    failure_notice and warning_before_terminal. All other reported mutation cases
+    were killed. A fresh Luna implementer has the bounded task of repairing meaningful
+    test assertions in test_harness_control_core.py only and running targeted mutation
+    evidence; lead will inspect the diff and rerun the exact-head full gate. Product
+    rulings remain pending.'
