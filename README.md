@@ -82,8 +82,9 @@ the lane to compact. Current Claude and Codex transcript rows do not
 authenticate whether a root input came from the operator or a tmux peer. The
 safe observable rule therefore counts either as an intervening turn; exempting
 message text would let an operator's identical input bypass cancellation.
-Native metadata and tool-result rows remain excluded. Sender provenance needs
-an explicit, bound receipt before peer control messages can be exempted.
+Native metadata and tool-result rows remain excluded. A separate follow-up will
+apply the CTO's configured control-prefix convention; an operator using the
+same prefix will then also be exempt under that convention.
 If a peer compaction boundary and a root input appear within one transcript
 poll, the observed boundary wins and the request resumes from that compaction.
 
