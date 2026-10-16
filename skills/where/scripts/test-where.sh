@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
+# shellcheck disable=SC2329,SC2016
 # where against temp git repos in a private HOME and XDG_CACHE_HOME.
-set -euo pipefail
+set -uo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 WHERE="$HERE/where"
 WORK="$(mktemp -d)"
@@ -11,7 +12,7 @@ export GIT_AUTHOR_NAME=t GIT_AUTHOR_EMAIL=t@example.com GIT_COMMITTER_NAME=t GIT
 mkdir -p "$HOME/Projects"
 fail=0
 check() { local what="$1"; shift; if "$@"; then echo "ok   $what"; else echo "FAIL $what"; fail=1; fi; }
-not() { ! "$@"; }
+not() { ! "$@"; }  # shellcheck disable=SC2329
 
 # Bare-repo + worktrees layout: $HOME/Projects/proj/{.git,master,feat}
 SEED="$WORK/seed"
@@ -120,18 +121,14 @@ for broad in "$HOME" "$HOME/Projects" / /tmp; do
   check "refusal of $broad carries a hint" grep -qi 'broad' "$WORK/e"
   check "refusal of $broad maps nothing" test ! -s "$WORK/o"
 done
-set +e
 (cd "$HOME/Projects" && "$WHERE" > /dev/null 2> "$WORK/e")
 rc=$?
-set -e
 check "refuses when the cwd is a broad root" test "$rc" -eq 2
 
 # Not a project
 mkdir -p "$WORK/notgit"
-set +e
 "$WHERE" "$WORK/notgit" > /dev/null 2> "$WORK/e"
 rc=$?
-set -e
 check "a non-git directory exits 2" test "$rc" -eq 2
 
 exit "$fail"
