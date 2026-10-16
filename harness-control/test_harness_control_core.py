@@ -1018,9 +1018,14 @@ class ControlTests(unittest.TestCase):
     def test_pane_marker_classifies_invalid_encoding(self):
         failure = UnicodeDecodeError('utf-8', b'\xff', 0, 1, 'fixture')
         with patch.object(h.subprocess, 'run', side_effect=failure):
-            with self.assertRaisesRegex(h.ControlError, 'pane_compaction_marker_unavailable') as caught:
+            try:
                 h._pane_marker(self.identity)
-        self.assertIs(caught.exception.__cause__, failure)
+            except Exception as caught:
+                self.assertIsInstance(caught, h.ControlError)
+                self.assertEqual('pane_compaction_marker_unavailable', str(caught))
+                self.assertIs(caught.__cause__, failure)
+            else:
+                self.fail('pane marker accepted invalid UTF-8')
 
     def test_reaper_settles_abandoned_dispatch_intents(self):
         oid = self.request()
