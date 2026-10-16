@@ -30,3 +30,11 @@ log_events:
   who: Ted Smith
   what: created
   comment: ""
+- time: 2026-10-16T17:08:50-00:00
+  who: Ted Smith
+  what: commented
+  comment: 'Ruling (dotfiles CTO, 2026-10-16): keep the existing precedence for PR
+    #9 (peer compaction seen = completed, send the continuation). A continuation that
+    lands during newer work is a message the agent can read in context; the opposite
+    error, never sending it, strands a lane. Study transcript ordering separately
+    with fixtures before changing it.'
