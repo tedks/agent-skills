@@ -57,7 +57,7 @@ class LifecycleTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_default_budget_leaves_time_for_turn_completion(self):
         await server.self_compact('/private/shard', 'receipt')
-        self.assertEqual(self.control.request.call_args.kwargs['timeout_seconds'], 300)
+        self.assertEqual(self.control.request.call_args.kwargs['timeout_seconds'], 3600)
         await server.self_exit('receipt')
         self.assertEqual(self.control.request.call_args.kwargs['timeout_seconds'], 300)
         await server.send_to_self('ordinary follow-up')
@@ -164,7 +164,7 @@ class LifecycleTests(unittest.IsolatedAsyncioTestCase):
 
 MUTANTS = {
     'test_exit_requires_transcript_for_native_idle_gate': ('checkpoint_receipt=checkpoint_receipt, timeout_seconds=timeout_seconds,\n        require_transcript=True)', 'checkpoint_receipt=checkpoint_receipt, timeout_seconds=timeout_seconds,\n        require_transcript=False)'),
-    'test_default_budget_leaves_time_for_turn_completion': ('async def self_exit(checkpoint_receipt: str, timeout_seconds: int = 300)', 'async def self_exit(checkpoint_receipt: str, timeout_seconds: int = 120)'),
+    'test_default_budget_leaves_time_for_turn_completion': ('timeout_seconds: int = 3600) -> dict:', 'timeout_seconds: int = 300) -> dict:'),
     'test_mcp_schema_self_only': ('async def self_exit(checkpoint_receipt: str, timeout_seconds: int = 300)', 'async def self_exit(checkpoint_receipt: str, timeout_seconds: int = 300, pane: str = "")'),
     'test_claude_pointer_and_snapshot_bind_ignoring_override': ('binding = _native_observation(identity)', "binding = {'state': 'observed', 'session_id': os.environ.get('CLAUDE_SESSION_ID'), 'pointer_paths': ['/tmp/nope']}"),
     'test_mismatched_snapshot_refuses_compaction': ("if parse_claude_status(snapshot, sid)['state'] != 'available':", 'if False:'),
