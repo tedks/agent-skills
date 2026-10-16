@@ -32,3 +32,19 @@ log_events:
   who: Ted Smith
   what: started
   comment: ""
+- time: 2026-10-16T16:52:19-00:00
+  who: Ted Smith
+  what: commented
+  comment: 'Lead record 2026-10-16: Branch fix/harness-compact-stale-cancel from master
+    996a24f. Assumptions: no slash dispatch in the incident; .worker lease serializes
+    sends; root transcript input lacks authenticated sender origin. Acceptance: terminal
+    cancelled with notice receipt, explicit cancellation of pre-dispatch warning/watch,
+    refusal names ID/state/remedy, previous behavior killed by new tests, both native
+    harnesses, mutation guards, Nix gates, council clean, normal merge, installed-store
+    verification. Repair authority: agent-skills harness-control and focused tests/docs;
+    dotfiles installer after merge. Stop: changed product policy/risk, unavailable
+    live-safe evidence, or failed gates after bounded repair. Decision: peer control
+    should be exempt only with authenticated provenance; current native root rows
+    cannot support exemption, so root input still cancels. Follow-up open question
+    harness-compact-peer-provenance. Core suite 107 tests green; previous-head regressions
+    fail as intended; mutation and native tests running. No live pane/state touched.'
