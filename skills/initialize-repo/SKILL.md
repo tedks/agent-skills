@@ -58,7 +58,7 @@ There are deliberately **no GitHub Actions templates**: new repos get no CI, Cla
 ~/.claude/skills/initialize-repo/scripts/sync-check.sh ~/Projects/<project>/master
 ```
 
-For each verbatim template it checks the known candidate locations (`.planning/PLANS.md` and root `PLANS.md`; `../create-worktree` for the project-root layout) and prints one line per file found: `identical`, `drifted` (with changed-line counts), or `missing`. Skeleton templates are reported presence-only, never diffed. The Playwright snippet is detected by grepping `flake.nix` for `playwright-driver`.
+For each verbatim template it checks the known candidate locations (`.planning/PLANS.md` and root `PLANS.md`; `../create-worktree` for the project-root layout) and prints one line per file found: `identical`, `drifted` (with changed-line counts), or `missing`. Skeleton templates are reported presence-only, never diffed. The one exception is `AGENTS.md`'s required `## Project structure` section: sync-check also reports (as `structure`) whether the section is missing, still the template placeholder, or filled in. The Playwright snippet is detected by grepping `flake.nix` for `playwright-driver`.
 
 The script is **read-only** — it never modifies the target repo. Divergence after scaffolding is allowed; the report exists to make drift *visible* so it can be reviewed deliberately, not to enforce conformance. It always exits 0 (it's a report, not a gate) except on usage errors or a broken skill install (missing template files).
 
@@ -751,7 +751,7 @@ Include these in the AGENTS.md written during Part 3:
 ### Step F1: Write AGENTS.md
 
 Start from `templates/AGENTS.md`. Replace the placeholders (`{{PROJECT_NAME}}`, `{{PROJECT_DESCRIPTION}}`) and fill in the TODO sections:
-- Project structure (directory layout — adapt to the selected type)
+- Project structure (REQUIRED: annotated top-level directories; agents read it via the `where` skill before searching — adapt to the selected type)
 - Environment setup (Nix + direnv if the type includes a flake, or just note "no special environment" for `bare`)
 - **Type-specific build and test commands** (see the "AGENTS.md sections" in the type above)
 - Repo specifics (domain constraints, licensing, deploy targets — whatever is genuinely unique)

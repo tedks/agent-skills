@@ -64,6 +64,7 @@ n_identical=0
 n_drifted=0
 n_missing=0
 n_skeleton=0
+n_structure=0
 
 report() { # status, detail
   printf '  %-10s %s\n' "$1" "$2"
@@ -120,6 +121,31 @@ for entry in "${SKELETON[@]}"; do
   fi
 done
 
+# Required "Project structure" section in AGENTS.md: agents read it via the
+# where skill before searching. Presence-only: reports a missing section or
+# one that still holds only the template placeholder.
+if [[ -f "$REPO/AGENTS.md" ]]; then
+  structure=$(awk '
+    /^## Project structure[[:space:]]*$/ { found = 1; next }
+    found && /^## / { exit }
+    found { print }
+    END { if (!found) exit 3 }
+  ' "$REPO/AGENTS.md") && has_section=1 || has_section=0
+  if [[ "$has_section" -eq 0 ]]; then
+    report "structure" "AGENTS.md has no \"Project structure\" section (required by the template)"
+    n_structure=$((n_structure + 1))
+  elif [[ -z "$(awk '
+      /<!--/ { c = 1 }
+      !c && NF { print }
+      /-->/ { c = 0 }
+    ' <<<"$structure")" ]]; then
+    report "structure" "AGENTS.md Project structure is still the template placeholder"
+    n_structure=$((n_structure + 1))
+  else
+    report "structure" "AGENTS.md Project structure section present"
+  fi
+fi
+
 # Playwright flake snippet: presence-only, detected by content.
 if [[ -f "$REPO/flake.nix" ]]; then
   if grep -q 'playwright-driver' "$REPO/flake.nix"; then
@@ -133,5 +159,5 @@ else
 fi
 
 echo
-echo "summary: $n_identical identical, $n_drifted drifted, $n_missing missing, $n_skeleton skeleton-present"
+echo "summary: $n_identical identical, $n_drifted drifted, $n_missing missing, $n_skeleton skeleton-present, $n_structure structure-section problems"
 exit 0

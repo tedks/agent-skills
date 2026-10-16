@@ -18,7 +18,11 @@ agent genuinely needs divergent instructions.
 
 ## Project structure
 
-<!-- TODO: directory layout, one line per top-level entry -->
+<!-- REQUIRED. Annotated list of the top-level directories and what lives
+where. Agents read this via the `where` skill before searching, so keep it
+current. -->
+
+<!-- TODO: one line per top-level entry, e.g. "- `src/` -- application code" -->
 
 ## Environment
 
