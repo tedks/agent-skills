@@ -53,7 +53,15 @@ def dialog_active(screen: str, cursor_y: int | None = None) -> bool:
     active = lines[-25:]
     text = "\n".join(active)
     compact = re.sub(r"\s+", " ", text)
-    choice = re.search(r"^\s*[❯›>]?[ \u00a0]*(?:\d+\.\s*)?(?:Yes\b|No\b|Exit\b|Stay\b|Allow once\b|Claude account\b|Anthropic Console\b|3rd-party platform\b)", text, re.I | re.M)
+    # With no cursor coordinate, a draft beginning with "Yes" can look like
+    # the selected button of a dialog when a footer says "esc to cancel".
+    # Exclude the measured composer rows from choice evidence, while keeping
+    # the rest of the screen available for real dialog detection.
+    composer_rows = claude_composer_frame(screen)
+    active_start = len(lines) - len(active)
+    choice_text = "\n".join(line for i, line in enumerate(active, active_start)
+                            if composer_rows is None or not composer_rows[0] <= i < composer_rows[1])
+    choice = re.search(r"^\s*[❯›>]?[ \u00a0]*(?:\d+\.\s*)?(?:Yes\b|No\b|Exit\b|Stay\b|Allow once\b|Claude account\b|Anthropic Console\b|3rd-party platform\b)", choice_text, re.I | re.M)
     if re.search(r"Update available!", compact, re.I) and re.search(r"Press enter to continue", compact, re.I):
         return True
     if re.search(r"Background work is running", compact, re.I) and re.search(r"Exit and stop tasks", compact, re.I):
@@ -66,10 +74,10 @@ def dialog_active(screen: str, cursor_y: int | None = None) -> bool:
         return True
     if re.search(r"Would you like to (?:proceed|run)|Do you want to (?:proceed|allow)", text, re.I) and choice:
         return True
-    frame = any(re.search(r"([─╌▔═])\1{7,}", line) for line in active)
-    selected = re.search(r"^\s*❯[ \u00a0]*(?:\d+\.\s*)?(?:Yes\b|No\b|Exit\b|Stay\b|Allow\b)", text, re.I | re.M)
+    has_frame = any(re.search(r"([─╌▔═])\1{7,}", line) for line in active)
+    selected = re.search(r"^\s*❯[ \u00a0]*(?:\d+\.\s*)?(?:Yes\b|No\b|Exit\b|Stay\b|Allow\b)", choice_text, re.I | re.M)
     instruction = re.search(r"Enter to (?:confirm|choose)|Esc to cancel|Tab to amend", text, re.I)
-    if frame and selected and instruction:
+    if has_frame and selected and instruction:
         return True
     return False
 

@@ -7,11 +7,16 @@ SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 export FIXTURES="$SCRIPT_DIR/fixtures/claude-send"
 source "$SCRIPT_DIR/claude-pane-detect.sh"
 for fixture in claude-2.1.302-login-modal.ansi claude-2.1.302-trust-modal.ansi \
-               claude-2.1.302-permission-modal.ansi claude-2.1.302-exit-background-modal.ansi; do
+               claude-2.1.302-permission-modal.ansi claude-2.1.302-exit-background-modal.ansi \
+               SYNTHETIC-claude-update-dialog.ansi \
+               SYNTHETIC-UNVERIFIED-claude-unsent-feedback-exit-dialog.ansi; do
   screen=$(cat "$FIXTURES/$fixture")
   claude_modal_active "$screen" || { echo "FAIL: $fixture was not modal" >&2; exit 1; }
   claude_composer_ready "$screen" && { echo "FAIL: $fixture looked ready" >&2; exit 1; }
 done
+screen=$(cat "$FIXTURES/SYNTHETIC-claude-yes-draft-usage-footer.ansi")
+claude_modal_active "$screen" && { echo 'FAIL: no-cursor Yes draft looked modal' >&2; exit 1; }
+claude_composer_ready "$screen" || { echo 'FAIL: no-cursor Yes draft was not ready' >&2; exit 1; }
 for fixture in claude-2.1.302-auto-update-footer-live-scrubbed.ansi \
                claude-2.1.299-feedback-count-footer-live-scrubbed.ansi \
                SYNTHETIC-claude-2.1.302-usage-limit-footer.ansi \
@@ -1124,7 +1129,9 @@ done
 # Real captured dialogs and an unfamiliar framed choice must not reach tmux
 # paste or Enter in the legacy sender.
 for fixture in claude-2.1.302-login-modal.ansi claude-2.1.302-trust-modal.ansi \
-               claude-2.1.302-permission-modal.ansi claude-2.1.302-exit-background-modal.ansi; do
+               claude-2.1.302-permission-modal.ansi claude-2.1.302-exit-background-modal.ansi \
+               SYNTHETIC-claude-update-dialog.ansi \
+               SYNTHETIC-UNVERIFIED-claude-unsent-feedback-exit-dialog.ansi; do
   reset_case modal
   cp "$FIXTURES/$fixture" "$FAKE_STATE/modal"
   if run_sender %7 --submit-delay 0 --max-wait 1 --poll-interval 0.1 --prompt-file "$prompt_file" >"$TEST_DIR/$fixture.out" 2>"$TEST_DIR/$fixture.err"; then

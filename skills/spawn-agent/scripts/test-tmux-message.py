@@ -925,12 +925,13 @@ assert screen.observe(frame, 'outgoing', 6, 1, pathlib.Path(sys.argv[2])) == 'dr
                 self.assertEqual(m.composer(frame).kind, 'empty')
                 self.assertEqual(m.composer(frame).harness, 'claude')
 
-    def test_captured_claude_dialogs_and_footers(self):
+    def test_claude_dialogs_and_footers_by_fixture(self):
         fixtures = (
             ('claude-2.1.302-login-modal.ansi', 'modal'),
             ('claude-2.1.302-trust-modal.ansi', 'modal'),
             ('claude-2.1.302-permission-modal.ansi', 'modal'),
             ('claude-2.1.302-exit-background-modal.ansi', 'modal'),
+            ('SYNTHETIC-UNVERIFIED-claude-unsent-feedback-exit-dialog.ansi', 'modal'),
             ('claude-2.1.302-auto-update-footer-live-scrubbed.ansi', 'empty'),
             ('claude-2.1.299-feedback-count-footer-live-scrubbed.ansi', 'empty'),
             ('SYNTHETIC-claude-2.1.302-usage-limit-footer.ansi', 'empty'),
@@ -943,6 +944,23 @@ assert screen.observe(frame, 'outgoing', 6, 1, pathlib.Path(sys.argv[2])) == 'dr
                 self.assertEqual(result.kind, expected)
                 if expected == 'empty':
                     self.assertEqual(result.harness, 'claude')
+
+    def test_synthetic_update_dialog_defers(self):
+        raw = (CO_SUBMIT_FIXTURES / 'SYNTHETIC-claude-update-dialog.ansi').read_text()
+        frame = m.Frame(raw, 0, 3)
+        self.assertEqual(m.composer(frame).kind, 'modal')
+        t = Terminal()
+        t.frame = lambda: frame
+        with self.assertRaisesRegex(m.DeliveryError, 'modal'):
+            deliver(t)
+        self.assertEqual(t.actions, [])
+
+    def test_yes_draft_with_usage_footer_is_not_modal_without_cursor(self):
+        raw = (CO_SUBMIT_FIXTURES / 'SYNTHETIC-claude-yes-draft-usage-footer.ansi').read_text()
+        self.assertIn('❯\u00a0', raw)
+        self.assertIsNotNone(m.styles.claude_composer_frame(raw))
+        self.assertFalse(m.styles.dialog_active(raw))
+        self.assertEqual(m.composer(m.Frame(raw, 2 + len('Yes, please continue the work.'), 2)).kind, 'text')
 
     def test_bare_cancel_text_is_not_a_dialog(self):
         frame = screen(harness='claude', prefix='Esc to cancel\n')

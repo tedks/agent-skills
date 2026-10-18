@@ -10,12 +10,12 @@ This ExecPlan follows `.planning/PLANS.md` and is a living record of the modal f
 
 - [x] (2026-10-18) Read the Lead brief, role, binding, and issue; confirmed branch `tmux-message-modal` in the assigned worktree; started the ditz issue.
 - [x] (2026-10-18) Started a private tmux server and scratch Claude 2.1.302 session. The unauthenticated run captured the login selector; the authenticated real config under an isolated cwd captured trust, permission, and background-exit dialogs without copying credentials.
-- [ ] Capture real ANSI screens for the specified footers and dialogs from scratch panes (done: login, trust, permission, background-exit, scrubbed live auto-update and feedback count; open: update and unsent-feedback dialogs, authentic usage-limit footer).
+- [x] (2026-10-18) Record the available real captures and label provisional synthetic fixtures: login, trust, permission, background-exit, scrubbed live auto-update and feedback-count footers, synthetic usage-limit and `/clear` footers, synthetic update dialog, and synthetic-unverified unsent-feedback dialog. Replacing the unavailable real dialogs is tracked in `tmux-message-replace-synthetic-dialog-fixtures` under MODAL-R2.
 - [x] (2026-10-18) Add fixture assertions and verify the usage-limit regression fails on the old classifier (`modal` instead of `empty`).
 - [x] (2026-10-18) Narrow both senders' modal classification without changing exit codes or status contract.
 - [x] (2026-10-18) Run affected tests, repository configuration checks, and mutation probes: restoring broad footer matching makes the footer fixture fail; accepting ordinary-space choices as composers makes the unfamiliar-choice regression fail. The source-tree leak scan has a pre-existing failure filed as ditz `setup-leaks-existing-plans`.
 - [x] (2026-10-18) Push the fixture/red-test commit and open draft PR #10.
-- [ ] Review to fixpoint and hand off to the CTO for merge.
+- [ ] Review the MODAL-R2 delta to fixpoint, rerun exact-SHA gates, and merge PR #10 under MODAL-MERGE-OK.
 
 ## Surprises & Discoveries
 
@@ -27,6 +27,8 @@ This ExecPlan follows `.planning/PLANS.md` and is a living record of the modal f
 - Council round 1 found that unfamiliar choice rows could be mistaken for writable composers. A positive composer check now requires the measured flush-left `❯` plus NBSP marker immediately beneath a rule, another rule below, and the cursor within that frame. Unknown choice layouts defer without input. This relies on the measured 2.1.30x prompt shape; a future Claude rendering change fails closed until remeasured.
 - Convergence rounds 2–5 exposed a Codex ambiguity outside this Claude footer repair: quoted Claude dialog text can falsely block a live Codex composer, while a selected Codex choice with a retained context footer can resemble a writable draft. Attempts to address both here caused fresh approval and ordinary-draft regressions. This patch restores the pre-existing Codex parser and tracks the separate ambiguity in `tmux-message-codex-choice-versus-draft`. Round 6 restored master's narrow legacy pre-routing dialog checks and broad public Codex dialog guard; the Claude footer exemption applies only with a positively identified Claude composer.
 - A truncated legacy combined-input frame with the cursor below its bottom rule now returns `unknown` instead of `busy`; both defer, and `unknown` describes the missing live frame more accurately.
+- MODAL-R2 identified a no-cursor false positive: a draft beginning `Yes` inside a measured composer frame plus the usage-limit footer made the generic frame/selected/instruction branch return `modal`. The new synthetic fixture reproduced that result before the fix; selection evidence now excludes measured composer rows even when the caller lacks a cursor coordinate.
+- A future dialog rendered in the exact measured composer shape could be mistaken for input. Recheck the shape when Claude's UI version changes; the synthetic update layout is invented and proves detector-anchor deferral only.
 
 ## Decision Log
 
@@ -38,6 +40,7 @@ This ExecPlan follows `.planning/PLANS.md` and is a living record of the modal f
 - Decision: remove a proposed footer text exclusion list after council review. It could delete text belonging to a real dialog. Require a positive live composer frame and leave footer text intact. Date/author: 2026-10-18, Codex lead.
 - Decision: return Codex-specific parsing to the previous behavior after convergence round 5. The new blank-row heuristic could treat a selected approval choice as writable; strengthening it blocked ordinary drafts. Scope the PR to Claude footers and file a separate Codex issue with both failure modes. Date/author: 2026-10-18, Codex lead.
 - Decision: keep master's narrow legacy pre-routing checks and broad public Codex dialog guard after round 6 identified their accidental removal. The broader public guard applies unless a live Claude composer frame is established at the cursor, preserving the footer repair. Date/author: 2026-10-18, Codex lead.
+- Decision: apply CTO ruling MODAL-R2. Exact-string synthetic update and detector-anchor synthetic-unverified feedback dialogs are accepted for PR #10; neither blocks merge, and a follow-up requires real read-only replacement captures. Fix the no-cursor selected-draft false positive, review the delta to clean, then merge normally after final gates. Date/author: 2026-10-18, Codex lead.
 
 ## Outcomes & Retrospective
 
