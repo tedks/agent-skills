@@ -81,11 +81,10 @@ def composer(frame):
     for idx, match in reversed(candidates):
         glyph, first = match.groups()
         if glyph == "❯":
-            rules = [i for i, line in enumerate(lines) if line.strip() and set(line.strip()) == {"─"}]
-            below = [i for i in rules if i > idx]
-            if not any(i < idx for i in rules) or not below:
+            shape = styles.claude_composer_frame(frame.raw, frame.y)
+            if shape is None or shape[0] != idx:
                 continue
-            end = below[0]
+            end = shape[1]
             harness = "claude"
         else:
             footers = [i for i in range(idx + 1, len(lines)) if FOOTER.match(lines[i])]

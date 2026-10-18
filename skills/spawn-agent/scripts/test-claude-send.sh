@@ -20,6 +20,10 @@ for fixture in claude-2.1.302-auto-update-footer-live-scrubbed.ansi \
   claude_modal_active "$screen" && { echo "FAIL: $fixture looked modal" >&2; exit 1; }
   claude_composer_ready "$screen" || { echo "FAIL: $fixture was not ready" >&2; exit 1; }
 done
+screen="$(cat "$FIXTURES/claude-2.1.302-trust-modal.ansi")"$'\n'"$(cat "$FIXTURES/claude-blank.ansi")"
+cursor_y=$(($(printf '%s\n' "$screen" | wc -l) - 2))
+claude_modal_active "$screen" "$cursor_y" && { echo 'FAIL: old dialog text hid live composer' >&2; exit 1; }
+claude_composer_ready "$screen" "$cursor_y" || { echo 'FAIL: old dialog text blocked live composer' >&2; exit 1; }
 claude_modal_active() { return 2; }
 screen=$(cat "$FIXTURES/claude-2.1.302-auto-update-footer-live-scrubbed.ansi")
 claude_composer_ready "$screen" && { echo 'FAIL: classifier error looked ready' >&2; exit 1; }
@@ -946,7 +950,7 @@ with tempfile.TemporaryDirectory() as tmp:
         assert m.state(raw, wanted, cursor_x + 1, cursor_y, draft) == 'busy'
         assert m.state(raw, wanted, cursor_x, cursor_y - 1, draft) == 'busy'
         missing = '\n'.join(rows[:-1] + ['─' * 20, ''])
-        assert m.state(missing, wanted, cursor_x, cursor_y, draft) == 'busy'
+        assert m.state(missing, wanted, cursor_x, cursor_y, draft) == 'unknown'
     extra = '\n'.join(rows + ['  unexpected continuation', '─' * 20, ''])
     assert m.state(extra, wanted, cursor_x, cursor_y, draft) == 'busy'
 PYTEST
@@ -1107,6 +1111,26 @@ for mode in human slash modal; do
   [[ $(<"$pending") == $'alpha\nbeta' ]]
   rm -rf "$(dirname "$pending")"
 done
+
+# Real captured dialogs and an unfamiliar framed choice must not reach tmux
+# paste or Enter in the legacy sender.
+for fixture in claude-2.1.302-login-modal.ansi claude-2.1.302-trust-modal.ansi \
+               claude-2.1.302-permission-modal.ansi claude-2.1.302-exit-background-modal.ansi; do
+  reset_case modal
+  cp "$FIXTURES/$fixture" "$FAKE_STATE/modal"
+  if run_sender %7 --submit-delay 0 --max-wait 1 --poll-interval 0.1 --prompt-file "$prompt_file" >"$TEST_DIR/$fixture.out" 2>"$TEST_DIR/$fixture.err"; then
+    echo "FAIL: $fixture accepted input" >&2; exit 1
+  fi
+  [[ $(grep -c '^paste-start$' "$FAKE_LOG" || true) -eq 0 ]]
+  [[ $(grep -c '^enter$' "$FAKE_LOG" || true) -eq 0 ]]
+done
+reset_case modal
+printf '────────────────\nChoose an account:\n❯ 1. Foo\n  2. Bar\n────────────────\n' > "$FAKE_STATE/modal"
+if run_sender %7 --submit-delay 0 --max-wait 1 --poll-interval 0.1 --prompt-file "$prompt_file" >"$TEST_DIR/unfamiliar.out" 2>"$TEST_DIR/unfamiliar.err"; then
+  echo 'FAIL: unfamiliar framed choice accepted input' >&2; exit 1
+fi
+[[ $(grep -c '^paste-start$' "$FAKE_LOG" || true) -eq 0 ]]
+[[ $(grep -c '^enter$' "$FAKE_LOG" || true) -eq 0 ]]
 
 # A new human draft between stable-empty observations and paste defers safely.
 reset_case human-before-paste

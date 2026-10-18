@@ -74,9 +74,9 @@ empty input is verified. Its context may pre-empt the command. Results include
 `clear_attempted` whenever clearing was attempted, never draft contents.
 Changing input, replay residue, modals and unsupported layouts still defer.
 Claude Code status footers such as usage limits, auto-update errors, and
-feedback-draft counts are not dialogs; a footer alone does not return `modal`.
-The sender recognizes current dialog choices or known dialog prompts and
-continues to defer on ambiguous frames.
+feedback-draft counts do not by themselves return `modal`. Delivery requires
+the measured Claude composer frame at the cursor. Known dialogs return `modal`,
+and unfamiliar choice layouts defer as unknown input without paste or Enter.
 For ordinary co-submission, the public sender supports measured Codex and
 Claude append shapes: Codex's unchanged draft prefix plus one fresh Content
 marker whose count covers the appended newline and payload; Claude's exact

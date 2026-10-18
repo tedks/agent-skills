@@ -21,7 +21,7 @@ spec.loader.exec_module(m)
 
 def screen(text='', history='', harness='codex', footer='  Any model · branch', prefix=''):
     if harness == 'claude':
-        raw = prefix + '──────────────\n❯ ' + text + '\n──────────────\n'
+        raw = prefix + '──────────────\n❯\u00a0' + text + '\n──────────────\n'
         y = len(prefix.splitlines()) + 1 + text.count('\n')
     else:
         raw = prefix + '› ' + text + '\n\n' + footer + '\n'
@@ -911,8 +911,7 @@ assert screen.observe(frame, 'outgoing', 6, 1, pathlib.Path(sys.argv[2])) == 'dr
         self.assertEqual(t.actions, [])
 
     def test_claude_status_footers_are_not_modals(self):
-        # Interim text from the incident report; authentic ANSI captures will
-        # replace these before the PR is offered for review.
+        # Text from the incident report supplements the labeled ANSI captures.
         footers = (
             'Usage limit reached · continuing automatically at 12pm · esc to cancel',
             '✘ Auto-update failed: no write permission to npm prefix · Run claude doctor',
@@ -945,16 +944,7 @@ assert screen.observe(frame, 'outgoing', 6, 1, pathlib.Path(sys.argv[2])) == 'dr
                 if expected == 'empty':
                     self.assertEqual(result.harness, 'claude')
 
-    def test_known_footer_list_is_live_and_bare_cancel_text_is_not_a_dialog(self):
-        for name in (
-            'claude-2.1.302-auto-update-footer-live-scrubbed.ansi',
-            'claude-2.1.299-feedback-count-footer-live-scrubbed.ansi',
-            'SYNTHETIC-claude-2.1.302-usage-limit-footer.ansi',
-            'SYNTHETIC-claude-2.1.302-new-task-footer.ansi',
-        ):
-            with self.subTest(name=name):
-                raw = (CO_SUBMIT_FIXTURES / name).read_text()
-                self.assertTrue(m.styles.known_status_footer(raw))
+    def test_bare_cancel_text_is_not_a_dialog(self):
         frame = screen(harness='claude', prefix='Esc to cancel\n')
         self.assertEqual(m.composer(frame).kind, 'empty')
 
@@ -970,6 +960,19 @@ assert screen.observe(frame, 'outgoing', 6, 1, pathlib.Path(sys.argv[2])) == 'dr
     def test_wrapped_update_prompt_is_modal(self):
         raw = 'Update available!\nPress enter to\ncontinue\n'
         self.assertEqual(m.composer(m.Frame(raw, 0, 2)).kind, 'modal')
+
+    def test_unfamiliar_framed_choice_is_not_writable(self):
+        for title, selected in (('Choose an account:\n', '❯ 1. Foo'),
+                                ('', '❯ 1. Foo'),
+                                ('Choose an account:\n', '❯\u00a0')):
+            raw = '────────────────\n' + title + selected + '\n  2. Bar\n────────────────\n'
+            frame = m.Frame(raw, 2, 1 + bool(title))
+            self.assertEqual(m.composer(frame).kind, 'unknown')
+            t = Terminal()
+            t.frame = lambda: frame
+            with self.assertRaises(m.DeliveryError):
+                deliver(t)
+            self.assertEqual(t.actions, [])
 
     def test_wrapped_and_multiline_composers(self):
         for harness in ['codex', 'claude']:

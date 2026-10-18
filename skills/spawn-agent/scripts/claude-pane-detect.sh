@@ -25,7 +25,7 @@
 # footers cannot become modals merely because they say "esc to cancel".
 claude_modal_active() {
     local script_dir result
-    script_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+    script_dir=$(cd -- "$(dirname "${BASH_SOURCE[0]}")" >/dev/null && pwd)
     if [[ -n ${2:-} ]]; then
         result=$(printf '%s' "$1" | python3 "$script_dir/claude-send-screen.py" --dialog-active "$2") || return 2
     else
@@ -52,16 +52,20 @@ claude_trust_dialog_specific() {
 # a wrapped dialog read as a live composer. Verified against live Claude: a real
 # composer draws both box rules at widths 100, 60, 40, 33 and 25.
 claude_composer_ready() {
-    local active_tail modal_status
-    active_tail=$(printf '%s\n' "$1" | tail -n 25)
-    # A dialog on screen is never a ready composer, at any width.
-    if claude_modal_active "$1"; then
+    local modal_status result script_dir
+    # A dialog at the cursor is never a ready composer, at any width.
+    if claude_modal_active "$1" "${2:-}"; then
         return 1
     else
         # A failed classifier cannot turn a dialog into a ready composer.
         modal_status=$?
         ((modal_status == 1)) || return 1
     fi
-    printf '%s\n' "$active_tail" | grep -q '─' && \
-        printf '%s\n' "$active_tail" | grep -q '❯'
+    script_dir=$(cd -- "$(dirname "${BASH_SOURCE[0]}")" >/dev/null && pwd)
+    if [[ -n ${2:-} ]]; then
+        result=$(printf '%s' "$1" | python3 "$script_dir/claude-send-screen.py" --composer-frame "$2") || return 1
+    else
+        result=$(printf '%s' "$1" | python3 "$script_dir/claude-send-screen.py" --composer-frame) || return 1
+    fi
+    [[ "$result" == composer ]]
 }

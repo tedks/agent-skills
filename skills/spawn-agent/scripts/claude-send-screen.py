@@ -16,19 +16,26 @@ import unicodedata
 
 CSI_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
 
-# Claude Code 2.1.30x status footers observed on the usage-limit screen, the
-# npm-prefix auto-update failure, the /clear version hint, and feedback counts.
-# These are not dialogs even when they contain words like "esc to cancel".
-NON_MODAL_FOOTERS = (
-    re.compile(r"Usage limit reached.*esc to cancel", re.I | re.S),
-    re.compile(r"Auto-update failed:", re.I),
-    re.compile(r"new task\? /clear to save .*globalVersion:.*latestVersion:", re.I | re.S),
-    re.compile(r"\b\d+ feedback drafts?\b", re.I),
-)
 
-
-def known_status_footer(text: str) -> bool:
-    return any(pattern.search(strip_ansi(text)) for pattern in NON_MODAL_FOOTERS)
+def claude_composer_frame(screen: str, cursor_y: int | None = None,
+                          allow_legacy_space: bool = False) -> tuple[int, int] | None:
+    """Return the measured flush-left Claude input frame, if present."""
+    lines = strip_ansi(screen).splitlines()
+    for idx in range(len(lines) - 1, 0, -1):
+        marker = lines[idx].startswith("❯\u00a0")
+        legacy = allow_legacy_space and lines[idx].startswith("❯ ")
+        if not (marker or legacy):
+            continue
+        if not lines[idx - 1].strip() or set(lines[idx - 1].strip()) != {"─"}:
+            continue
+        bottom = next((i for i in range(idx + 1, len(lines))
+                       if lines[i].strip() and set(lines[i].strip()) == {"─"}), None)
+        if bottom is None or any("❯" in line for line in lines[idx + 1:bottom]):
+            continue
+        if cursor_y is not None and not idx <= cursor_y < bottom:
+            continue
+        return idx, bottom
+    return None
 
 
 def dialog_active(screen: str, cursor_y: int | None = None) -> bool:
@@ -38,33 +45,12 @@ def dialog_active(screen: str, cursor_y: int | None = None) -> bool:
     wording in the transcript. Unknown frames remain unknown to the caller.
     """
     lines = strip_ansi(screen).splitlines()
-    if cursor_y is not None and 0 <= cursor_y < len(lines):
-        # The measured live composer uses NBSP after the glyph; dialog
-        # selection rows use an ordinary space. Do not treat a boxed dialog
-        # choice as a composer just because it has rules above and below.
-        prompts = [i for i, line in enumerate(lines) if re.match(r"^\s*❯\u00a0", line)]
-        rules = [i for i, line in enumerate(lines)
-                 if line.strip() and set(line.strip()) == {"─"}]
-        for prompt in prompts:
-            if prompt != cursor_y or not any(i < prompt for i in rules):
-                continue
-            if any(i > prompt for i in rules):
-                return False
+    if cursor_y is not None and claude_composer_frame(screen, cursor_y):
+        return False
 
-    # Remove only measured footer rows. A real dialog elsewhere in the same
-    # frame can still be recognized after a footer is discarded.
-    tail = lines[-25:]
-    active = []
-    i = 0
-    while i < len(tail):
-        pair = " ".join(tail[i:i + 2])
-        if known_status_footer(tail[i]):
-            i += 1
-        elif i + 1 < len(tail) and known_status_footer(pair):
-            i += 2
-        else:
-            active.append(tail[i])
-            i += 1
+    # Status footers have no positive dialog frame. Do not remove matching
+    # text: it might be part of a real dialog or an unfamiliar screen.
+    active = lines[-25:]
     text = "\n".join(active)
     compact = re.sub(r"\s+", " ", text)
     choice = re.search(r"^\s*[❯›>]?[ \u00a0]*(?:\d+\.\s*)?(?:Yes\b|No\b|Exit\b|Stay\b|Allow once\b|Claude account\b|Anthropic Console\b|3rd-party platform\b)", text, re.I | re.M)
@@ -193,22 +179,16 @@ def state(screen: str, payload: str, cx: int, cy: int,
     # Current Claude Code renders the live composer between two horizontal
     # rules, with no side gutters. Require that exact frame around the last
     # prompt marker; a transcript line containing ❯ is not sufficient.
-    rules = [i for i, line in enumerate(lines) if line.strip() and set(line.strip()) == {"─"}]
-    prompts = [i for i, line in enumerate(lines) if "❯" in line]
-    if not prompts:
+    # Pre-2.1.30x co-submit receipts used an ordinary-space prompt. Only the
+    # exact known draft+payload ownership path accepts that old rendering;
+    # general delivery still requires the measured NBSP composer marker.
+    frame = claude_composer_frame(screen, cy, allow_legacy_space=co_submit_draft is not None)
+    if frame is None:
         return "unknown"
-    idx = prompts[-1]
-    before = [i for i in rules if i < idx]
-    after = [i for i in rules if i > idx]
-    if not before or not after:
-        return "unknown"
-    top, bottom = before[-1], after[0]
-    if top >= idx or bottom <= idx:
-        return "unknown"
+    idx, bottom = frame
     line = lines[idx]
     fragment = line.split("❯", 1)[1]
-    if fragment.startswith(("\u00a0", " ")):
-        fragment = fragment[1:]
+    fragment = fragment[1:]
     parts = [fragment]
     for row in lines[idx + 1 : bottom]:
         if "❯" in row:
@@ -454,6 +434,13 @@ def main() -> int:
         except ValueError:
             return 64
         print("modal" if dialog_active(sys.stdin.read(), cursor_y) else "not-modal")
+        return 0
+    if 2 <= len(sys.argv) <= 3 and sys.argv[1] == "--composer-frame":
+        try:
+            cursor_y = int(sys.argv[2]) if len(sys.argv) == 3 else None
+        except ValueError:
+            return 64
+        print("composer" if claude_composer_frame(sys.stdin.read(), cursor_y) else "unknown")
         return 0
     args = sys.argv[1:]
     observe_path = None
