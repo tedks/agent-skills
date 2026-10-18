@@ -26,6 +26,33 @@ HERE = Path(__file__).resolve().parent
 SHARED = Path(os.environ.get('RETIRE_TEST_SHARED_SCRIPTS', str(HERE.parents[1] / 'spawn-agent' / 'scripts')))
 
 
+FAILURE = '✘ Auto-update failed: no write permission to npm prefix · Run claude doctor'
+VERSIONS = 'globalVersion: 2.1.301 · latestVersion: '
+# Claude 2.1.301 status rows, measured in live panes (%725-%732) unless noted.
+CLAUDE_STATUS_VARIANTS = {
+    'hint-full': 'new task? /clear to save 421.6k tokens · ' + VERSIONS + '… ' + FAILURE,
+    'hint-truncated': 'new task? /clear to save 207.5k tokens · ' + VERSIONS + '… ✘ Auto-update failed: no write permission to npm prefix · Run cla…',
+    'hint-bare': 'new task? /clear to save 207.5k tokens · ' + VERSIONS + '…',
+    'hint-integer': 'new task? /clear to save 950 tokens · ' + VERSIONS + '…',
+    'hint-mega': 'new task? /clear to save 1.2M tokens · ' + VERSIONS + '…',
+    'count-truncated': '246150 tokens · ' + VERSIONS + '… ✘ Auto-update failed: no write permission to npm prefix · Run cla…',
+    'count-full': '305987 tokens · ' + VERSIONS + '2.1.302 ' + FAILURE,
+    # Negative shapes: each must keep completion pending.
+    'bad-count': 'new task? /clear to save 421.6x tokens · ' + VERSIONS + '…',
+    'bad-count-dot': 'new task? /clear to save 421. tokens · ' + VERSIONS + '…',
+    'bad-count-sign': 'new task? /clear to save -4k tokens · ' + VERSIONS + '…',
+    'hint-only': 'new task? /clear to save 421.6k tokens',
+    'hint-only-dot': 'new task? /clear to save 421.6k tokens · ',
+    'trailing-prose': 'new task? /clear to save 421.6k tokens · ' + VERSIONS + '… Recovery still needs correction.',
+    'hint-full-extra-prose': 'new task? /clear to save 421.6k tokens · ' + VERSIONS + '… ' + FAILURE,
+    'truncated-prose': 'new task? /clear to save 421.6k tokens · ' + VERSIONS + '… ✘ Auto-update failed: no write permission to npm prefix · Run clxude…',
+    'truncated-untruncated': 'new task? /clear to save 421.6k tokens · ' + VERSIONS + '… ✘ Auto-update failed: no write permission to npm prefix · Run cla',
+    'ellipsis-version': 'new task? /clear to save 421.6k tokens · globalVersion: … · latestVersion: …',
+    'hint-uppercase': 'New task? /clear to save 421.6k tokens · ' + VERSIONS + '…',
+    'hint-suffix-first': VERSIONS + '… · new task? /clear to save 421.6k tokens',
+}
+
+
 def shard_data(event, identity):
     return {'event': event, 'identity': identity, 'author': 'agent',
             'date': '2026-09-26', 'session_id': 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa', 'harness': identity['process']['agent'],
@@ -166,18 +193,21 @@ def terminal(directory, mode):
         if mode.startswith('claude'):
             if mode == 'claude-ghost' and event and not draft:
                 collapsed = 'Try "summarize the work"'
-            body = history + '\r\n' + '─' * 80 + '\r\n❯ ' + collapsed + '\r\n' + '─' * 80 + '\r\n'
+            rule = '─' * (min(80, os.get_terminal_size().columns) if mode == 'claude-real-reply-row-hint-late' else 80)
+            body = history + '\r\n' + rule + '\r\n❯\u00a0' + collapsed + '\r\n' + rule + '\r\n'
         visible_marker = mode in ('composer', 'claude-composer') and draft.startswith('● RETIRE-DONE-'.encode())
         if visible_marker:
             body = history + '\r\n› \r\n' + draft.decode(errors='replace') + '\r\n\r\n  Test model · branch\r\n'
             if mode == 'claude-composer':
-                body = history + '\r\n' + '─' * 80 + '\r\n❯ \r\n' + draft.decode(errors='replace') + '\r\n' + '─' * 80 + '\r\n'
+                body = history + '\r\n' + '─' * 80 + '\r\n❯\u00a0\r\n' + draft.decode(errors='replace') + '\r\n' + '─' * 80 + '\r\n'
         if mode == 'modal':
             body = 'Do you trust the contents of this directory?\r\n  1. Yes\r\n  2. No\r\n'
         sys.stdout.write('\x1b[?2004h\x1b[2J\x1b[H' + body)
         row = history.count('\n') + (3 if mode.startswith('claude') else 2)
-        if mode == 'claude-real-reply-row-status-late' and 'globalVersion:' in history and os.get_terminal_size().columns < 125:
+        if mode in ('claude-real-reply-row-status-late', 'claude-real-reply-row-hint-late') and 'globalVersion:' in history and os.get_terminal_size().columns < 125:
             row += 1  # The synthetic status line occupies two display rows.
+            if mode == 'claude-real-reply-row-hint-late':
+                row += -(-len('  ' + CLAUDE_STATUS_VARIANTS['hint-full']) // os.get_terminal_size().columns) - 2
         if visible_marker:
             row += 1
         cursor = 3 if mode == 'claude-ghost' and event and not draft else 3 + len(collapsed)
@@ -193,10 +223,12 @@ def terminal(directory, mode):
                 draft = b'human unfinished draft ' + str(typing_tick).encode()
                 draw()
             if due is not None and time.monotonic() >= due:
-                if mode in ('claude-real-reply-row-late', 'claude-real-reply-row-status-late'):
+                if mode in ('claude-real-reply-row-late', 'claude-real-reply-row-status-late', 'claude-real-reply-row-hint-late'):
                     history += '● RETIRE-DONE-' + event + '\r\n✻ Baked for 37s · done 6:25 PM\r\n'
                     if mode == 'claude-real-reply-row-status-late':
                         history += '  globalVersion: 2.1.288 · latestVersion: 2.1.289 ✘ Auto-update failed: no write permission to npm prefix · Run claude doctor\r\n'
+                    if mode == 'claude-real-reply-row-hint-late':
+                        history += '  ' + CLAUDE_STATUS_VARIANTS['hint-full'] + '\r\n'
                 elif mode == 'codex-real-reply-row-late':
                     history += '• RETIRE-DONE-' + event + '\r\n• Worked for 19s • 19:35\r\n'
                     record_codex_completion('RETIRE-DONE-' + event)
@@ -357,7 +389,7 @@ def terminal(directory, mode):
                                     history += '● Shard written.\r\n  RETIRE-DONE-' + event + '\r\n'
                                 elif mode == 'late-done':
                                     due = time.monotonic() + .2
-                                elif mode in ('claude-real-reply-row-late', 'claude-real-reply-row-status-late', 'codex-real-reply-row-late'):
+                                elif mode in ('claude-real-reply-row-late', 'claude-real-reply-row-status-late', 'claude-real-reply-row-hint-late', 'codex-real-reply-row-late'):
                                     due = time.monotonic() + 1
                                 else:
                                     reply_bullet = '•' if mode in ('codex-real-reply-row', 'codex-real-reply-row-invalid-shard', 'decline-codex-real-reply-row', 'codex-spoofed-footer-reply',
@@ -407,7 +439,10 @@ def terminal(directory, mode):
                                         tokens = '50713 tokens'
                                         if mode.endswith('token-partial'):
                                             tokens = '50713 token'
-                                        history += timing + '\r\n' + ' ' * 200 + tokens + '\r\n'
+                                        status_row = ' ' * 200 + tokens
+                                        if '-status-' in mode:
+                                            status_row = ' ' * 38 + CLAUDE_STATUS_VARIANTS[mode.split('-status-')[1]]
+                                        history += timing + '\r\n' + status_row + '\r\n'
                                         if mode.endswith('extra-prose'):
                                             history += '  Recovery still needs correction.\r\n'
                                     if mode.endswith('suffix'):
@@ -697,6 +732,26 @@ class Tests(unittest.TestCase):
         result = self.invoke('--resume', str(path), '--wait', '3')
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(self.observed()['exit_enters'], 1)
+
+    def assert_clear_hint_wrap(self, columns):
+        self.actor('claude-real-reply-row-hint-late')
+        first = self.invoke('--wait', '.05')
+        self.assertEqual(first.returncode, 2, first.stderr)
+        path, state = self.state()
+        self.assertEqual(state['offer']['status'], 'delivered')
+        self.command(*self.tmux, 'resize-window', '-t', self.pane, '-x', str(columns))
+        result = self.invoke('--resume', str(path), '--wait', '3')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.observed()['exit_enters'], 1)
+
+    def test_claude_clear_hint_status_wrapped_in_two_rows(self):
+        self.assert_clear_hint_wrap(80)
+
+    def test_claude_clear_hint_status_wrapped_in_three_rows(self):
+        self.assert_clear_hint_wrap(66)
+
+    def test_claude_clear_hint_status_wrap_after_trimmed_space(self):
+        self.assert_clear_hint_wrap(83)  # First row ends in the space tmux trims.
 
     def test_claude_reply_row_with_space_at_wrap(self):
         self.actor('claude-real-reply-row-status-late')
@@ -2580,6 +2635,25 @@ class Tests(unittest.TestCase):
                 self.assertEqual(self.git('show', 'origin/master:waiting/INDEX.md'), remote_index)
                 self.assertFalse((self.directory / 'spawn.json').exists())
 
+
+def _clear_hint_cases():
+    accepted = ('hint-full', 'hint-truncated', 'hint-bare', 'hint-integer', 'hint-mega', 'count-truncated', 'count-full')
+    rejected = ('bad-count', 'bad-count-dot', 'bad-count-sign', 'hint-only', 'hint-only-dot', 'trailing-prose', 'hint-full-extra-prose',
+                'truncated-prose', 'truncated-untruncated', 'ellipsis-version', 'hint-uppercase', 'hint-suffix-first')
+    for variant in accepted:
+        def accepts(self, variant=variant):
+            self.actor('claude-footer-status-' + variant)
+            result = self.invoke()
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(self.observed()['exit_enters'], 1)
+        setattr(Tests, 'test_claude_status_row_accepts_' + variant.replace('-', '_'), accepts)
+    for variant in rejected:
+        def rejects(self, variant=variant):
+            self.assert_completion_block_pending('claude-footer-status-' + variant)
+        setattr(Tests, 'test_claude_status_row_pending_' + variant.replace('-', '_'), rejects)
+
+
+_clear_hint_cases()
 
 if __name__ == '__main__':
     if len(sys.argv) > 1 and sys.argv[1] == '--terminal':

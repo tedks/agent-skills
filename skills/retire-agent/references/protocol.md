@@ -25,8 +25,17 @@ has the exact DONE or DECLINED marker as `last_agent_message`; a later started
 turn, partial rollout or changed final message keeps it pending. This witness
 is rechecked before private handoff publication and before exit.
 A pinned Claude target may render one native duration row, optionally followed by
-one padded integer `tokens` status row or the measured Claude 2.1.288
-`globalVersion` / `latestVersion` auto-update status row. A narrow pane may
+one padded integer `tokens` status row or a measured `globalVersion` /
+`latestVersion` auto-update status row. The accepted forms are the 2.1.288 row
+`globalVersion: 2.1.288 · latestVersion: 2.1.289 ✘ Auto-update failed: no write
+permission to npm prefix · Run claude doctor` (the `✘` notice optional), and the
+Claude 2.1.301 rows measured in live panes: the same row preceded by
+`new task? /clear to save 421.6k tokens · ` (the count is an integer or a
+decimal with a `k` or `M` suffix) or by `246150 tokens · `, with `latestVersion`
+either a version or the literal truncation `…`. At unwrapped widths 2.1.301
+also truncates the notice itself, as in `… ✘ Auto-update failed: no write
+permission to npm prefix · Run cla…`; only the exact notice cut at any point and
+followed by `…` is accepted, never other text. A narrow pane may
 wrap that exact status into two or three display rows; only contiguous rows
 that reassemble to the measured status are accepted. Because tmux may trim
 one space at a wrap boundary, each boundary is checked both with and without

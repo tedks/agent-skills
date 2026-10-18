@@ -496,6 +496,18 @@ class Retirement:
         codex_footer = (agent == 'codex'
                         and len(tail) == 1
                         and codex_footer_row.fullmatch(tail[0].rstrip()))
+        # Measured Claude 2.1.288-2.1.301 auto-update status row. 2.1.301 adds
+        # a leading `new task? /clear to save 421.6k tokens · ` hint or a
+        # `246150 tokens · ` count, and shows `…` for a truncated
+        # latestVersion. A narrow-but-unwrapped pane also truncates the
+        # failure notice itself, so a truncated form is accepted only as a
+        # prefix of the exact notice followed by `…`.
+        update_failure = ' ✘ Auto-update failed: no write permission to npm prefix · Run claude doctor'
+        claude_status_row = re.compile(
+            r' +(?:new task\? /clear to save (?:[0-9]+|[0-9]+(?:\.[0-9]+)?[kM]) tokens · |[0-9]+ tokens · )?'
+            r'globalVersion: [0-9]+(?:\.[0-9]+)+ · latestVersion: (?:[0-9]+(?:\.[0-9]+)+|…)'
+            r'(?:' + re.escape(update_failure) + '|'
+            + '|'.join(re.escape(update_failure[:i] + '…') for i in range(2, len(update_failure))) + ')?')
         # Claude can render the duration alone or add a padded token row.
         # A token row is UI metadata, never a prerequisite for DONE.
         claude_statuses = {tail[1].rstrip()} if len(tail) > 1 else set()
@@ -508,7 +520,7 @@ class Retirement:
                          and 1 <= len(tail) <= 4
                          and re.fullmatch(r'✻ (?:Baked|Brewed|Churned|Cogitated|Cooked|Crunched|Sautéed|Worked) for (?:[0-5]?[0-9]s|[1-9][0-9]*m [0-5]?[0-9]s) · done (?:[1-9]|1[0-2]):[0-5][0-9] (?:AM|PM)', tail[0].rstrip())
                          and (len(tail) == 1 or (len(tail) == 2 and any(re.fullmatch(r' +[0-9]+ tokens', status) for status in claude_statuses))
-                              or any(re.fullmatch(r' +globalVersion: [0-9]+(?:\.[0-9]+)+ · latestVersion: [0-9]+(?:\.[0-9]+)+(?: ✘ Auto-update failed: no write permission to npm prefix · Run claude doctor)?', status) for status in claude_statuses)))
+                              or any(claude_status_row.fullmatch(status) for status in claude_statuses)))
         if tail and not (codex_footer or claude_footer):
             return None
         return marker[1]
