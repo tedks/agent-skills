@@ -24,6 +24,20 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2] / '_shared'))
 from agent_skills_config import load_config, tmux_command
 
 
+# Measured Claude 2.1.288-2.1.302 auto-update status row. 2.1.301 adds
+# a leading `new task? /clear to save 421.6k tokens · ` hint or a
+# `246150 tokens · ` count, and shows a truncated latestVersion (`…`,
+# `2.1…`, `2.1.3…`). A narrow-but-unwrapped pane also truncates the
+# failure notice itself, so a truncated form is accepted only as a
+# prefix of the exact notice followed by `…`.
+update_failure = ' ✘ Auto-update failed: no write permission to npm prefix · Run claude doctor'
+claude_status_row = re.compile(
+    r' +(?:new task\? /clear to save (?:[0-9]+|[0-9]+(?:\.[0-9]+)?[kM]) tokens · |[0-9]+ tokens · )?'
+    r'globalVersion: [0-9]+(?:\.[0-9]+)+ · latestVersion: (?:[0-9]+(?:\.[0-9]+)+|(?:[0-9]+(?:\.[0-9]+)*\.?)?…)'
+    r'(?:' + re.escape(update_failure) + '|'
+    + '|'.join(re.escape(update_failure[:i] + '…') for i in range(2, len(update_failure))) + ')?')
+
+
 class Stop(Exception):
     pass
 
@@ -496,18 +510,6 @@ class Retirement:
         codex_footer = (agent == 'codex'
                         and len(tail) == 1
                         and codex_footer_row.fullmatch(tail[0].rstrip()))
-        # Measured Claude 2.1.288-2.1.301 auto-update status row. 2.1.301 adds
-        # a leading `new task? /clear to save 421.6k tokens · ` hint or a
-        # `246150 tokens · ` count, and shows `…` for a truncated
-        # latestVersion. A narrow-but-unwrapped pane also truncates the
-        # failure notice itself, so a truncated form is accepted only as a
-        # prefix of the exact notice followed by `…`.
-        update_failure = ' ✘ Auto-update failed: no write permission to npm prefix · Run claude doctor'
-        claude_status_row = re.compile(
-            r' +(?:new task\? /clear to save (?:[0-9]+|[0-9]+(?:\.[0-9]+)?[kM]) tokens · |[0-9]+ tokens · )?'
-            r'globalVersion: [0-9]+(?:\.[0-9]+)+ · latestVersion: (?:[0-9]+(?:\.[0-9]+)+|…)'
-            r'(?:' + re.escape(update_failure) + '|'
-            + '|'.join(re.escape(update_failure[:i] + '…') for i in range(2, len(update_failure))) + ')?')
         # Claude can render the duration alone or add a padded token row.
         # A token row is UI metadata, never a prerequisite for DONE.
         claude_statuses = {tail[1].rstrip()} if len(tail) > 1 else set()
