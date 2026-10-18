@@ -28,8 +28,8 @@ type: task
 component: open-questions
 release:
 reporter: Ted Smith <tedks@riseup.net>
-status: unstarted
-disposition:
+status: closed
+disposition: fixed
 creation_time: 2026-10-18T07:06:55-00:00
 references: []
 log_events:
@@ -37,3 +37,9 @@ log_events:
   who: Ted Smith
   what: created
   comment: ""
+- time: 2026-10-18T07:40:24-00:00
+  who: Ted Smith
+  what: 'closed: fixed'
+  comment: 'MODAL-R2: accept clearly labeled synthetic update and SYNTHETIC-UNVERIFIED
+    feedback dialog fixtures; replacement by read-only capture is tracked in tmux-message-replace-synthetic-dialog-fixtures,
+    and neither blocks PR #10 merge.'
