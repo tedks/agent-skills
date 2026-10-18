@@ -32,6 +32,13 @@ def screen(text='', history='', harness='codex', footer='  Any model · branch',
 CO_SUBMIT_FIXTURES = Path(__file__).with_name('fixtures') / 'claude-send'
 
 
+def fixture_frame(name, marker='❯'):
+    raw = (CO_SUBMIT_FIXTURES / name).read_text()
+    rows = m.styles.strip_ansi(raw).splitlines()
+    y = next(i for i, row in enumerate(rows) if marker in row)
+    return m.Frame(raw, 2, y)
+
+
 def claude_co_submit_frame(text='', receipt=True):
     rows = (CO_SUBMIT_FIXTURES / 'claude-co-submit-receipt.ansi').read_text().splitlines()
     if not receipt:
@@ -347,7 +354,7 @@ class DeliveryTests(unittest.TestCase):
                 t.return_value.paste.assert_not_called()
 
     def test_response_rows_unknown_modal_and_failed_read(self):
-        for f in (m.Frame('', -1, -1), screen('Allow once')):
+        for f in (m.Frame('', -1, -1), fixture_frame('claude-2.1.302-permission-modal.ansi')):
             with patch.object(m, 'Tmux') as t:
                 t.return_value.frame.return_value = f
                 self.assertIsNone(m.read_response_rows('%1', '/tmp/test-socket'))
@@ -902,6 +909,54 @@ assert screen.observe(frame, 'outgoing', 6, 1, pathlib.Path(sys.argv[2])) == 'dr
         with self.assertRaisesRegex(m.DeliveryError, 'modal'):
             deliver(t)
         self.assertEqual(t.actions, [])
+
+    def test_claude_status_footers_are_not_modals(self):
+        # Interim text from the incident report; authentic ANSI captures will
+        # replace these before the PR is offered for review.
+        footers = (
+            'Usage limit reached · continuing automatically at 12pm · esc to cancel',
+            '✘ Auto-update failed: no write permission to npm prefix · Run claude doctor',
+            'new task? /clear to save 319.9k tokens · globalVersion: 2.1.301 · latestVersion: 2.1.302',
+            '1 feedback draft',
+            '12 feedback drafts',
+        )
+        for footer in footers:
+            with self.subTest(footer=footer):
+                frame = screen(harness='claude', prefix=footer + '\n')
+                self.assertEqual(m.composer(frame).kind, 'empty')
+                self.assertEqual(m.composer(frame).harness, 'claude')
+
+    def test_captured_claude_dialogs_and_footers(self):
+        fixtures = (
+            ('claude-2.1.302-login-modal.ansi', 'modal'),
+            ('claude-2.1.302-trust-modal.ansi', 'modal'),
+            ('claude-2.1.302-permission-modal.ansi', 'modal'),
+            ('claude-2.1.302-exit-background-modal.ansi', 'modal'),
+            ('claude-2.1.302-auto-update-footer-live-scrubbed.ansi', 'empty'),
+            ('claude-2.1.299-feedback-count-footer-live-scrubbed.ansi', 'empty'),
+            ('SYNTHETIC-claude-2.1.302-usage-limit-footer.ansi', 'empty'),
+            ('SYNTHETIC-claude-2.1.302-new-task-footer.ansi', 'empty'),
+        )
+        for name, expected in fixtures:
+            with self.subTest(name=name):
+                frame = fixture_frame(name)
+                result = m.composer(frame)
+                self.assertEqual(result.kind, expected)
+                if expected == 'empty':
+                    self.assertEqual(result.harness, 'claude')
+
+    def test_known_footer_list_is_live_and_bare_cancel_text_is_not_a_dialog(self):
+        for name in (
+            'claude-2.1.302-auto-update-footer-live-scrubbed.ansi',
+            'claude-2.1.299-feedback-count-footer-live-scrubbed.ansi',
+            'SYNTHETIC-claude-2.1.302-usage-limit-footer.ansi',
+            'SYNTHETIC-claude-2.1.302-new-task-footer.ansi',
+        ):
+            with self.subTest(name=name):
+                raw = (CO_SUBMIT_FIXTURES / name).read_text()
+                self.assertTrue(m.styles.known_status_footer(raw))
+        frame = screen(harness='claude', prefix='Esc to cancel\n')
+        self.assertEqual(m.composer(frame).kind, 'empty')
 
     def test_wrapped_and_multiline_composers(self):
         for harness in ['codex', 'claude']:

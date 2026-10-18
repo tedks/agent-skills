@@ -5,6 +5,21 @@ export PYTHONDONTWRITEBYTECODE=1
 
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 export FIXTURES="$SCRIPT_DIR/fixtures/claude-send"
+source "$SCRIPT_DIR/claude-pane-detect.sh"
+for fixture in claude-2.1.302-login-modal.ansi claude-2.1.302-trust-modal.ansi \
+               claude-2.1.302-permission-modal.ansi claude-2.1.302-exit-background-modal.ansi; do
+  screen=$(cat "$FIXTURES/$fixture")
+  claude_modal_active "$screen" || { echo "FAIL: $fixture was not modal" >&2; exit 1; }
+  claude_composer_ready "$screen" && { echo "FAIL: $fixture looked ready" >&2; exit 1; }
+done
+for fixture in claude-2.1.302-auto-update-footer-live-scrubbed.ansi \
+               claude-2.1.299-feedback-count-footer-live-scrubbed.ansi \
+               SYNTHETIC-claude-2.1.302-usage-limit-footer.ansi \
+               SYNTHETIC-claude-2.1.302-new-task-footer.ansi; do
+  screen=$(cat "$FIXTURES/$fixture")
+  claude_modal_active "$screen" && { echo "FAIL: $fixture looked modal" >&2; exit 1; }
+  claude_composer_ready "$screen" || { echo "FAIL: $fixture was not ready" >&2; exit 1; }
+done
 TEST_DIR=$(mktemp -d /tmp/test-claude-send.XXXXXX)
 TEST_REAL_PYTHON3=$(command -v python3)
 export TEST_REAL_PYTHON3
