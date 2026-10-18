@@ -56,3 +56,15 @@ log_events:
     dialogs could not be induced safely and need an evidence ruling. Current-head
     public Python, shell alias, real tmux, legacy sender, and config tests pass. Repository-wide
     setup-leak gate fails on unrelated tracked planning files; see issue setup-leaks-existing-plans.'
+- time: 2026-10-18T07:39:15-00:00
+  who: Ted Smith
+  what: commented
+  comment: 'Fourth shape (2026-10-18 03:38 ET): a send to Codex pane %751 whose payload
+    quoted the strings ''Update available!'' and ''Press enter to continue'' came
+    back ambiguous modal-after-paste once the submitted row was on screen. claude-send.sh
+    screen_state() runs that substring check before the harness branch, so quoted
+    dialog text in any transcript row (Claude or Codex) reads as a modal. The PR #10
+    dialog_active docstring says ''never a bare footer or quoted output''; make sure
+    the pre-harness check in screen_state is routed through the same frame-aware classifier
+    (or dropped for Codex frames) and add a fixture with the dialog strings inside
+    a submitted history row.'
