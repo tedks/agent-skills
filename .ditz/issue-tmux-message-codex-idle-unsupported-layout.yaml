@@ -37,3 +37,19 @@ log_events:
   who: Ted Smith
   what: created
   comment: ""
+- time: 2026-10-18T07:34:07-00:00
+  who: Ted Smith
+  what: commented
+  comment: "Mechanism (read 2026-10-18): tmux-message.py ready() initialises last_reason
+    = 'unsupported-layout' and raises it when max_wait passes without two consecutive
+    samples of a known composer kind (empty/text/suggestion) with an identical fingerprint
+    across stable_window. So the reason means 'never observed a stable, recognised
+    composer', not a layout the code rejected. Candidates: composer() returning kind
+    'unknown' on these Codex frames (e.g. the gpt-6.1-sol footer variant; claude-send.sh
+    still matches the literal '  GPT-6-Sol \xB7 ' as one Codex marker), or fingerprint
+    churn from the ticking 'Working (Nm Ns \u2022 esc to interrupt)' row and 'Waiting
+    for agents' rows above the composer while subagents run. Third incident: a send
+    to %751 (idle composer under a running turn, 272x54) deferred the same way at
+    ~03:33 ET, pending /tmp/tmux-message-qmjv8fcg/message. Three of five sends to
+    Codex panes today deferred on this; the sender should report a distinct reason
+    for 'composer unknown' versus 'never stable' so the operator can tell them apart."
