@@ -1011,6 +1011,17 @@ assert screen.observe(frame, 'outgoing', 6, 1, pathlib.Path(sys.argv[2])) == 'dr
             deliver(t)
         self.assertEqual(t.actions, [])
 
+    def test_ordinary_codex_choice_words_and_numbered_drafts_remain_writable(self):
+        for payload in ('Yes, proceed', 'No.', '1. Fix X\n  2. Verify Y',
+                        'Explain the message\n  Esc to cancel is status text'):
+            with self.subTest(payload=payload):
+                frame = screen(payload, footer='  Any model · Context 50% left')
+                self.assertEqual(m.composer(frame).kind, 'text')
+                t = Terminal(payload=payload)
+                result = deliver(t)
+                self.assertEqual(result['status'], 'delivered')
+                self.assertEqual((t.pastes, t.enters), (1, 1))
+
     def test_wrapped_and_multiline_composers(self):
         for harness in ['codex', 'claude']:
             f = screen('A long message\n  with another line', harness=harness)

@@ -40,11 +40,17 @@ def claude_composer_frame(screen: str, cursor_y: int | None = None,
 
 def codex_choice_layout(lines: list[str], prompt: int, footer: int) -> bool:
     """Reject choice rows and instructions before treating › as input."""
-    if re.match(r"^›\s*(?:\d+\.|Yes\b|No\b|Allow\b|Exit\b|Stay\b)", lines[prompt], re.I):
-        return True
-    return any(re.match(r"^\s+(?:\d+\.|[❯›]\s*\d+\.)", line)
-               or re.search(r"Press enter to (?:confirm|continue)|Esc to cancel|Tab to amend", line, re.I)
-               for line in lines[prompt + 1:footer])
+    body = lines[prompt + 1:footer]
+    # Measured Codex composers separate input from the footer with a blank
+    # row. Without that separator, a selected numbered row plus a sibling or
+    # an instruction is dialog-like. Draft wording alone is not evidence.
+    if any(not line.strip() for line in body):
+        return False
+    selected = re.match(r"^›\s*\d+\.", lines[prompt])
+    sibling = any(re.match(r"^\s+\d+\.", line) for line in body)
+    instruction = any(re.search(r"Press enter to (?:confirm|continue)|Esc to cancel|Tab to amend", line, re.I)
+                      for line in body)
+    return bool((selected and sibling) or instruction)
 
 
 def codex_composer_at_cursor(screen: str, cursor_y: int | None) -> bool:

@@ -799,6 +799,15 @@ assert classify_fixture('codex-typed-home.ansi', 'outgoing', 2, 26) == 'busy'
 unknown_choice = b'Choose an option:\n\xe2\x80\xba 1. Continue\n  2. Stop\n  Any model \xc2\xb7 Context 50% left\n'
 Path(payload).write_text('outgoing')
 assert subprocess.check_output([sys.executable, parser, payload, '2', '1'], input=unknown_choice).decode().strip() == 'unknown'
+for ordinary in ('Yes, proceed', 'No.', '1. Fix X\n2. Verify Y',
+                 'Explain status\nEsc to cancel is ordinary text'):
+    rendered = '› ' + ordinary.replace('\n', '\n  ') + '\n\n  Any model · Context 50% left\n'
+    Path(payload).write_text(ordinary)
+    cursor_y = ordinary.count('\n')
+    cursor_x = 2 + len(ordinary.rsplit('\n', 1)[-1])
+    assert subprocess.check_output(
+        [sys.executable, parser, payload, str(cursor_x), str(cursor_y)],
+        input=rendered.encode()).decode().strip() == 'own', repr(ordinary)
 queue_payload = 'Reply with exactly P141-QUEUED-TEST'
 queue_screen = (Path(fixtures) / 'codex-generating-queue.ansi').read_bytes()
 queue_empty = queue_screen.replace(queue_payload.encode(), b'', 1)
