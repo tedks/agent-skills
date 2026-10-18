@@ -26,8 +26,8 @@ from agent_skills_config import load_config, tmux_command
 
 # Measured Claude 2.1.288-2.1.302 auto-update status row. 2.1.301 adds
 # a leading `new task? /clear to save 421.6k tokens · ` hint or a
-# `246150 tokens · ` count, and shows a truncated latestVersion (`…`,
-# `2.1…`, `2.1.3…`). A narrow-but-unwrapped pane also truncates the
+# `246150 tokens · ` count, and a latestVersion shown as `…`; 2.1.302
+# cuts it mid-number (`2.1…`, `2.1.3…`). A narrow-but-unwrapped pane also truncates the
 # failure notice itself, so a truncated form is accepted only as a
 # prefix of the exact notice followed by `…`.
 update_failure = ' ✘ Auto-update failed: no write permission to npm prefix · Run claude doctor'

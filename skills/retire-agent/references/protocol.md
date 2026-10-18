@@ -34,7 +34,7 @@ Claude 2.1.301 and 2.1.302 rows measured in live panes: the same row preceded by
 integer or decimal with a `k` or `M` suffix) or by `246150 tokens · `. The
 version numbers are not pinned to a release: `globalVersion` is any dotted
 numeric version, and `latestVersion` is a dotted version or a truncation of
-one ending in `…` (`…`, `2.1…`, `2.1.3…`). At unwrapped widths the notice is
+one ending in `…` (for example `…`, `2…`, `2.1…`, `2.1.…`, `2.1.3…`). At unwrapped widths the notice is
 also truncated, as in `… ✘ Auto-update failed: no write permission to npm
 prefix · Run claude doct…`; only the exact notice cut at any point and
 followed by `…` is accepted, never other text. The `…` forms are accepted on
