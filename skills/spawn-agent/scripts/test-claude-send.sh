@@ -24,10 +24,6 @@ screen="$(cat "$FIXTURES/claude-2.1.302-trust-modal.ansi")"$'\n'"$(cat "$FIXTURE
 cursor_y=$(($(printf '%s\n' "$screen" | wc -l) - 2))
 claude_modal_active "$screen" "$cursor_y" && { echo 'FAIL: old dialog text hid live composer' >&2; exit 1; }
 claude_composer_ready "$screen" "$cursor_y" || { echo 'FAIL: old dialog text blocked live composer' >&2; exit 1; }
-screen=$'Do you want to proceed?\nNo changes needed.\n› \n\n  Any model · Context 50% left\n'
-claude_modal_active "$screen" 2 && { echo 'FAIL: quoted dialog text hid Codex composer' >&2; exit 1; }
-screen=$'Would you like to run this command?\n› 1. Yes, proceed\n  2. No\nPress enter to confirm · Esc to cancel\n  Any model · Context 50% left\n'
-claude_modal_active "$screen" 1 || { echo 'FAIL: synthetic Codex approval choice was skipped' >&2; exit 1; }
 claude_modal_active() { return 2; }
 screen=$(cat "$FIXTURES/claude-2.1.302-auto-update-footer-live-scrubbed.ansi")
 claude_composer_ready "$screen" && { echo 'FAIL: classifier error looked ready' >&2; exit 1; }
@@ -796,9 +792,6 @@ assert classify_fixture('claude-suggestion-typed-home.ansi', 'outgoing', 2, 1) =
 assert classify_fixture('claude-try-prefix-typed.ansi', 'outgoing', 16, 1) == 'unknown'
 assert classify_fixture('codex-empty-dim.ansi', 'outgoing', 2, 26) == 'empty'
 assert classify_fixture('codex-typed-home.ansi', 'outgoing', 2, 26) == 'busy'
-unknown_choice = b'Choose an option:\n\xe2\x80\xba 1. Continue\n  2. Stop\n  Any model \xc2\xb7 Context 50% left\n'
-Path(payload).write_text('outgoing')
-assert subprocess.check_output([sys.executable, parser, payload, '2', '1'], input=unknown_choice).decode().strip() == 'unknown'
 for ordinary in ('Yes, proceed', 'No.', '1. Fix X\n2. Verify Y',
                  'Explain status\nEsc to cancel is ordinary text'):
     rendered = '› ' + ordinary.replace('\n', '\n  ') + '\n\n  Any model · Context 50% left\n'
@@ -1140,6 +1133,27 @@ for fixture in claude-2.1.302-login-modal.ansi claude-2.1.302-trust-modal.ansi \
   [[ $(grep -c '^paste-start$' "$FAKE_LOG" || true) -eq 0 ]]
   [[ $(grep -c '^enter$' "$FAKE_LOG" || true) -eq 0 ]]
 done
+# These current-wording dialogs take the Codex parser route if quoted Codex
+# rows are visible. They must still defer without paste or Enter.
+for fixture in claude-2.1.302-trust-modal.ansi claude-2.1.302-permission-modal.ansi; do
+  reset_case modal
+  cp "$FIXTURES/$fixture" "$FAKE_STATE/modal"
+  printf '\n› quoted Codex input\n  Any model · Context 50%% left\n' >> "$FAKE_STATE/modal"
+  if run_sender %7 --submit-delay 0 --max-wait 1 --poll-interval 0.1 --prompt-file "$prompt_file" >"$TEST_DIR/$fixture-quoted.out" 2>"$TEST_DIR/$fixture-quoted.err"; then
+    echo "FAIL: $fixture with quoted Codex screen accepted input" >&2; exit 1
+  fi
+  [[ $(grep -c '^paste-start$' "$FAKE_LOG" || true) -eq 0 ]]
+  [[ $(grep -c '^enter$' "$FAKE_LOG" || true) -eq 0 ]]
+done
+# Master's narrow pre-routing trust check must still win over the Codex sniff.
+reset_case modal
+printf 'Do you trust the contents of this project?\n❯ No, exit\n› quoted Codex input\n  Any model · Context 50%% left\n' > "$FAKE_STATE/modal"
+if run_sender %7 --submit-delay 0 --max-wait 1 --poll-interval 0.1 --prompt-file "$prompt_file" >"$TEST_DIR/legacy-trust-precheck.out" 2>"$TEST_DIR/legacy-trust-precheck.err"; then
+  echo 'FAIL: legacy trust precheck accepted input' >&2; exit 1
+fi
+grep -q 'reason=composer-modal' "$TEST_DIR/legacy-trust-precheck.err"
+[[ $(grep -c '^paste-start$' "$FAKE_LOG" || true) -eq 0 ]]
+[[ $(grep -c '^enter$' "$FAKE_LOG" || true) -eq 0 ]]
 reset_case modal
 printf '────────────────\nChoose an account:\n❯ 1. Foo\n  2. Bar\n────────────────\n' > "$FAKE_STATE/modal"
 if run_sender %7 --submit-delay 0 --max-wait 1 --poll-interval 0.1 --prompt-file "$prompt_file" >"$TEST_DIR/unfamiliar.out" 2>"$TEST_DIR/unfamiliar.err"; then

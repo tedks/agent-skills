@@ -33,6 +33,7 @@ spec.loader.exec_module(styles)
 PROMPT = re.compile(r"^\s*([›❯])(?:[ \u00a0]|$)(.*)$")
 PASTE = re.compile(r"\[Pasted (?:text|Text)(?:[^\]\n]*)\]", re.I)
 FOOTER = re.compile(r"^\s*(?:.*(?:Context \d+%|\d+% context left| · )|tab to queue message|\? for shortcuts|esc to interrupt)", re.I)
+MODAL = re.compile(r"Quick safety check|Yes, I trust this folder|No, exit|Do you trust the contents|Press enter to continue|Would you like to (?:proceed|run)|Do you want to (?:proceed|allow)|Allow once|Esc to cancel", re.I)
 QUEUE = re.compile(r"Messages to be submitted|queued messages?", re.I)
 
 
@@ -73,6 +74,11 @@ class Input:
 def composer(frame):
     lines = styles.strip_ansi(frame.raw).splitlines()
     raw = frame.raw.splitlines()
+    # Keep the pre-existing dialog guard on Codex and unknown layouts. A
+    # measured live Claude composer is the only frame that can override broad
+    # footer wording such as "esc to cancel".
+    if not styles.claude_composer_frame(frame.raw, frame.y) and MODAL.search("\n".join(lines[-25:])):
+        return Input("modal")
     if styles.dialog_active(frame.raw, frame.y):
         return Input("modal")
     # Locate a prompt whose input contains the cursor. Do not assume a fixed
@@ -91,8 +97,6 @@ def composer(frame):
             if not footers:
                 continue
             end = footers[0]
-            if styles.codex_choice_layout(lines, idx, end):
-                continue
             harness = "codex"
         if not idx <= frame.y < end:
             continue

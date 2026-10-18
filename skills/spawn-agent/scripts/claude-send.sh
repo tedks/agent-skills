@@ -209,22 +209,29 @@ if ! flock -w 90 "$lock_fd"; then
     exit 2
 fi
 screen_state() {
-    local screen screen_raw cursor cursor_x cursor_y modal_status
+    local screen screen_raw cursor cursor_x cursor_y last_nonempty modal_status
     screen_raw=$("${TMUX_CMD[@]}" capture-pane -e -p -t "$pane_id" 2>/dev/null) || return 1
     screen=$(printf '%s' "$screen_raw" | python3 "$SCRIPT_DIR/claude-send-screen.py" --strip-ansi) || return 1
     cursor=$("${TMUX_CMD[@]}" display-message -p -t "$pane_id" '#{cursor_x}:#{cursor_y}' 2>/dev/null) || return 1
     [[ "$cursor" =~ ^([0-9]+):([0-9]+)$ ]] || { printf unknown; return; }
     cursor_x=${BASH_REMATCH[1]}; cursor_y=${BASH_REMATCH[2]}
-    if claude_modal_active "$screen" "$cursor_y"; then
+    # Preserve the narrow pre-routing checks that protected Claude dialogs
+    # even when quoted Codex output appears elsewhere in the pane.
+    last_nonempty=$(printf '%s\n' "$screen" | awk 'NF { line=$0 } END { print line }')
+    if [[ "$screen" == *'Update available!'* && "$last_nonempty" == *'Press enter to continue'* ]] || \
+       [[ "$screen" == *'Do you trust the contents of this project?'* ]]; then
         printf modal; return
-    else
-        modal_status=$?
-        ((modal_status == 1)) || { printf unknown; return; }
     fi
     if [[ ( "$screen" == *'Context '* || "$screen" == *'tab to queue message'* || "$screen" == *'  GPT-6-Sol · '* ) && "$screen" == *'› '* ]]; then
         printf codex > "$harness_file"
         printf '%s' "$screen_raw" | python3 "$SCRIPT_DIR/claude-send-screen.py" --observe-file "$observe_file" "$expected_file" "$cursor_x" "$cursor_y"
         return
+    fi
+    if claude_modal_active "$screen" "$cursor_y"; then
+        printf modal; return
+    else
+        modal_status=$?
+        ((modal_status == 1)) || { printf unknown; return; }
     fi
     claude_composer_ready "$screen" "$cursor_y" || { printf unknown; return; }
     printf claude > "$harness_file"

@@ -38,39 +38,6 @@ def claude_composer_frame(screen: str, cursor_y: int | None = None,
     return None
 
 
-def codex_choice_layout(lines: list[str], prompt: int, footer: int) -> bool:
-    """Reject choice rows and instructions before treating › as input."""
-    body = lines[prompt + 1:footer]
-    # Measured Codex composers separate input from the footer with a blank
-    # row. Without that separator, a selected numbered row plus a sibling or
-    # an instruction is dialog-like. Draft wording alone is not evidence.
-    if any(not line.strip() for line in body):
-        return False
-    selected = re.match(r"^›\s*\d+\.", lines[prompt])
-    sibling = any(re.match(r"^\s+\d+\.", line) for line in body)
-    instruction = any(re.search(r"Press enter to (?:confirm|continue)|Esc to cancel|Tab to amend", line, re.I)
-                      for line in body)
-    return bool((selected and sibling) or instruction)
-
-
-def codex_composer_at_cursor(screen: str, cursor_y: int | None) -> bool:
-    """Recognize a live Codex prompt/footer at the cursor, not quoted text."""
-    if cursor_y is None or not codex_surface(screen):
-        return False
-    lines = strip_ansi(screen).splitlines()
-    prompts = [i for i, line in enumerate(lines[:cursor_y + 1])
-               if re.match(r"^›(?: |$)", line)]
-    if not prompts:
-        return False
-    idx = prompts[-1]
-    footers = [i for i, line in enumerate(lines[idx + 1:], idx + 1)
-               if re.search(r"Context \d+%|\d+% context left|tab to queue message", line, re.I)
-               or re.match(r"^  GPT-6-Sol · ", line)]
-    if not footers or not idx <= cursor_y < footers[0]:
-        return False
-    return not codex_choice_layout(lines, idx, footers[0])
-
-
 def dialog_active(screen: str, cursor_y: int | None = None) -> bool:
     """Recognize a current dialog, never a bare footer or quoted output.
 
@@ -78,8 +45,7 @@ def dialog_active(screen: str, cursor_y: int | None = None) -> bool:
     wording in the transcript. Unknown frames remain unknown to the caller.
     """
     lines = strip_ansi(screen).splitlines()
-    if cursor_y is not None and (claude_composer_frame(screen, cursor_y)
-                                 or codex_composer_at_cursor(screen, cursor_y)):
+    if cursor_y is not None and claude_composer_frame(screen, cursor_y):
         return False
 
     # Status footers have no positive dialog frame. Do not remove matching
@@ -280,11 +246,6 @@ def codex_state(lines: list[str], raw_lines: list[str], payload: str, cx: int, c
     if not matches:
         return "unknown"
     idx = matches[-1]
-    first_footer = next((i for i in range(idx + 1, len(lines))
-                         if re.search(r"Context \d+%|\d+% context left|tab to queue message", lines[i], re.I)
-                         or re.match(r"^  GPT-6-Sol · ", lines[i])), len(lines))
-    if codex_choice_layout(lines, idx, first_footer):
-        return "unknown"
     queue_rows = [
         i for i in range(idx + 1, len(lines))
         if re.fullmatch(r"  tab to queue message {2,}\d+% context left", lines[i])
