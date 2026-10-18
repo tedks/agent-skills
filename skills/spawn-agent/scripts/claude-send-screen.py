@@ -38,6 +38,22 @@ def claude_composer_frame(screen: str, cursor_y: int | None = None,
     return None
 
 
+def codex_composer_at_cursor(screen: str, cursor_y: int | None) -> bool:
+    """Recognize a live Codex prompt/footer at the cursor, not quoted text."""
+    if cursor_y is None or not codex_surface(screen):
+        return False
+    lines = strip_ansi(screen).splitlines()
+    prompts = [i for i, line in enumerate(lines[:cursor_y + 1])
+               if re.match(r"^›(?: |$)", line)]
+    if not prompts:
+        return False
+    idx = prompts[-1]
+    footers = [i for i, line in enumerate(lines[idx + 1:], idx + 1)
+               if re.search(r"Context \d+%|\d+% context left|tab to queue message", line, re.I)
+               or re.match(r"^  GPT-6-Sol · ", line)]
+    return bool(footers and idx <= cursor_y < footers[0])
+
+
 def dialog_active(screen: str, cursor_y: int | None = None) -> bool:
     """Recognize a current dialog, never a bare footer or quoted output.
 
@@ -45,7 +61,8 @@ def dialog_active(screen: str, cursor_y: int | None = None) -> bool:
     wording in the transcript. Unknown frames remain unknown to the caller.
     """
     lines = strip_ansi(screen).splitlines()
-    if cursor_y is not None and claude_composer_frame(screen, cursor_y):
+    if cursor_y is not None and (claude_composer_frame(screen, cursor_y)
+                                 or codex_composer_at_cursor(screen, cursor_y)):
         return False
 
     # Status footers have no positive dialog frame. Do not remove matching

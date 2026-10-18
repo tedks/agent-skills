@@ -25,6 +25,8 @@ This ExecPlan follows `.planning/PLANS.md` and is a living record of the modal f
 - The read-only feedback-count footer was captured from Claude 2.1.299; that version is in its filename. The usage-limit and `/clear` fixtures are synthetic and labeled in their filenames and PR table.
 - The owned scratch tmux session, 154 enumerated scratch transcript/trust entries, and scratch trust key were removed after fixture capture. The real authentication config and credential stayed in their original location.
 - Council round 1 found that unfamiliar choice rows could be mistaken for writable composers. A positive composer check now requires the measured flush-left `❯` plus NBSP marker immediately beneath a rule, another rule below, and the cursor within that frame. Unknown choice layouts defer without input. This relies on the measured 2.1.30x prompt shape; a future Claude rendering change fails closed until remeasured.
+- Convergence round 2 found that the legacy modal check could falsely block Codex when its transcript quoted a Claude dialog. A verified Codex prompt/footer at the cursor now outranks quoted Claude text, while a cursor on a Claude choice still defers.
+- A truncated legacy combined-input frame with the cursor below its bottom rule now returns `unknown` instead of `busy`; both defer, and `unknown` describes the missing live frame more accurately.
 
 ## Decision Log
 

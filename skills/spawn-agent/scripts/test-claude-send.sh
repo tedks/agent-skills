@@ -24,6 +24,8 @@ screen="$(cat "$FIXTURES/claude-2.1.302-trust-modal.ansi")"$'\n'"$(cat "$FIXTURE
 cursor_y=$(($(printf '%s\n' "$screen" | wc -l) - 2))
 claude_modal_active "$screen" "$cursor_y" && { echo 'FAIL: old dialog text hid live composer' >&2; exit 1; }
 claude_composer_ready "$screen" "$cursor_y" || { echo 'FAIL: old dialog text blocked live composer' >&2; exit 1; }
+screen=$'Do you want to proceed?\nNo changes needed.\n› \n\n  Any model · Context 50% left\n'
+claude_modal_active "$screen" 2 && { echo 'FAIL: quoted dialog text hid Codex composer' >&2; exit 1; }
 claude_modal_active() { return 2; }
 screen=$(cat "$FIXTURES/claude-2.1.302-auto-update-footer-live-scrubbed.ansi")
 claude_composer_ready "$screen" && { echo 'FAIL: classifier error looked ready' >&2; exit 1; }

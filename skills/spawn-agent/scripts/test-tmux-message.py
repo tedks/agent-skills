@@ -974,6 +974,16 @@ assert screen.observe(frame, 'outgoing', 6, 1, pathlib.Path(sys.argv[2])) == 'dr
                 deliver(t)
             self.assertEqual(t.actions, [])
 
+    def test_quoted_claude_dialog_does_not_hide_live_codex_composer(self):
+        quote = (CO_SUBMIT_FIXTURES / 'claude-2.1.302-trust-modal.ansi').read_text()
+        frame = screen(harness='codex', prefix=quote + '\n',
+                       footer='  Any model · Context 50% left')
+        result = m.composer(frame)
+        self.assertEqual((result.kind, result.harness), ('empty', 'codex'))
+        modal = m.Frame(quote + '\n› quoted Codex text\n  Any model · Context 50% left\n',
+                        2, next(i for i, row in enumerate(quote.splitlines()) if '❯' in row))
+        self.assertEqual(m.composer(modal).kind, 'modal')
+
     def test_wrapped_and_multiline_composers(self):
         for harness in ['codex', 'claude']:
             f = screen('A long message\n  with another line', harness=harness)
