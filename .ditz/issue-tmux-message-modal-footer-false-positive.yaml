@@ -44,3 +44,15 @@ log_events:
   who: Ted Smith
   what: started
   comment: ""
+- time: 2026-10-18T06:46:11-00:00
+  who: Ted Smith
+  what: commented
+  comment: 'Draft PR #10: fixture/test commit df5e5dc shows the usage-limit footer
+    regression red on the previous classifier (`modal` vs `empty`); implementation
+    commit 81b2419 narrows detection without changing public status or exit codes.
+    Real Claude 2.1.302 scratch captures cover login, trust, permission, and background-work
+    exit. Auto-update and feedback-count footers use scrubbed read-only live captures;
+    usage-limit and /clear text are labeled synthetic. Update and unsent-feedback
+    dialogs could not be induced safely and need an evidence ruling. Current-head
+    public Python, shell alias, real tmux, legacy sender, and config tests pass. Repository-wide
+    setup-leak gate fails on unrelated tracked planning files; see issue setup-leaks-existing-plans.'
