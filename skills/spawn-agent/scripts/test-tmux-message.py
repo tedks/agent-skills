@@ -984,6 +984,33 @@ assert screen.observe(frame, 'outgoing', 6, 1, pathlib.Path(sys.argv[2])) == 'dr
                         2, next(i for i, row in enumerate(quote.splitlines()) if '❯' in row))
         self.assertEqual(m.composer(modal).kind, 'modal')
 
+    def test_synthetic_codex_approval_choice_still_defers(self):
+        raw = ('Would you like to run this command?\n'
+               '› 1. Yes, proceed\n'
+               '  2. No\n'
+               'Press enter to confirm · Esc to cancel\n'
+               '  Any model · Context 50% left\n')
+        frame = m.Frame(raw, 2, 1)
+        self.assertEqual(m.composer(frame).kind, 'modal')
+        t = Terminal()
+        t.frame = lambda: frame
+        with self.assertRaisesRegex(m.DeliveryError, 'modal'):
+            deliver(t)
+        self.assertEqual(t.actions, [])
+
+    def test_synthetic_unknown_codex_choice_is_not_writable(self):
+        raw = ('Choose an option:\n'
+               '› 1. Continue\n'
+               '  2. Stop\n'
+               '  Any model · Context 50% left\n')
+        frame = m.Frame(raw, 2, 1)
+        self.assertEqual(m.composer(frame).kind, 'unknown')
+        t = Terminal()
+        t.frame = lambda: frame
+        with self.assertRaises(m.DeliveryError):
+            deliver(t)
+        self.assertEqual(t.actions, [])
+
     def test_wrapped_and_multiline_composers(self):
         for harness in ['codex', 'claude']:
             f = screen('A long message\n  with another line', harness=harness)

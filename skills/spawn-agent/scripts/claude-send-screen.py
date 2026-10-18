@@ -38,6 +38,15 @@ def claude_composer_frame(screen: str, cursor_y: int | None = None,
     return None
 
 
+def codex_choice_layout(lines: list[str], prompt: int, footer: int) -> bool:
+    """Reject choice rows and instructions before treating › as input."""
+    if re.match(r"^›\s*(?:\d+\.|Yes\b|No\b|Allow\b|Exit\b|Stay\b)", lines[prompt], re.I):
+        return True
+    return any(re.match(r"^\s+(?:\d+\.|[❯›]\s*\d+\.)", line)
+               or re.search(r"Press enter to (?:confirm|continue)|Esc to cancel|Tab to amend", line, re.I)
+               for line in lines[prompt + 1:footer])
+
+
 def codex_composer_at_cursor(screen: str, cursor_y: int | None) -> bool:
     """Recognize a live Codex prompt/footer at the cursor, not quoted text."""
     if cursor_y is None or not codex_surface(screen):
@@ -51,7 +60,9 @@ def codex_composer_at_cursor(screen: str, cursor_y: int | None) -> bool:
     footers = [i for i, line in enumerate(lines[idx + 1:], idx + 1)
                if re.search(r"Context \d+%|\d+% context left|tab to queue message", line, re.I)
                or re.match(r"^  GPT-6-Sol · ", line)]
-    return bool(footers and idx <= cursor_y < footers[0])
+    if not footers or not idx <= cursor_y < footers[0]:
+        return False
+    return not codex_choice_layout(lines, idx, footers[0])
 
 
 def dialog_active(screen: str, cursor_y: int | None = None) -> bool:
@@ -263,6 +274,11 @@ def codex_state(lines: list[str], raw_lines: list[str], payload: str, cx: int, c
     if not matches:
         return "unknown"
     idx = matches[-1]
+    first_footer = next((i for i in range(idx + 1, len(lines))
+                         if re.search(r"Context \d+%|\d+% context left|tab to queue message", lines[i], re.I)
+                         or re.match(r"^  GPT-6-Sol · ", lines[i])), len(lines))
+    if codex_choice_layout(lines, idx, first_footer):
+        return "unknown"
     queue_rows = [
         i for i in range(idx + 1, len(lines))
         if re.fullmatch(r"  tab to queue message {2,}\d+% context left", lines[i])

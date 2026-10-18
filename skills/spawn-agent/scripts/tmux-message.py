@@ -91,6 +91,8 @@ def composer(frame):
             if not footers:
                 continue
             end = footers[0]
+            if styles.codex_choice_layout(lines, idx, end):
+                continue
             harness = "codex"
         if not idx <= frame.y < end:
             continue

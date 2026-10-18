@@ -26,6 +26,8 @@ claude_modal_active "$screen" "$cursor_y" && { echo 'FAIL: old dialog text hid l
 claude_composer_ready "$screen" "$cursor_y" || { echo 'FAIL: old dialog text blocked live composer' >&2; exit 1; }
 screen=$'Do you want to proceed?\nNo changes needed.\n› \n\n  Any model · Context 50% left\n'
 claude_modal_active "$screen" 2 && { echo 'FAIL: quoted dialog text hid Codex composer' >&2; exit 1; }
+screen=$'Would you like to run this command?\n› 1. Yes, proceed\n  2. No\nPress enter to confirm · Esc to cancel\n  Any model · Context 50% left\n'
+claude_modal_active "$screen" 1 || { echo 'FAIL: synthetic Codex approval choice was skipped' >&2; exit 1; }
 claude_modal_active() { return 2; }
 screen=$(cat "$FIXTURES/claude-2.1.302-auto-update-footer-live-scrubbed.ansi")
 claude_composer_ready "$screen" && { echo 'FAIL: classifier error looked ready' >&2; exit 1; }
@@ -794,6 +796,9 @@ assert classify_fixture('claude-suggestion-typed-home.ansi', 'outgoing', 2, 1) =
 assert classify_fixture('claude-try-prefix-typed.ansi', 'outgoing', 16, 1) == 'unknown'
 assert classify_fixture('codex-empty-dim.ansi', 'outgoing', 2, 26) == 'empty'
 assert classify_fixture('codex-typed-home.ansi', 'outgoing', 2, 26) == 'busy'
+unknown_choice = b'Choose an option:\n\xe2\x80\xba 1. Continue\n  2. Stop\n  Any model \xc2\xb7 Context 50% left\n'
+Path(payload).write_text('outgoing')
+assert subprocess.check_output([sys.executable, parser, payload, '2', '1'], input=unknown_choice).decode().strip() == 'unknown'
 queue_payload = 'Reply with exactly P141-QUEUED-TEST'
 queue_screen = (Path(fixtures) / 'codex-generating-queue.ansi').read_bytes()
 queue_empty = queue_screen.replace(queue_payload.encode(), b'', 1)
@@ -1130,6 +1135,23 @@ reset_case modal
 printf '────────────────\nChoose an account:\n❯ 1. Foo\n  2. Bar\n────────────────\n' > "$FAKE_STATE/modal"
 if run_sender %7 --submit-delay 0 --max-wait 1 --poll-interval 0.1 --prompt-file "$prompt_file" >"$TEST_DIR/unfamiliar.out" 2>"$TEST_DIR/unfamiliar.err"; then
   echo 'FAIL: unfamiliar framed choice accepted input' >&2; exit 1
+fi
+[[ $(grep -c '^paste-start$' "$FAKE_LOG" || true) -eq 0 ]]
+[[ $(grep -c '^enter$' "$FAKE_LOG" || true) -eq 0 ]]
+
+# Synthetic Codex approval with a retained context footer must also defer.
+reset_case modal
+printf 'Would you like to run this command?\n› 1. Yes, proceed\n  2. No\nPress enter to confirm · Esc to cancel\n  Any model · Context 50%% left\n' > "$FAKE_STATE/modal"
+if run_sender %7 --submit-delay 0 --max-wait 1 --poll-interval 0.1 --prompt-file "$prompt_file" >"$TEST_DIR/codex-approval.out" 2>"$TEST_DIR/codex-approval.err"; then
+  echo 'FAIL: synthetic Codex approval accepted input' >&2; exit 1
+fi
+[[ $(grep -c '^paste-start$' "$FAKE_LOG" || true) -eq 0 ]]
+[[ $(grep -c '^enter$' "$FAKE_LOG" || true) -eq 0 ]]
+
+reset_case modal
+printf 'Choose an option:\n› 1. Continue\n  2. Stop\n  Any model · Context 50%% left\n' > "$FAKE_STATE/modal"
+if run_sender %7 --submit-delay 0 --max-wait 1 --poll-interval 0.1 --prompt-file "$prompt_file" >"$TEST_DIR/unknown-codex-choice.out" 2>"$TEST_DIR/unknown-codex-choice.err"; then
+  echo 'FAIL: synthetic unknown Codex choice accepted input' >&2; exit 1
 fi
 [[ $(grep -c '^paste-start$' "$FAKE_LOG" || true) -eq 0 ]]
 [[ $(grep -c '^enter$' "$FAKE_LOG" || true) -eq 0 ]]
