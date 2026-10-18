@@ -74,7 +74,12 @@ class Input:
 def composer(frame):
     lines = styles.strip_ansi(frame.raw).splitlines()
     raw = frame.raw.splitlines()
-    if MODAL.search("\n".join(lines[-25:])):
+    # Keep the pre-existing dialog guard on Codex and unknown layouts. A
+    # measured live Claude composer is the only frame that can override broad
+    # footer wording such as "esc to cancel".
+    if not styles.claude_composer_frame(frame.raw, frame.y) and MODAL.search("\n".join(lines[-25:])):
+        return Input("modal")
+    if styles.dialog_active(frame.raw, frame.y):
         return Input("modal")
     # Locate a prompt whose input contains the cursor. Do not assume a fixed
     # row, model name, footer spacing, or number of wrapped rows.
@@ -82,11 +87,10 @@ def composer(frame):
     for idx, match in reversed(candidates):
         glyph, first = match.groups()
         if glyph == "❯":
-            rules = [i for i, line in enumerate(lines) if line.strip() and set(line.strip()) == {"─"}]
-            below = [i for i in rules if i > idx]
-            if not any(i < idx for i in rules) or not below:
+            shape = styles.claude_composer_frame(frame.raw, frame.y)
+            if shape is None or shape[0] != idx:
                 continue
-            end = below[0]
+            end = shape[1]
             harness = "claude"
         else:
             footers = [i for i in range(idx + 1, len(lines)) if FOOTER.match(lines[i])]

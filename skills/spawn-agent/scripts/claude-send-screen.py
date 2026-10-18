@@ -17,6 +17,71 @@ import unicodedata
 CSI_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
 
 
+def claude_composer_frame(screen: str, cursor_y: int | None = None,
+                          allow_legacy_space: bool = False) -> tuple[int, int] | None:
+    """Return the measured flush-left Claude input frame, if present."""
+    lines = strip_ansi(screen).splitlines()
+    for idx in range(len(lines) - 1, 0, -1):
+        marker = lines[idx].startswith("❯\u00a0")
+        legacy = allow_legacy_space and lines[idx].startswith("❯ ")
+        if not (marker or legacy):
+            continue
+        if not lines[idx - 1].strip() or set(lines[idx - 1].strip()) != {"─"}:
+            continue
+        bottom = next((i for i in range(idx + 1, len(lines))
+                       if lines[i].strip() and set(lines[i].strip()) == {"─"}), None)
+        if bottom is None or any("❯" in line for line in lines[idx + 1:bottom]):
+            continue
+        if cursor_y is not None and not idx <= cursor_y < bottom:
+            continue
+        return idx, bottom
+    return None
+
+
+def dialog_active(screen: str, cursor_y: int | None = None) -> bool:
+    """Recognize a current dialog, never a bare footer or quoted output.
+
+    An intact Claude composer at the cursor is stronger evidence than dialog
+    wording in the transcript. Unknown frames remain unknown to the caller.
+    """
+    lines = strip_ansi(screen).splitlines()
+    if cursor_y is not None and claude_composer_frame(screen, cursor_y):
+        return False
+
+    # Status footers have no positive dialog frame. Do not remove matching
+    # text: it might be part of a real dialog or an unfamiliar screen.
+    active = lines[-25:]
+    text = "\n".join(active)
+    compact = re.sub(r"\s+", " ", text)
+    # With no cursor coordinate, a draft beginning with "Yes" can look like
+    # the selected button of a dialog when a footer says "esc to cancel".
+    # Exclude the measured composer rows from choice evidence, while keeping
+    # the rest of the screen available for real dialog detection.
+    composer_rows = claude_composer_frame(screen)
+    active_start = len(lines) - len(active)
+    choice_text = "\n".join(line for i, line in enumerate(active, active_start)
+                            if composer_rows is None or not composer_rows[0] <= i < composer_rows[1])
+    choice = re.search(r"^\s*[❯›>]?[ \u00a0]*(?:\d+\.\s*)?(?:Yes\b|No\b|Exit\b|Stay\b|Allow once\b|Claude account\b|Anthropic Console\b|3rd-party platform\b)", choice_text, re.I | re.M)
+    if re.search(r"Update available!", compact, re.I) and re.search(r"Press enter to continue", compact, re.I):
+        return True
+    if re.search(r"Background work is running", compact, re.I) and re.search(r"Exit and stop tasks", compact, re.I):
+        return True
+    if re.search(r"unsent feedback drafts?", text, re.I) and choice:
+        return True
+    if re.search(r"Select login method:", text, re.I) and choice:
+        return True
+    if re.search(r"Quick safety check|Do you trust the contents of this project\?", text, re.I) and choice:
+        return True
+    if re.search(r"Would you like to (?:proceed|run)|Do you want to (?:proceed|allow)", text, re.I) and choice:
+        return True
+    has_frame = any(re.search(r"([─╌▔═])\1{7,}", line) for line in active)
+    selected = re.search(r"^\s*❯[ \u00a0]*(?:\d+\.\s*)?(?:Yes\b|No\b|Exit\b|Stay\b|Allow\b)", choice_text, re.I | re.M)
+    instruction = re.search(r"Enter to (?:confirm|choose)|Esc to cancel|Tab to amend", text, re.I)
+    if has_frame and selected and instruction:
+        return True
+    return False
+
+
 def strip_ansi(text: str) -> str:
     return CSI_RE.sub("", text)
 
@@ -122,22 +187,16 @@ def state(screen: str, payload: str, cx: int, cy: int,
     # Current Claude Code renders the live composer between two horizontal
     # rules, with no side gutters. Require that exact frame around the last
     # prompt marker; a transcript line containing ❯ is not sufficient.
-    rules = [i for i, line in enumerate(lines) if line.strip() and set(line.strip()) == {"─"}]
-    prompts = [i for i, line in enumerate(lines) if "❯" in line]
-    if not prompts:
+    # Pre-2.1.30x co-submit receipts used an ordinary-space prompt. Only the
+    # exact known draft+payload ownership path accepts that old rendering;
+    # general delivery still requires the measured NBSP composer marker.
+    frame = claude_composer_frame(screen, cy, allow_legacy_space=co_submit_draft is not None)
+    if frame is None:
         return "unknown"
-    idx = prompts[-1]
-    before = [i for i in rules if i < idx]
-    after = [i for i in rules if i > idx]
-    if not before or not after:
-        return "unknown"
-    top, bottom = before[-1], after[0]
-    if top >= idx or bottom <= idx:
-        return "unknown"
+    idx, bottom = frame
     line = lines[idx]
     fragment = line.split("❯", 1)[1]
-    if fragment.startswith(("\u00a0", " ")):
-        fragment = fragment[1:]
+    fragment = fragment[1:]
     parts = [fragment]
     for row in lines[idx + 1 : bottom]:
         if "❯" in row:
@@ -376,6 +435,20 @@ def observe(screen: str, payload: str, cx: int, cy: int, path: pathlib.Path,
 def main() -> int:
     if len(sys.argv) == 2 and sys.argv[1] == "--strip-ansi":
         sys.stdout.write(strip_ansi(sys.stdin.read()))
+        return 0
+    if 2 <= len(sys.argv) <= 3 and sys.argv[1] == "--dialog-active":
+        try:
+            cursor_y = int(sys.argv[2]) if len(sys.argv) == 3 else None
+        except ValueError:
+            return 64
+        print("modal" if dialog_active(sys.stdin.read(), cursor_y) else "not-modal")
+        return 0
+    if 2 <= len(sys.argv) <= 3 and sys.argv[1] == "--composer-frame":
+        try:
+            cursor_y = int(sys.argv[2]) if len(sys.argv) == 3 else None
+        except ValueError:
+            return 64
+        print("composer" if claude_composer_frame(sys.stdin.read(), cursor_y) else "unknown")
         return 0
     args = sys.argv[1:]
     observe_path = None

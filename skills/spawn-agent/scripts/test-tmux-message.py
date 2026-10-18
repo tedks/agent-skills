@@ -21,7 +21,7 @@ spec.loader.exec_module(m)
 
 def screen(text='', history='', harness='codex', footer='  Any model · branch', prefix=''):
     if harness == 'claude':
-        raw = prefix + '──────────────\n❯ ' + text + '\n──────────────\n'
+        raw = prefix + '──────────────\n❯\u00a0' + text + '\n──────────────\n'
         y = len(prefix.splitlines()) + 1 + text.count('\n')
     else:
         raw = prefix + '› ' + text + '\n\n' + footer + '\n'
@@ -30,6 +30,13 @@ def screen(text='', history='', harness='codex', footer='  Any model · branch',
 
 
 CO_SUBMIT_FIXTURES = Path(__file__).with_name('fixtures') / 'claude-send'
+
+
+def fixture_frame(name, marker='❯'):
+    raw = (CO_SUBMIT_FIXTURES / name).read_text()
+    rows = m.styles.strip_ansi(raw).splitlines()
+    y = next(i for i, row in enumerate(rows) if marker in row)
+    return m.Frame(raw, 2, y)
 
 
 def claude_co_submit_frame(text='', receipt=True):
@@ -347,7 +354,7 @@ class DeliveryTests(unittest.TestCase):
                 t.return_value.paste.assert_not_called()
 
     def test_response_rows_unknown_modal_and_failed_read(self):
-        for f in (m.Frame('', -1, -1), screen('Allow once')):
+        for f in (m.Frame('', -1, -1), fixture_frame('claude-2.1.302-permission-modal.ansi')):
             with patch.object(m, 'Tmux') as t:
                 t.return_value.frame.return_value = f
                 self.assertIsNone(m.read_response_rows('%1', '/tmp/test-socket'))
@@ -902,6 +909,126 @@ assert screen.observe(frame, 'outgoing', 6, 1, pathlib.Path(sys.argv[2])) == 'dr
         with self.assertRaisesRegex(m.DeliveryError, 'modal'):
             deliver(t)
         self.assertEqual(t.actions, [])
+
+    def test_claude_status_footers_are_not_modals(self):
+        # Text from the incident report supplements the labeled ANSI captures.
+        footers = (
+            'Usage limit reached · continuing automatically at 12pm · esc to cancel',
+            '✘ Auto-update failed: no write permission to npm prefix · Run claude doctor',
+            'new task? /clear to save 319.9k tokens · globalVersion: 2.1.301 · latestVersion: 2.1.302',
+            '1 feedback draft',
+            '12 feedback drafts',
+        )
+        for footer in footers:
+            with self.subTest(footer=footer):
+                frame = screen(harness='claude', prefix=footer + '\n')
+                self.assertEqual(m.composer(frame).kind, 'empty')
+                self.assertEqual(m.composer(frame).harness, 'claude')
+
+    def test_claude_dialogs_and_footers_by_fixture(self):
+        fixtures = (
+            ('claude-2.1.302-login-modal.ansi', 'modal'),
+            ('claude-2.1.302-trust-modal.ansi', 'modal'),
+            ('claude-2.1.302-permission-modal.ansi', 'modal'),
+            ('claude-2.1.302-exit-background-modal.ansi', 'modal'),
+            ('SYNTHETIC-UNVERIFIED-claude-unsent-feedback-exit-dialog.ansi', 'modal'),
+            ('claude-2.1.302-auto-update-footer-live-scrubbed.ansi', 'empty'),
+            ('claude-2.1.299-feedback-count-footer-live-scrubbed.ansi', 'empty'),
+            ('SYNTHETIC-claude-2.1.302-usage-limit-footer.ansi', 'empty'),
+            ('SYNTHETIC-claude-2.1.302-new-task-footer.ansi', 'empty'),
+        )
+        for name, expected in fixtures:
+            with self.subTest(name=name):
+                frame = fixture_frame(name)
+                result = m.composer(frame)
+                self.assertEqual(result.kind, expected)
+                if expected == 'empty':
+                    self.assertEqual(result.harness, 'claude')
+
+    def test_synthetic_update_dialog_defers(self):
+        raw = (CO_SUBMIT_FIXTURES / 'SYNTHETIC-claude-update-dialog.ansi').read_text()
+        frame = m.Frame(raw, 0, 3)
+        self.assertEqual(m.composer(frame).kind, 'modal')
+        t = Terminal()
+        t.frame = lambda: frame
+        with self.assertRaisesRegex(m.DeliveryError, 'modal'):
+            deliver(t)
+        self.assertEqual(t.actions, [])
+
+    def test_yes_draft_with_usage_footer_is_not_modal_without_cursor(self):
+        raw = (CO_SUBMIT_FIXTURES / 'SYNTHETIC-claude-yes-draft-usage-footer.ansi').read_text()
+        self.assertIn('❯\u00a0', raw)
+        self.assertIsNotNone(m.styles.claude_composer_frame(raw))
+        self.assertFalse(m.styles.dialog_active(raw))
+        self.assertEqual(m.composer(m.Frame(raw, 2 + len('Yes, please continue the work.'), 2)).kind, 'text')
+
+    def test_bare_cancel_text_is_not_a_dialog(self):
+        frame = screen(harness='claude', prefix='Esc to cancel\n')
+        self.assertEqual(m.composer(frame).kind, 'empty')
+
+    def test_framed_choice_still_defers_without_a_known_title(self):
+        raw = '────────────────\n❯ No, exit\n  Yes, I accept\nEnter to confirm · Esc to cancel\n'
+        self.assertEqual(m.composer(m.Frame(raw, 2, 1)).kind, 'modal')
+        self.assertFalse(m.styles.dialog_active('No, exit\nEsc to cancel\n'))
+        boxed = '────────────────\nDo you want to proceed?\n❯ 1. Yes\n────────────────\n'
+        self.assertEqual(m.composer(m.Frame(boxed, 2, 2)).kind, 'modal')
+        quoted = m.Frame('Quick safety check\n❯ No, exit\n──────────────\n❯\u00a0\n──────────────\n', 2, 3)
+        self.assertEqual(m.composer(quoted).kind, 'empty')
+
+    def test_wrapped_update_prompt_is_modal(self):
+        raw = 'Update available!\nPress enter to\ncontinue\n'
+        self.assertEqual(m.composer(m.Frame(raw, 0, 2)).kind, 'modal')
+
+    def test_unfamiliar_framed_choice_is_not_writable(self):
+        for title, selected in (('Choose an account:\n', '❯ 1. Foo'),
+                                ('', '❯ 1. Foo'),
+                                ('Choose an account:\n', '❯\u00a0')):
+            raw = '────────────────\n' + title + selected + '\n  2. Bar\n────────────────\n'
+            frame = m.Frame(raw, 2, 1 + bool(title))
+            self.assertEqual(m.composer(frame).kind, 'unknown')
+            t = Terminal()
+            t.frame = lambda: frame
+            with self.assertRaises(m.DeliveryError):
+                deliver(t)
+            self.assertEqual(t.actions, [])
+
+    def test_synthetic_codex_approval_choice_still_defers(self):
+        raw = ('Would you like to run this command?\n'
+               '› 1. Yes, proceed\n'
+               '  2. No\n'
+               'Press enter to confirm · Esc to cancel\n'
+               '  Any model · Context 50% left\n')
+        frame = m.Frame(raw, 2, 1)
+        self.assertEqual(m.composer(frame).kind, 'modal')
+        t = Terminal()
+        t.frame = lambda: frame
+        with self.assertRaisesRegex(m.DeliveryError, 'modal'):
+            deliver(t)
+        self.assertEqual(t.actions, [])
+
+    def test_synthetic_codex_approval_with_unfamiliar_title_still_defers(self):
+        raw = ('Edit approval required?\n'
+               '› 1. Yes, proceed\n'
+               '  2. No\n\n'
+               'Press enter to confirm · Esc to cancel\n'
+               '  Any model · Context 50% left\n')
+        frame = m.Frame(raw, 2, 1)
+        self.assertEqual(m.composer(frame).kind, 'modal')
+        t = Terminal()
+        t.frame = lambda: frame
+        with self.assertRaisesRegex(m.DeliveryError, 'modal'):
+            deliver(t)
+        self.assertEqual(t.actions, [])
+
+    def test_ordinary_codex_choice_words_and_numbered_drafts_remain_writable(self):
+        for payload in ('Yes, proceed', 'No.', '1. Fix X\n  2. Verify Y'):
+            with self.subTest(payload=payload):
+                frame = screen(payload, footer='  Any model · Context 50% left')
+                self.assertEqual(m.composer(frame).kind, 'text')
+                t = Terminal(payload=payload)
+                result = deliver(t)
+                self.assertEqual(result['status'], 'delivered')
+                self.assertEqual((t.pastes, t.enters), (1, 1))
 
     def test_wrapped_and_multiline_composers(self):
         for harness in ['codex', 'claude']:
