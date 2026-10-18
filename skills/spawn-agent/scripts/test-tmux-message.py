@@ -958,6 +958,19 @@ assert screen.observe(frame, 'outgoing', 6, 1, pathlib.Path(sys.argv[2])) == 'dr
         frame = screen(harness='claude', prefix='Esc to cancel\n')
         self.assertEqual(m.composer(frame).kind, 'empty')
 
+    def test_framed_choice_still_defers_without_a_known_title(self):
+        raw = '────────────────\n❯ No, exit\n  Yes, I accept\nEnter to confirm · Esc to cancel\n'
+        self.assertEqual(m.composer(m.Frame(raw, 2, 1)).kind, 'modal')
+        self.assertFalse(m.styles.dialog_active('No, exit\nEsc to cancel\n'))
+        boxed = '────────────────\nDo you want to proceed?\n❯ 1. Yes\n────────────────\n'
+        self.assertEqual(m.composer(m.Frame(boxed, 2, 2)).kind, 'modal')
+        quoted = m.Frame('Quick safety check\n❯ No, exit\n──────────────\n❯\u00a0\n──────────────\n', 2, 3)
+        self.assertEqual(m.composer(quoted).kind, 'empty')
+
+    def test_wrapped_update_prompt_is_modal(self):
+        raw = 'Update available!\nPress enter to\ncontinue\n'
+        self.assertEqual(m.composer(m.Frame(raw, 0, 2)).kind, 'modal')
+
     def test_wrapped_and_multiline_composers(self):
         for harness in ['codex', 'claude']:
             f = screen('A long message\n  with another line', harness=harness)

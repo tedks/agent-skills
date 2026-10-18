@@ -16,6 +16,77 @@ import unicodedata
 
 CSI_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
 
+# Claude Code 2.1.30x status footers observed on the usage-limit screen, the
+# npm-prefix auto-update failure, the /clear version hint, and feedback counts.
+# These are not dialogs even when they contain words like "esc to cancel".
+NON_MODAL_FOOTERS = (
+    re.compile(r"Usage limit reached.*esc to cancel", re.I | re.S),
+    re.compile(r"Auto-update failed:", re.I),
+    re.compile(r"new task\? /clear to save .*globalVersion:.*latestVersion:", re.I | re.S),
+    re.compile(r"\b\d+ feedback drafts?\b", re.I),
+)
+
+
+def known_status_footer(text: str) -> bool:
+    return any(pattern.search(strip_ansi(text)) for pattern in NON_MODAL_FOOTERS)
+
+
+def dialog_active(screen: str, cursor_y: int | None = None) -> bool:
+    """Recognize a current dialog, never a bare footer or quoted output.
+
+    An intact Claude composer at the cursor is stronger evidence than dialog
+    wording in the transcript. Unknown frames remain unknown to the caller.
+    """
+    lines = strip_ansi(screen).splitlines()
+    if cursor_y is not None and 0 <= cursor_y < len(lines):
+        # The measured live composer uses NBSP after the glyph; dialog
+        # selection rows use an ordinary space. Do not treat a boxed dialog
+        # choice as a composer just because it has rules above and below.
+        prompts = [i for i, line in enumerate(lines) if re.match(r"^\s*❯\u00a0", line)]
+        rules = [i for i, line in enumerate(lines)
+                 if line.strip() and set(line.strip()) == {"─"}]
+        for prompt in prompts:
+            if prompt != cursor_y or not any(i < prompt for i in rules):
+                continue
+            if any(i > prompt for i in rules):
+                return False
+
+    # Remove only measured footer rows. A real dialog elsewhere in the same
+    # frame can still be recognized after a footer is discarded.
+    tail = lines[-25:]
+    active = []
+    i = 0
+    while i < len(tail):
+        pair = " ".join(tail[i:i + 2])
+        if known_status_footer(tail[i]):
+            i += 1
+        elif i + 1 < len(tail) and known_status_footer(pair):
+            i += 2
+        else:
+            active.append(tail[i])
+            i += 1
+    text = "\n".join(active)
+    compact = re.sub(r"\s+", " ", text)
+    choice = re.search(r"^\s*[❯›>]?[ \u00a0]*(?:\d+\.\s*)?(?:Yes\b|No\b|Exit\b|Stay\b|Allow once\b|Claude account\b|Anthropic Console\b|3rd-party platform\b)", text, re.I | re.M)
+    if re.search(r"Update available!", compact, re.I) and re.search(r"Press enter to continue", compact, re.I):
+        return True
+    if re.search(r"Background work is running", compact, re.I) and re.search(r"Exit and stop tasks", compact, re.I):
+        return True
+    if re.search(r"unsent feedback drafts?", text, re.I) and choice:
+        return True
+    if re.search(r"Select login method:", text, re.I) and choice:
+        return True
+    if re.search(r"Quick safety check|Do you trust the contents of this project\?", text, re.I) and choice:
+        return True
+    if re.search(r"Would you like to (?:proceed|run)|Do you want to (?:proceed|allow)", text, re.I) and choice:
+        return True
+    frame = any(re.search(r"([─╌▔═])\1{7,}", line) for line in active)
+    selected = re.search(r"^\s*❯[ \u00a0]*(?:\d+\.\s*)?(?:Yes\b|No\b|Exit\b|Stay\b|Allow\b)", text, re.I | re.M)
+    instruction = re.search(r"Enter to (?:confirm|choose)|Esc to cancel|Tab to amend", text, re.I)
+    if frame and selected and instruction:
+        return True
+    return False
+
 
 def strip_ansi(text: str) -> str:
     return CSI_RE.sub("", text)
@@ -376,6 +447,13 @@ def observe(screen: str, payload: str, cx: int, cy: int, path: pathlib.Path,
 def main() -> int:
     if len(sys.argv) == 2 and sys.argv[1] == "--strip-ansi":
         sys.stdout.write(strip_ansi(sys.stdin.read()))
+        return 0
+    if 2 <= len(sys.argv) <= 3 and sys.argv[1] == "--dialog-active":
+        try:
+            cursor_y = int(sys.argv[2]) if len(sys.argv) == 3 else None
+        except ValueError:
+            return 64
+        print("modal" if dialog_active(sys.stdin.read(), cursor_y) else "not-modal")
         return 0
     args = sys.argv[1:]
     observe_path = None

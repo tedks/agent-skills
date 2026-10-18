@@ -73,6 +73,10 @@ empty input is verified. Its context may pre-empt the command. Results include
 `cleared_command_draft_length` after empty input is verified, and
 `clear_attempted` whenever clearing was attempted, never draft contents.
 Changing input, replay residue, modals and unsupported layouts still defer.
+Claude Code status footers such as usage limits, auto-update errors, and
+feedback-draft counts are not dialogs; a footer alone does not return `modal`.
+The sender recognizes current dialog choices or known dialog prompts and
+continues to defer on ambiguous frames.
 For ordinary co-submission, the public sender supports measured Codex and
 Claude append shapes: Codex's unchanged draft prefix plus one fresh Content
 marker whose count covers the appended newline and payload; Claude's exact

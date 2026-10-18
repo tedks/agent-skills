@@ -21,22 +21,17 @@
 # Note also that --verify cannot catch this class of drift: both layouts present
 # as a prompt, so a prediction-vs-observation check compares equal.
 
-# Any Claude modal that must stop an automated paste. Deliberately BROAD --
-# "No, exit" is shared with the bypass-permissions responsibility dialog, and
-# that is correct here: the spawner should refuse on any modal, not just the
-# trust one.
-#
-# Matching is on SHORT fragments. Claude re-flows the dialog to the pane width,
-# and tmux sizes a session to its SMALLEST attached client, so a long literal
-# silently stops matching on a narrow terminal -- exactly when a paste would be
-# most damaging. A false positive only refuses to act; a false negative pastes
-# into the dialog. Fail closed.
-claude_trust_modal_active() {
-    local active_tail
-    active_tail=$(printf '%s\n' "$1" | tail -n 25)
-    [[ "$active_tail" == *"Quick safety check"* || \
-       "$active_tail" == *"Yes, I trust this folder"* || \
-       "$active_tail" == *"No, exit"* ]]
+# Shared frame-aware classifier also used by tmux-message.py. Known status
+# footers cannot become modals merely because they say "esc to cancel".
+claude_modal_active() {
+    local script_dir result
+    script_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+    if [[ -n ${2:-} ]]; then
+        result=$(printf '%s' "$1" | python3 "$script_dir/claude-send-screen.py" --dialog-active "$2") || return 2
+    else
+        result=$(printf '%s' "$1" | python3 "$script_dir/claude-send-screen.py" --dialog-active) || return 2
+    fi
+    [[ "$result" == modal ]]
 }
 
 # The TRUST dialog specifically, for callers that must distinguish it from the
@@ -57,11 +52,15 @@ claude_trust_dialog_specific() {
 # a wrapped dialog read as a live composer. Verified against live Claude: a real
 # composer draws both box rules at widths 100, 60, 40, 33 and 25.
 claude_composer_ready() {
-    local active_tail
+    local active_tail modal_status
     active_tail=$(printf '%s\n' "$1" | tail -n 25)
     # A dialog on screen is never a ready composer, at any width.
-    if claude_trust_modal_active "$1"; then
+    if claude_modal_active "$1"; then
         return 1
+    else
+        # A failed classifier cannot turn a dialog into a ready composer.
+        modal_status=$?
+        ((modal_status == 1)) || return 1
     fi
     printf '%s\n' "$active_tail" | grep -q '─' && \
         printf '%s\n' "$active_tail" | grep -q '❯'

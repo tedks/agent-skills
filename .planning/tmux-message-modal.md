@@ -10,9 +10,9 @@ This ExecPlan follows `.planning/PLANS.md` and is a living record of the modal f
 
 - [x] (2026-10-18) Read the Lead brief, role, binding, and issue; confirmed branch `tmux-message-modal` in the assigned worktree; started the ditz issue.
 - [x] (2026-10-18) Started a private tmux server and scratch Claude 2.1.302 session. Isolated config reaches login before the trust prompt.
-- [ ] Capture real ANSI screens for the specified footers and dialogs from scratch panes.
-- [ ] Add fixture assertions and verify they fail on the old classifier.
-- [ ] Narrow both senders' modal classification without changing exit codes or status contract.
+- [ ] Capture real ANSI screens for the specified footers and dialogs from scratch panes (done: login, trust, permission, background-exit, scrubbed live auto-update and feedback count; open: update and unsent-feedback dialogs, authentic usage-limit footer).
+- [x] (2026-10-18) Add fixture assertions and verify the usage-limit regression fails on the old classifier (`modal` instead of `empty`).
+- [x] (2026-10-18) Narrow both senders' modal classification without changing exit codes or status contract.
 - [ ] Run affected tests and repository checks; mutation-check the tests.
 - [ ] Push a draft PR, review to fixpoint, and hand off to the CTO for merge.
 
@@ -20,11 +20,15 @@ This ExecPlan follows `.planning/PLANS.md` and is a living record of the modal f
 
 - With `CLAUDE_CONFIG_DIR` and `XDG_STATE_HOME` in a scratch directory, interactive Claude 2.1.302 opens its login selector before the trust prompt. `--no-session-persistence` cannot be used in interactive mode. Capturing authenticated screens therefore needs a credential decision or an equivalent isolated authentication method.
 - The existing `tmux-message.py` classifier searches any of the last 25 rows for `Esc to cancel`, so a usage-limit footer can become `modal` despite an intact composer. The legacy sender has a second, separate broad detector.
+- The authenticated real config defaults to bypass permissions on this host, so a scratch permission dialog required `--permission-mode manual --setting-sources project`. `pwd` remained auto-allowed, while a scratch-file write produced the dialog. An older scratch-installed Claude 2.1.301 launched normally and did not display an update dialog.
 
 ## Decision Log
 
 - Decision: keep the scratch Claude session on a separate `tmux -L modal-fixture-751` server with cwd and state inside this worktree. Rationale: no control of live panes and no new shared session state. Date/author: 2026-10-18, Codex lead.
 - Decision: do not copy OAuth credentials into scratch config without a ruling. Rationale: the brief explicitly stops at keys. Date/author: 2026-10-18, Codex lead.
+- Decision: apply CTO ruling MODAL-R1. Use the authenticated real config in an isolated scratch cwd and tmux server; never copy credentials. Read-only live footer captures may be scrubbed, and usage-limit text from the XRW record is explicitly synthetic. Rationale: authenticated prompts were otherwise unreachable. Date/author: 2026-10-18, Codex lead.
+- Decision: override the host's bypass-permissions default only inside the scratch session to induce the real permission prompt. Rationale: the default cannot produce that fixture. Date/author: 2026-10-18, Codex lead.
+- Decision: request an evidence ruling for the update and unsent-feedback dialogs. A scratch-installed 2.1.301 did not show an update dialog, and the 2.1.302 feedback flow required a final outward submit; pressing Esc discarded the draft, so no exit prompt appeared. Rationale: manufacturing those screens would misstate the evidence or cross the outward-act stop. Date/author: 2026-10-18, Codex lead.
 
 ## Outcomes & Retrospective
 
@@ -40,7 +44,7 @@ Capture each requested screen with `tmux capture-pane -e -p` in an isolated Clau
 
 ## Concrete Steps
 
-Work in `/home/tedks/Projects/agent-skills/tmux-message-modal`. Use the private tmux socket label `modal-fixture-751` only for scratch Claude. Run `bash skills/spawn-agent/scripts/test-claude-send.sh`, `python3 skills/spawn-agent/scripts/test-tmux-message.py`, `bash skills/spawn-agent/scripts/test-tmux-message.sh`, and `python3 skills/spawn-agent/scripts/test-tmux-message-live.py`. Run the repository configuration checks identified by the repository's test scripts. Commit and push coherent milestones, then create a draft PR.
+Work in the assigned feature worktree. Use a private tmux socket only for scratch Claude. Run `bash skills/spawn-agent/scripts/test-claude-send.sh`, `python3 skills/spawn-agent/scripts/test-tmux-message.py`, `bash skills/spawn-agent/scripts/test-tmux-message.sh`, and `python3 skills/spawn-agent/scripts/test-tmux-message-live.py`. Run the repository configuration checks identified by the repository's test scripts. Commit and push coherent milestones, then create a draft PR.
 
 ## Validation and Acceptance
 
@@ -52,10 +56,11 @@ Tests must use private tmux or fake tmux state and never send to live panes. If 
 
 ## Artifacts and Notes
 
-The private scratch pane is `modal-fixture-751:fixture:0.0`; it is not a fixture yet. The first `MODAL-ACK` send to `%321` returned `mixed-input-after-paste`; a subsequent read showed the exact acknowledgement in the queued input with the Claude `ctrl+x ctrl+s to send now` hint. It has not been repasted.
+The scratch Claude sessions use a private tmux server. Captured fixture files contain only dialog or footer regions, with local paths and unrelated conversation text scrubbed.
 
 ## Interfaces and Dependencies
 
 Keep the public `tmux-message.sh` JSON status, exit codes, and reason contract. A new reason for ambiguous dialog frames would require a product ruling. Python 3.11+, Bash, tmux 3.6a, and Claude Code 2.1.302 are installed on this host.
 
 Revision 2026-10-18: Initial plan records the login-first discovery and the credential stop condition before modifying classifiers.
+Revision 2026-10-18: Recorded MODAL-R1, authentic and synthetic fixture provenance, and the scratch permission-mode deviation.

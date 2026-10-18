@@ -20,6 +20,10 @@ for fixture in claude-2.1.302-auto-update-footer-live-scrubbed.ansi \
   claude_modal_active "$screen" && { echo "FAIL: $fixture looked modal" >&2; exit 1; }
   claude_composer_ready "$screen" || { echo "FAIL: $fixture was not ready" >&2; exit 1; }
 done
+claude_modal_active() { return 2; }
+screen=$(cat "$FIXTURES/claude-2.1.302-auto-update-footer-live-scrubbed.ansi")
+claude_composer_ready "$screen" && { echo 'FAIL: classifier error looked ready' >&2; exit 1; }
+source "$SCRIPT_DIR/claude-pane-detect.sh"
 TEST_DIR=$(mktemp -d /tmp/test-claude-send.XXXXXX)
 TEST_REAL_PYTHON3=$(command -v python3)
 export TEST_REAL_PYTHON3

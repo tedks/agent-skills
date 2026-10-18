@@ -33,7 +33,6 @@ spec.loader.exec_module(styles)
 PROMPT = re.compile(r"^\s*([›❯])(?:[ \u00a0]|$)(.*)$")
 PASTE = re.compile(r"\[Pasted (?:text|Text)(?:[^\]\n]*)\]", re.I)
 FOOTER = re.compile(r"^\s*(?:.*(?:Context \d+%|\d+% context left| · )|tab to queue message|\? for shortcuts|esc to interrupt)", re.I)
-MODAL = re.compile(r"Quick safety check|Yes, I trust this folder|No, exit|Do you trust the contents|Press enter to continue|Would you like to (?:proceed|run)|Do you want to (?:proceed|allow)|Allow once|Esc to cancel", re.I)
 QUEUE = re.compile(r"Messages to be submitted|queued messages?", re.I)
 
 
@@ -74,7 +73,7 @@ class Input:
 def composer(frame):
     lines = styles.strip_ansi(frame.raw).splitlines()
     raw = frame.raw.splitlines()
-    if MODAL.search("\n".join(lines[-25:])):
+    if styles.dialog_active(frame.raw, frame.y):
         return Input("modal")
     # Locate a prompt whose input contains the cursor. Do not assume a fixed
     # row, model name, footer spacing, or number of wrapped rows.

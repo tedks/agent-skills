@@ -337,7 +337,7 @@ if [[ "$mode" == "verify" ]]; then
             # The trust dialog specifically -- the broad detector also matches
             # the bypass-permissions dialog, which would be reported as drift.
             if claude_trust_dialog_specific "$pane"; then observed="PROMPTS"; break; fi
-            if claude_trust_modal_active "$pane"; then observed="other-dialog"; break; fi
+            if claude_modal_active "$pane"; then observed="other-dialog"; break; fi
             if claude_composer_ready "$pane"; then observed="trusted"; break; fi
             sleep 0.25
         done
