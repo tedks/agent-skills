@@ -15,7 +15,7 @@ for fixture in claude-2.1.302-login-modal.ansi claude-2.1.302-trust-modal.ansi \
   claude_composer_ready "$screen" && { echo "FAIL: $fixture looked ready" >&2; exit 1; }
 done
 screen=$(cat "$FIXTURES/SYNTHETIC-claude-yes-draft-usage-footer.ansi")
-[[ "$screen" == *$'❯\u00a0'* ]] || { echo 'FAIL: Yes-draft fixture lost the NBSP composer marker' >&2; exit 1; }
+[[ "$screen" == *$'\xe2\x9d\xaf\xc2\xa0'* ]] || { echo 'FAIL: Yes-draft fixture lost the NBSP composer marker' >&2; exit 1; }
 claude_modal_active "$screen" && { echo 'FAIL: no-cursor Yes draft looked modal' >&2; exit 1; }
 claude_composer_ready "$screen" || { echo 'FAIL: no-cursor Yes draft was not ready' >&2; exit 1; }
 for fixture in claude-2.1.302-auto-update-footer-live-scrubbed.ansi \
