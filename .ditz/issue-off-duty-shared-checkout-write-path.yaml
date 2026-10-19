@@ -32,8 +32,8 @@ type: bugfix
 component: retire-agent
 release:
 reporter: Ted Smith <tedks@riseup.net>
-status: in_progress
-disposition:
+status: closed
+disposition: fixed
 creation_time: 2026-10-19T02:18:13-00:00
 references: []
 log_events:
@@ -84,3 +84,7 @@ log_events:
     rebuilt from f7034513 on framework0, tower0 and splinter1. The CTO''s exit receipt
     for the lead was appended through the helper (off-duty 21c1257) without touching
     the shared checkout. Running sessions pick up the new harness-control on restart.'
+- time: 2026-10-19T03:40:16-00:00
+  who: Ted Smith
+  what: 'closed: fixed'
+  comment: ""
