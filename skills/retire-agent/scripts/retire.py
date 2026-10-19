@@ -176,6 +176,12 @@ class Retirement:
     def git(self, *args, raw=False):
         return checked(['git', '-C', self.repo, *args], strip=not raw)
 
+    def git_bytes(self, *args):
+        result = subprocess.run(['git', '-C', str(self.repo), *args], capture_output=True, timeout=45)
+        if result.returncode:
+            raise Stop('command failed: git')
+        return result.stdout
+
     def fetch_master(self):
         """Return the fetched master commit, independent of remote fetch mappings."""
         ref = 'refs/retire-agent/fetch-' + uuid.uuid4().hex
@@ -595,8 +601,15 @@ class Retirement:
         command = [helper, '--repo', self.repo, '--source-root', self.records]
         if index:
             command += ['--build-index', Path(__file__).with_name('build-index.py')]
-            shard_path = self.records / self.state['shard']
+            relative = self.state.get('shard')
+            if not isinstance(relative, str) or not relative.startswith('waiting/') or '..' in Path(relative).parts:
+                raise Stop('staged shard unavailable for index publication')
+            shard_path = self.records / relative
+            if (self.records / 'waiting').is_symlink() or shard_path.is_symlink() or not shard_path.is_file():
+                raise Stop('staged shard unavailable for index publication')
             shard = object_record(shard_path.read_text(), 'staged shard')
+            if not isinstance(shard.get('session_id'), str):
+                raise Stop('staged shard has no session identity')
             command += ['--session-id', shard['session_id'], '--event-id', self.state['id']]
         command += [*paths, '-m', 'Preserve retirement ' + self.state['id']]
         result = run(command)
@@ -605,9 +618,7 @@ class Retirement:
         commit = result.stdout.strip()
         remote_head = self.fetch_master()
         for path in paths:
-            local = self.git('hash-object', '--path=' + path, str(self.records / path))
-            remote = self.git('rev-parse', remote_head + ':' + path)
-            if local != remote:
+            if (self.records / path).read_bytes() != self.git_bytes('show', remote_head + ':' + path):
                 raise Stop('private remote shard verification failed')
         return commit
 
@@ -806,14 +817,14 @@ class Retirement:
                 save(receipt, {'event': event, 'shard': self.state['shard'], 'commit': shard_commit, 'author': data['author'], 'status': 'handoff-verified', 'verified_at': datetime.datetime.now(datetime.timezone.utc).isoformat()})
                 self.publish_locked(['receipts/' + receipt.name], index=True)
                 self.state['handoff_receipt'] = 'receipts/' + receipt.name
-                self.state['shard_hash'] = self.git('hash-object', '--path=' + self.state['shard'], str(canonical))
+                self.state['shard_hash'] = self.git('hash-object', str(canonical))
                 self.persist()
                 self.audit('handoff-receipt', shard_path=self.state['shard'], receipt_path=self.state['handoff_receipt'])
         # Reverify immutable handoff evidence before resumed exit or successor.
         with locked(self.common / 'retirement.lock'):
             self.private()
             remote_head = self.fetch_master()
-            if self.git('hash-object', '--path=' + self.state['shard'], str(self.records / self.state['shard'])) != self.state['shard_hash']:
+            if self.git('hash-object', str(self.records / self.state['shard'])) != self.state['shard_hash']:
                 raise Stop('preserved shard changed after receipt')
             try:
                 remote_shard = self.git('rev-parse', remote_head + ':' + self.state['shard'])

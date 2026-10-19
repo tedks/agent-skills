@@ -32,7 +32,7 @@ def build(root, session_id='', event_id=''):
             if session_id and len(session_id) >= 8 and session_id[:8].lower() in shard.name.lower():
                 raise ValueError('legacy session shard exists; reconcile deliberately')
             continue
-        if (session_id and isinstance(data, dict) and data.get('session_id') == session_id
+        if (session_id and session_id != 'unknown' and isinstance(data, dict) and data.get('session_id') == session_id
                 and data.get('event') != event_id):
             raise ValueError('session already has a preserved shard')
         if not isinstance(data, dict) or not isinstance(data.get('event'), str) or not re.fullmatch(r'[0-9a-f]{32}', data['event']):

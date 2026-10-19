@@ -2425,6 +2425,24 @@ class Tests(unittest.TestCase):
         self.assertIn('preserved shard changed after receipt', result.stderr)
         self.assertFalse((self.directory / 'spawn.json').exists())
 
+    def test_dirty_shared_attributes_do_not_change_remote_byte_verification(self):
+        self.actor('waiting-bad')
+        self.assertEqual(self.invoke('--waiting').returncode, 2)
+        path, _ = self.state()
+        shard = path.with_suffix('.shard')
+        data = json.loads(shard.read_text())
+        data['waiting'] = {'decision': 'Choose scope', 'owner': 'Operator'}
+        source = (json.dumps(data, indent=2) + '\n').replace('\n', '\r\n').encode()
+        shard.write_bytes(source)
+        (self.repo / '.gitattributes').write_text('waiting/*.md text eol=lf\n')
+        result = self.invoke('--waiting', '--resume', str(path))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        state = self.state()[1]
+        remote_bytes = subprocess.check_output(['git', '--git-dir', str(self.directory / 'remote.git'),
+                                                'show', 'master:' + state['shard']])
+        self.assertEqual(remote_bytes, source)
+        self.assertEqual((self.repo / '.gitattributes').read_text(), 'waiting/*.md text eol=lf\n')
+
     def test_resume_rereads_state_after_event_lock(self):
         self.actor('waiting-bad')
         self.invoke('--waiting')

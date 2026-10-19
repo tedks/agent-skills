@@ -276,6 +276,22 @@ class PushTests(unittest.TestCase):
         self.assertTrue(marker.exists())
         self.assertEqual(self.git('--git-dir', self.remote, 'rev-list', '--count', 'master'), '2')
 
+    def test_distinct_caller_events_may_share_unknown_session(self):
+        (self.source / 'waiting').mkdir()
+        (self.source / 'receipts').mkdir()
+        for event, name in (('a' * 32, 'first.md'), ('b' * 32, 'second.md')):
+            (self.source / 'waiting' / name).write_text(
+                '{"event":"' + event + '","session_id":"unknown"}\n')
+            (self.source / 'receipts' / (event + '.json')).write_text(
+                '{"event":"' + event + '","shard":"waiting/' + name + '","status":"retired"}\n')
+            result = self.publish('waiting/' + name, 'receipts/' + event + '.json',
+                                  extra=('--build-index', str(INDEX_BUILDER),
+                                         '--session-id', 'unknown', '--event-id', event))
+            self.assertEqual(result.returncode, 0, result.stderr)
+        index = self.git('--git-dir', self.remote, 'show', 'master:waiting/INDEX.md')
+        self.assertIn('[first.md]', index)
+        self.assertIn('[second.md]', index)
+
 
 if __name__ == '__main__':
     unittest.main()
