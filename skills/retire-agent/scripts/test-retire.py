@@ -2443,6 +2443,26 @@ class Tests(unittest.TestCase):
         self.assertEqual(remote_bytes, source)
         self.assertEqual((self.repo / '.gitattributes').read_text(), 'waiting/*.md text eol=lf\n')
 
+    def test_committed_remote_attributes_preserve_exact_shard_bytes(self):
+        (self.repo / '.gitattributes').write_text('waiting/*.md text eol=lf\n')
+        self.git('add', '.gitattributes')
+        self.git('commit', '-m', 'remote shard attributes')
+        self.git('push')
+        self.actor('waiting-bad')
+        self.assertEqual(self.invoke('--waiting').returncode, 2)
+        path, _ = self.state()
+        shard = path.with_suffix('.shard')
+        data = json.loads(shard.read_text())
+        data['waiting'] = {'decision': 'Choose scope', 'owner': 'Operator'}
+        source = (json.dumps(data, indent=2) + '\n').replace('\n', '\r\n').encode()
+        shard.write_bytes(source)
+        result = self.invoke('--waiting', '--resume', str(path))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        state = self.state()[1]
+        remote_bytes = subprocess.check_output(['git', '--git-dir', str(self.directory / 'remote.git'),
+                                                'cat-file', 'blob', 'master:' + state['shard']])
+        self.assertEqual(remote_bytes, source)
+
     def test_resume_rereads_state_after_event_lock(self):
         self.actor('waiting-bad')
         self.invoke('--waiting')

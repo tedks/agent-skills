@@ -93,10 +93,15 @@ for attempt in 1 2 3; do
     done
     if [[ -n $index_builder ]]; then
         "$index_builder" "$worktree" "$session_id" "$event_id"
-        git -C "$worktree" add -- "${paths[@]}" waiting/INDEX.md
-    else
-        git -C "$worktree" add -- "${paths[@]}"
+        git -C "$worktree" add -- waiting/INDEX.md
     fi
+    for path in "${paths[@]}"; do
+        # Preserve the source bytes even if the remote tree configures a clean filter.
+        oid=$(git -C "$worktree" hash-object -w --no-filters -- "$path")
+        mode=100644
+        [[ ! -x $source_root/$path ]] || mode=100755
+        git -C "$worktree" update-index --add --cacheinfo "$mode" "$oid" "$path"
+    done
     if git -C "$worktree" diff --cached --quiet; then
         printf '%s\n' "$base"
         exit 0

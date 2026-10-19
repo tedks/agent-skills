@@ -177,7 +177,10 @@ class Retirement:
         return checked(['git', '-C', self.repo, *args], strip=not raw)
 
     def git_bytes(self, *args):
-        result = subprocess.run(['git', '-C', str(self.repo), *args], capture_output=True, timeout=45)
+        try:
+            result = subprocess.run(['git', '-C', str(self.repo), *args], capture_output=True, timeout=45)
+        except (OSError, subprocess.TimeoutExpired) as error:
+            raise Stop('command failed: git') from error
         if result.returncode:
             raise Stop('command failed: git')
         return result.stdout
@@ -618,7 +621,7 @@ class Retirement:
         commit = result.stdout.strip()
         remote_head = self.fetch_master()
         for path in paths:
-            if (self.records / path).read_bytes() != self.git_bytes('show', remote_head + ':' + path):
+            if (self.records / path).read_bytes() != self.git_bytes('cat-file', 'blob', remote_head + ':' + path):
                 raise Stop('private remote shard verification failed')
         return commit
 
@@ -817,14 +820,14 @@ class Retirement:
                 save(receipt, {'event': event, 'shard': self.state['shard'], 'commit': shard_commit, 'author': data['author'], 'status': 'handoff-verified', 'verified_at': datetime.datetime.now(datetime.timezone.utc).isoformat()})
                 self.publish_locked(['receipts/' + receipt.name], index=True)
                 self.state['handoff_receipt'] = 'receipts/' + receipt.name
-                self.state['shard_hash'] = self.git('hash-object', str(canonical))
+                self.state['shard_hash'] = self.git('hash-object', '--no-filters', str(canonical))
                 self.persist()
                 self.audit('handoff-receipt', shard_path=self.state['shard'], receipt_path=self.state['handoff_receipt'])
         # Reverify immutable handoff evidence before resumed exit or successor.
         with locked(self.common / 'retirement.lock'):
             self.private()
             remote_head = self.fetch_master()
-            if self.git('hash-object', str(self.records / self.state['shard'])) != self.state['shard_hash']:
+            if self.git('hash-object', '--no-filters', str(self.records / self.state['shard'])) != self.state['shard_hash']:
                 raise Stop('preserved shard changed after receipt')
             try:
                 remote_shard = self.git('rev-parse', remote_head + ':' + self.state['shard'])
