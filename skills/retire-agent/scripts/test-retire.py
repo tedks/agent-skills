@@ -166,12 +166,12 @@ def terminal(directory, mode):
         if mode.startswith('claude'):
             if mode == 'claude-ghost' and event and not draft:
                 collapsed = 'Try "summarize the work"'
-            body = history + '\r\n' + '─' * 80 + '\r\n❯ ' + collapsed + '\r\n' + '─' * 80 + '\r\n'
+            body = history + '\r\n' + '─' * 80 + '\r\n❯\u00a0' + collapsed + '\r\n' + '─' * 80 + '\r\n'
         visible_marker = mode in ('composer', 'claude-composer') and draft.startswith('● RETIRE-DONE-'.encode())
         if visible_marker:
             body = history + '\r\n› \r\n' + draft.decode(errors='replace') + '\r\n\r\n  Test model · branch\r\n'
             if mode == 'claude-composer':
-                body = history + '\r\n' + '─' * 80 + '\r\n❯ \r\n' + draft.decode(errors='replace') + '\r\n' + '─' * 80 + '\r\n'
+                body = history + '\r\n' + '─' * 80 + '\r\n❯\u00a0\r\n' + draft.decode(errors='replace') + '\r\n' + '─' * 80 + '\r\n'
         if mode == 'modal':
             body = 'Do you trust the contents of this directory?\r\n  1. Yes\r\n  2. No\r\n'
         sys.stdout.write('\x1b[?2004h\x1b[2J\x1b[H' + body)
@@ -474,7 +474,9 @@ class Tests(unittest.TestCase):
         checker.chmod(0o700)
         self.roles = self.directory / 'ROLES.md'
         self.roles.write_text('Common to every hat: first record before action.\n')
-        self.env = dict(os.environ, SPAWN_TMUX_LABEL=self.label, RETIRE_REPO=str(self.repo), RETIRE_PRIVATE_CHECK=str(checker), RETIRE_SPAWN_SKILL=str(shared.parent), RETIRE_TEST_PYTHON=sys.executable)
+        config = self.directory / 'config.toml'
+        config.write_text('')
+        self.env = dict(os.environ, AGENT_SKILLS_CONFIG=str(config), SPAWN_TMUX_LABEL=self.label, RETIRE_REPO=str(self.repo), RETIRE_PRIVATE_CHECK=str(checker), RETIRE_SPAWN_SKILL=str(shared.parent), RETIRE_TEST_PYTHON=sys.executable)
         self.env.pop('SPAWN_TMUX_SOCKET', None)
         self.env.pop('TMUX', None)
 
@@ -564,6 +566,22 @@ class Tests(unittest.TestCase):
         self.assertEqual(len(paths), 1)
         return paths[0], json.loads(paths[0].read_text())
 
+    def staged(self, state, relative):
+        return self.repo / '.git' / 'retirements' / (state['id'] + '.publication') / relative
+
+    def remote_editor(self):
+        editor = self.directory / 'remote-editor'
+        if not editor.exists():
+            self.command('git', 'clone', str(self.directory / 'remote.git'), str(editor))
+            self.command('git', '-C', str(editor), 'config', 'user.email', 'test@example.invalid')
+            self.command('git', '-C', str(editor), 'config', 'user.name', 'Test')
+        else:
+            self.command('git', '-C', str(editor), 'pull', '--ff-only')
+        return editor
+
+    def editor_git(self, editor, *args):
+        return self.command('git', '-C', str(editor), *args)
+
     def observed(self):
         return json.loads((self.directory / 'terminal.json').read_text())
 
@@ -581,6 +599,7 @@ class Tests(unittest.TestCase):
         if before not in source:
             self.fail('INVALID-INSTRUMENTATION: missing stable anchor')
         (stage / 'retire.py').write_text(source.replace(before, after, 1))
+        shutil.copy2(HERE / 'build-index.py', stage / 'build-index.py')
         entry = stage / 'retire.sh'
         entry.write_bytes((HERE / 'retire.sh').read_bytes())
         entry.chmod(0o700)
@@ -834,9 +853,30 @@ class Tests(unittest.TestCase):
         self.assertLess(actions.index('handoff-receipt'), exit_send)
         self.assertTrue(any(record.get('receipt_type') == 'submitted' for record in ledger))
         self.assertFalse(any('payload' in record for record in ledger))
-        index = (self.repo / 'waiting' / 'INDEX.md').read_text()
+        index = self.git('show', 'origin/master:waiting/INDEX.md')
         self.assertIn('Session | Provider | Role | State | Last verified', index)
         self.assertIn('aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa | OpenAI | Utility | retired', index)
+        self.assertFalse((self.repo / 'waiting').exists())
+        self.assertFalse((self.repo / 'receipts').exists())
+
+    def test_drifted_shared_checkout_cannot_trap_shard_or_receipt(self):
+        self.actor()
+        (self.repo / 'local-stray').write_text('local commit\n')
+        self.git('add', 'local-stray')
+        self.git('commit', '-m', 'unrelated local commit')
+        (self.repo / 'seed').write_text('dirty shared file\n')
+        (self.repo / 'receipts').mkdir()
+        (self.repo / 'receipts' / 'unrelated.json').write_text('{"status":"local"}\n')
+        head = self.git('rev-parse', 'HEAD')
+        before = self.git('status', '--porcelain=v1')
+        result = self.invoke()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.git('rev-parse', 'HEAD'), head)
+        self.assertEqual(self.git('status', '--porcelain=v1'), before)
+        self.assertFalse((self.repo / 'waiting').exists())
+        path, state = self.state()
+        self.assertEqual(self.git('show', 'origin/master:' + state['shard']), path.with_suffix('.publication').joinpath(state['shard']).read_text().strip())
+        self.assertEqual(json.loads(self.git('show', 'origin/master:' + state['handoff_receipt']))['status'], 'retired')
 
     def test_stable_ordinary_offer_draft_is_co_submitted(self):
         self.actor('stable-draft')
@@ -1671,7 +1711,7 @@ class Tests(unittest.TestCase):
         self.actor('hold')
         self.invoke('--handoff', 'codex', 'test-model', '--roles', str(self.roles))
         path, state = self.state()
-        canonical = self.repo / state['shard']
+        canonical = self.staged(state, state['shard'])
         canonical.write_text(canonical.read_text() + ' ')
         before = self.observed()['pastes']
         result = self.invoke('--handoff', 'codex', 'test-model', '--roles', str(self.roles), '--resume', str(path))
@@ -1730,12 +1770,15 @@ class Tests(unittest.TestCase):
         self.actor()
         self.assertEqual(self.invoke().returncode, 0)
         self.assertTrue((waiting / 'INDEX.md').read_text().startswith(original))
-        self.assertIn('retire-agent:begin', (waiting / 'INDEX.md').read_text())
+        self.assertIn('retire-agent:begin', self.git('show', 'origin/master:waiting/INDEX.md'))
 
     def test_legacy_session_prefix_blocks_duplicate(self):
         waiting = self.repo / 'waiting'
         waiting.mkdir()
         (waiting / '2026-09-25-aaaaaaaa-lead.md').write_text('Existing recovery for this session.\n')
+        self.git('add', 'waiting')
+        self.git('commit', '-m', 'existing legacy shard')
+        self.git('push')
         self.actor()
         result = self.invoke()
         self.assertEqual(result.returncode, 2)
@@ -1762,6 +1805,9 @@ class Tests(unittest.TestCase):
         original = 'Unrelated human record.\n'
         outside.write_text(original)
         (waiting / 'INDEX.md').symlink_to(outside)
+        self.git('add', 'waiting/INDEX.md')
+        self.git('commit', '-m', 'unsafe remote index link')
+        self.git('push')
         self.actor()
         result = self.invoke()
         self.assertEqual(result.returncode, 2, result.stderr)
@@ -1808,10 +1854,12 @@ class Tests(unittest.TestCase):
             results.append((process.returncode, out, err))
         self.assertEqual(sorted(result[0] for result in results), [0, 2], results)
         self.assertTrue(any('session already has' in result[2] for result in results), results)
-        shards = [path for path in (self.repo / 'waiting').glob('*.md') if path.name != 'INDEX.md']
+        self.git('fetch', 'origin', 'master')
+        shards = [name for name in self.git('ls-tree', '-r', '--name-only', 'origin/master', '--', 'waiting').splitlines()
+                  if name.endswith('.md') and name != 'waiting/INDEX.md']
         self.assertEqual(len(shards), 1)
-        self.assertEqual(json.loads(shards[0].read_text())['session_id'], 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa')
-        self.git('cat-file', '-e', 'origin/master:waiting/' + shards[0].name)
+        self.assertEqual(json.loads(self.git('show', 'origin/master:' + shards[0]))['session_id'], 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa')
+        self.assertFalse((self.repo / 'waiting').exists())
 
     def test_independent_exit_after_handoff_remains_pending(self):
         self.actor()
@@ -1900,7 +1948,7 @@ class Tests(unittest.TestCase):
         self.actor('hold')
         self.invoke()
         path, state = self.state()
-        receipt = self.repo / state['handoff_receipt']
+        receipt = self.staged(state, state['handoff_receipt'])
         original = receipt.read_text()
         before = self.observed()['pastes']
         for malformed in ('[]', '{"event": []}', json.dumps({'event': state['id'], 'status': []})):
@@ -1913,19 +1961,23 @@ class Tests(unittest.TestCase):
         receipt.write_text(original)
         (self.directory / 'human-independent-exit').touch()
         self.wait_for(lambda: not Path('/proc/' + str(state['identity']['process']['pid'])).exists())
-        index = self.repo / 'waiting' / 'INDEX.md'
-        original_index = index.read_text()
-        bad = self.repo / 'waiting' / 'malformed.md'
-        claimed_receipt = self.repo / 'receipts' / ('e' * 32 + '.json')
+        original_index = self.git('show', 'origin/master:waiting/INDEX.md')
+        editor = self.remote_editor()
+        bad = editor / 'waiting' / 'malformed.md'
+        claimed_receipt = editor / 'receipts' / ('e' * 32 + '.json')
         claimed_receipt.write_text(json.dumps({'event': 'e' * 32, 'shard': 'waiting/malformed.md', 'status': 'pending-exit'}))
         for malformed in (json.dumps({'event': 'e' * 32, key: []}) for key in ('harness', 'session_id', 'role')):
             bad.write_text(malformed)
+            self.editor_git(editor, 'add', 'waiting/malformed.md', 'receipts/' + 'e' * 32 + '.json')
+            self.editor_git(editor, 'commit', '-m', 'malformed remote metadata')
+            self.editor_git(editor, 'push', 'origin', 'HEAD:master')
             result = self.invoke('--resume', str(path))
             self.assertEqual(result.returncode, 2, result.stderr)
             self.assertIn('malformed index shard', result.stderr)
             self.assertNotIn('Traceback', result.stderr)
             self.assertEqual(bad.read_text(), malformed)
-            self.assertEqual(index.read_text(), original_index)
+            self.git('fetch', 'origin', 'master')
+            self.assertEqual(self.git('show', 'origin/master:waiting/INDEX.md'), original_index)
         self.assertEqual(self.observed()['pastes'], before)
 
     def test_claude_literal_exit_real_terminal(self):
@@ -1947,7 +1999,7 @@ class Tests(unittest.TestCase):
         self.actor('push-reject')
         result = self.invoke()
         self.assertEqual(result.returncode, 2, result.stderr)
-        self.assertIn('command failed: git', result.stderr)
+        self.assertIn('private publication failed', result.stderr)
         self.assertEqual(self.observed()['pastes'], 1)
         path, state = self.state()
         self.assertEqual(state['offer']['status'], 'delivered')
@@ -1970,7 +2022,7 @@ class Tests(unittest.TestCase):
             result = self.invoke()
         self.assertEqual(result.returncode, 0, result.stderr)
         path, state = self.state()
-        canonical = self.repo / state['shard']
+        canonical = self.staged(state, state['shard'])
         self.assertEqual(canonical.read_bytes(), (self.directory / 'validated-snapshot').read_bytes())
         self.assertNotIn('UNVALIDATED CHANGED MISSION', self.git('show', 'origin/master:' + state['shard']))
 
@@ -2031,7 +2083,7 @@ class Tests(unittest.TestCase):
         with self.assertRaises(module.Stop):
             observer.ended()
 
-    def test_steward_dirty_index_is_not_published(self):
+    def test_steward_dirty_index_stays_local_while_remote_index_updates(self):
         waiting = self.repo / 'waiting'
         waiting.mkdir()
         index = waiting / 'INDEX.md'
@@ -2044,22 +2096,22 @@ class Tests(unittest.TestCase):
         index.write_text(edited)
         self.actor()
         result = self.invoke()
-        self.assertEqual(result.returncode, 2, result.stderr)
-        self.assertIn('steward-owned index edits', result.stderr)
+        self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(index.read_text(), edited)
-        self.assertEqual(self.git('show', 'origin/master:waiting/INDEX.md'), original.strip())
+        remote_index = self.git('show', 'origin/master:waiting/INDEX.md')
+        self.assertTrue(remote_index.startswith(original))
+        self.assertIn('retire-agent:begin', remote_index)
         self.assertEqual(self.observed()['pastes'], 1)
-        self.assertFalse((self.directory / 'exit-order.json').exists())
+        self.assertTrue((self.directory / 'exit-order.json').exists())
 
-    def test_unowned_local_commit_is_not_pushed(self):
+    def test_unowned_local_commit_does_not_block_or_get_pushed(self):
         self.actor()
         (self.repo / 'human-work').write_text('Not authorized for publication.\n')
         self.git('add', 'human-work')
         self.git('commit', '-m', 'unfinished human work')
         result = self.invoke()
-        self.assertEqual(result.returncode, 2, result.stderr)
-        self.assertIn('unowned unpushed commits', result.stderr)
-        self.assertEqual(self.observed()['pastes'], 0)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.observed()['pastes'], 1)
         self.assertNotIn('human-work', self.git('ls-tree', '-r', '--name-only', 'origin/master'))
 
     def test_prose_before_done_stays_pending(self):
@@ -2179,7 +2231,7 @@ class Tests(unittest.TestCase):
     def test_handoff_brief_reads_verified_blob(self):
         self.actor()
         before = "            brief = directory / (event + '-brief.txt')\n"
-        after = ('            (self.repo / self.state["shard"]).write_text("UNVERIFIED LOCAL TEXT")\n' + before)
+        after = ('            (self.records / self.state["shard"]).write_text("UNVERIFIED LOCAL TEXT")\n' + before)
         entry = self.instrument(before, after)
         with patch.dict(os.environ, {'RETIRE_TEST_SCRIPT': str(entry)}):
             result = self.invoke('--handoff', 'codex', 'model', '--roles', str(self.roles))
@@ -2203,12 +2255,16 @@ class Tests(unittest.TestCase):
         self.assertFalse((self.directory / 'exit-order.json').exists())
 
     def test_foreign_adjacent_temp_preserved(self):
-        self.actor()
-        waiting = self.repo / 'waiting'
-        waiting.mkdir()
-        foreign = waiting / 'INDEX.tmp'
+        self.actor('waiting-bad')
+        self.invoke('--waiting')
+        path, state = self.state()
+        shard = path.with_suffix('.shard')
+        data = json.loads(shard.read_text())
+        data['waiting'] = {'decision': 'fixture decision', 'owner': 'Operator'}
+        shard.write_text(json.dumps(data))
+        foreign = self.staged(state, 'receipts/' + state['id'] + '.tmp')
         foreign.write_text('foreign unfinished data')
-        result = self.invoke()
+        result = self.invoke('--waiting', '--resume', str(path))
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(foreign.read_text(), 'foreign unfinished data')
 
@@ -2285,13 +2341,16 @@ class Tests(unittest.TestCase):
         self.actor('hold')
         self.invoke('--handoff', 'codex', 'model', '--roles', str(self.roles))
         path, state = self.state()
-        receipt = self.repo / state['handoff_receipt']
+        receipt = self.staged(state, state['handoff_receipt'])
         data = json.loads(receipt.read_text())
         data['status'] = 'retirement-requested'
         receipt.write_text(json.dumps(data))
-        self.git('add', '--', state['handoff_receipt'])
-        self.git('commit', '-m', 'fixture remote tamper')
-        self.git('push')
+        editor = self.remote_editor()
+        (editor / state['handoff_receipt']).write_text(json.dumps(data))
+        self.editor_git(editor, 'add', '--', state['handoff_receipt'])
+        self.editor_git(editor, 'commit', '-m', 'fixture remote tamper')
+        self.editor_git(editor, 'push', 'origin', 'HEAD:master')
+        self.git('fetch', 'origin', 'master')
         (self.directory / 'human-independent-exit').touch()
         self.wait_for(lambda: not Path('/proc/' + str(state['identity']['process']['pid'])).exists())
         tampered = self.git('show', 'origin/master:' + state['handoff_receipt'])
@@ -2325,13 +2384,16 @@ class Tests(unittest.TestCase):
         self.actor('hold')
         self.invoke('--handoff', 'codex', 'model', '--roles', str(self.roles))
         path, state = self.state()
-        receipt = self.repo / state['handoff_receipt']
+        receipt = self.staged(state, state['handoff_receipt'])
         data = json.loads(receipt.read_text())
         data['commit'] = self.git('rev-list', '--max-parents=0', 'HEAD')
         receipt.write_text(json.dumps(data))
-        self.git('add', '--', state['handoff_receipt'])
-        self.git('commit', '-m', 'fixture mismatched commit')
-        self.git('push')
+        editor = self.remote_editor()
+        (editor / state['handoff_receipt']).write_text(json.dumps(data))
+        self.editor_git(editor, 'add', '--', state['handoff_receipt'])
+        self.editor_git(editor, 'commit', '-m', 'fixture mismatched commit')
+        self.editor_git(editor, 'push', 'origin', 'HEAD:master')
+        self.git('fetch', 'origin', 'master')
         (self.directory / 'human-independent-exit').touch()
         self.wait_for(lambda: not Path('/proc/' + str(state['identity']['process']['pid'])).exists())
         tampered = self.git('show', 'origin/master:' + state['handoff_receipt'])
@@ -2452,14 +2514,14 @@ class Tests(unittest.TestCase):
     def test_index_preflight_failure_preserves_legacy_then_resumes(self):
         index, original = self.legacy_index()
         self.actor()
-        before = '    def publication_preflight(self):\n'
-        after = (before + '        if self.state.get("shard") and not self.args.resume:\n'
-                 '            raise Stop("fixture-fetch-precondition-failure")\n')
+        before = '        result = run(command)\n'
+        after = ('        if index and self.state.get("shard") and not self.args.resume:\n'
+                 '            raise Stop("fixture-publication-precondition-failure")\n' + before)
         entry = self.instrument(before, after)
         with patch.dict(os.environ, {'RETIRE_TEST_SCRIPT': str(entry)}):
             result = self.invoke()
         self.assertEqual(result.returncode, 2, result.stderr)
-        self.assertIn('fixture-fetch-precondition-failure', result.stderr)
+        self.assertIn('fixture-publication-precondition-failure', result.stderr)
         self.assertEqual(index.read_text(), original)
         path, state = self.state()
         self.assertEqual(state['disposition'], 'DONE')
@@ -2473,14 +2535,15 @@ class Tests(unittest.TestCase):
         self.actor('commit-reject')
         result = self.invoke()
         self.assertEqual(result.returncode, 2, result.stderr)
-        self.assertIn('command failed: git', result.stderr)
-        self.assertTrue(index.read_text().startswith(original))
-        self.assertIn('<!-- retire-agent:begin -->', index.read_text())
+        self.assertIn('private publication failed', result.stderr)
+        self.assertEqual(index.read_text(), original)
+        self.assertEqual(self.git('show', 'origin/master:waiting/INDEX.md'), original.strip())
         path, state = self.state()
         (self.repo / '.git' / 'hooks' / 'pre-commit').unlink()
         result = self.invoke('--resume', str(path))
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertTrue(index.read_text().startswith(original))
+        self.assertEqual(index.read_text(), original)
+        self.assertIn('<!-- retire-agent:begin -->', self.git('show', 'origin/master:waiting/INDEX.md'))
 
     def test_foreign_json_metadata_is_not_claimed(self):
         index, original = self.legacy_index()
@@ -2492,6 +2555,9 @@ class Tests(unittest.TestCase):
         other_receipt.parent.mkdir(exist_ok=True)
         other_bytes = json.dumps({'event': 'e' * 32, 'status': 'pending-exit', 'shard': 'waiting/another-owner.md'})
         other_receipt.write_text(other_bytes)
+        self.git('add', 'waiting', 'receipts')
+        self.git('commit', '-m', 'foreign remote records')
+        self.git('push')
         self.actor()
         result = self.invoke()
         self.assertEqual(result.returncode, 0, result.stderr)
@@ -2499,18 +2565,19 @@ class Tests(unittest.TestCase):
         self.assertEqual(other_receipt.read_text(), other_bytes)
         for name, content in files.items():
             self.assertEqual((index.parent / name).read_text(), content)
-            self.assertNotIn('[' + name + ']', index.read_text())
+            self.assertNotIn('[' + name + ']', self.git('show', 'origin/master:waiting/INDEX.md'))
 
-    def test_tracked_deleted_index_is_not_recreated(self):
+    def test_locally_deleted_index_is_not_recreated_in_shared_checkout(self):
         index, original = self.legacy_index()
         index.unlink()
         self.actor()
         result = self.invoke()
-        self.assertEqual(result.returncode, 2, result.stderr)
-        self.assertIn('tracked INDEX deleted', result.stderr)
+        self.assertEqual(result.returncode, 0, result.stderr)
         self.assertFalse(index.exists())
-        self.assertEqual(self.git('show', 'origin/master:waiting/INDEX.md'), original.strip())
-        self.assertFalse((self.directory / 'exit-order.json').exists())
+        remote_index = self.git('show', 'origin/master:waiting/INDEX.md')
+        self.assertTrue(remote_index.startswith(original))
+        self.assertIn('retire-agent:begin', remote_index)
+        self.assertTrue((self.directory / 'exit-order.json').exists())
 
     def test_padded_final_marker_completes(self):
         self.actor('padded-marker')
@@ -2523,20 +2590,23 @@ class Tests(unittest.TestCase):
         self.actor('hold')
         self.invoke('--handoff', 'codex', 'model', '--roles', str(self.roles))
         path, state = self.state()
-        canonical = self.repo / state['shard']
+        editor = self.remote_editor()
+        canonical = editor / state['shard']
         verified = canonical.read_bytes()
         canonical.write_text('different shard bytes')
-        self.git('add', '--', state['shard'])
-        self.git('commit', '-m', 'fixture different shard snapshot')
-        wrong_commit = self.git('rev-parse', 'HEAD')
+        self.editor_git(editor, 'add', '--', state['shard'])
+        self.editor_git(editor, 'commit', '-m', 'fixture different shard snapshot')
+        wrong_commit = self.editor_git(editor, 'rev-parse', 'HEAD')
         canonical.write_bytes(verified)
-        receipt = self.repo / state['handoff_receipt']
+        receipt = self.staged(state, state['handoff_receipt'])
         data = json.loads(receipt.read_text())
         data['commit'] = wrong_commit
         receipt.write_text(json.dumps(data))
-        self.git('add', '--', state['shard'], state['handoff_receipt'])
-        self.git('commit', '-m', 'fixture restored shard with wrong receipt')
-        self.git('push')
+        (editor / state['handoff_receipt']).write_text(json.dumps(data))
+        self.editor_git(editor, 'add', '--', state['shard'], state['handoff_receipt'])
+        self.editor_git(editor, 'commit', '-m', 'fixture restored shard with wrong receipt')
+        self.editor_git(editor, 'push', 'origin', 'HEAD:master')
+        self.git('fetch', 'origin', 'master')
         (self.directory / 'human-independent-exit').touch()
         self.wait_for(lambda: not Path('/proc/' + str(state['identity']['process']['pid'])).exists())
         tampered = self.git('show', 'origin/master:' + state['handoff_receipt'])
@@ -2563,20 +2633,23 @@ class Tests(unittest.TestCase):
         self.actor('hold')
         self.invoke('--handoff', 'codex', 'model', '--roles', str(self.roles))
         path, state = self.state()
-        index = waiting / 'INDEX.md'
-        original_index = index.read_text()
-        self.assertIn('[other.md]', original_index)
         remote_index = self.git('show', 'origin/master:waiting/INDEX.md')
+        self.assertIn('[other.md]', remote_index)
         (self.directory / 'human-independent-exit').touch()
         self.wait_for(lambda: not Path('/proc/' + str(state['identity']['process']['pid'])).exists())
+        editor = self.remote_editor()
+        remote_receipt = editor / 'receipts' / (event + '.json')
         for malformed in ('not JSON', '[]', json.dumps({'status': 'retired'}), json.dumps({'event': [], 'status': 'retired'}), json.dumps({'event': 'f' * 32, 'status': 'retired', 'shard': 'waiting/other.md'})):
-            receipt.write_text(malformed)
+            remote_receipt.write_text(malformed)
+            self.editor_git(editor, 'add', 'receipts/' + event + '.json')
+            self.editor_git(editor, 'commit', '-m', 'malformed other receipt')
+            self.editor_git(editor, 'push', 'origin', 'HEAD:master')
             for _ in range(2):
                 result = self.invoke('--handoff', 'codex', 'model', '--roles', str(self.roles), '--resume', str(path))
                 self.assertEqual(result.returncode, 2, result.stderr)
                 self.assertIn('malformed retirement receipt', result.stderr)
-                self.assertEqual(receipt.read_text(), malformed)
-                self.assertEqual(index.read_text(), original_index)
+                self.assertEqual(remote_receipt.read_text(), malformed)
+                self.git('fetch', 'origin', 'master')
                 self.assertEqual(self.git('show', 'origin/master:waiting/INDEX.md'), remote_index)
                 self.assertFalse((self.directory / 'spawn.json').exists())
 

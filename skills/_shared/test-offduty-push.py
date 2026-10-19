@@ -9,6 +9,7 @@ import unittest
 
 
 HELPER = Path(__file__).with_name('offduty-push.sh')
+INDEX_BUILDER = Path(__file__).resolve().parents[1] / 'retire-agent/scripts/build-index.py'
 REAL_GIT = shutil.which('git')
 
 
@@ -26,6 +27,7 @@ class PushTests(unittest.TestCase):
                         GIT_AUTHOR_NAME='Fixture', GIT_AUTHOR_EMAIL='fixture@example.invalid',
                         GIT_COMMITTER_NAME='Fixture', GIT_COMMITTER_EMAIL='fixture@example.invalid',
                         TMPDIR=str(self.root))
+        self.env.pop('XDG_RUNTIME_DIR', None)
         self.git('init', '--bare', '-b', 'master', self.remote)
         seed = self.root / 'seed'
         self.git('clone', self.remote, seed)
@@ -73,11 +75,39 @@ class PushTests(unittest.TestCase):
                 self.assertNotEqual(result.returncode, 0)
         self.assertEqual(self.git('--git-dir', self.remote, 'rev-list', '--count', 'master'), '1')
 
+    def test_allow_path_is_explicit_and_source_symlink_is_rejected(self):
+        (self.source / 'other').mkdir()
+        (self.source / 'other' / 'note').write_text('approved exception\n')
+        self.assertNotEqual(self.publish('other/note').returncode, 0)
+        self.assertEqual(self.publish('other/note', extra=('--allow-path',)).returncode, 0)
+        (self.source / 'waiting').mkdir()
+        (self.source / 'waiting' / 'link').symlink_to(self.source / 'other' / 'note')
+        self.assertNotEqual(self.publish('waiting/link').returncode, 0)
+
+    def test_existing_remote_symlink_does_not_redirect_copy(self):
+        outside = self.root / 'outside'
+        outside.write_text('untouched\n')
+        (self.shared / 'waiting').mkdir()
+        (self.shared / 'waiting' / 'agent.md').symlink_to(outside)
+        self.git('-C', self.shared, 'add', 'waiting/agent.md')
+        self.git('-C', self.shared, 'commit', '-m', 'remote link')
+        self.git('-C', self.shared, 'push', 'origin', 'HEAD:master')
+        (self.source / 'waiting').mkdir()
+        (self.source / 'waiting' / 'agent.md').write_text('new bytes\n')
+        self.assertNotEqual(self.publish('waiting/agent.md').returncode, 0)
+        self.assertEqual(outside.read_text(), 'untouched\n')
+
     def test_retries_non_fast_forward_on_latest_remote_commit(self):
         (self.source / 'receipts').mkdir()
-        (self.source / 'receipts' / 'agent.json').write_text('{"ok":true}\n')
+        (self.source / 'waiting').mkdir()
+        (self.source / 'waiting' / 'agent.md').write_text('{"event":"' + 'a' * 32 + '","session_id":"agent"}\n')
+        (self.source / 'receipts' / ('a' * 32 + '.json')).write_text('{"event":"' + 'a' * 32 + '","shard":"waiting/agent.md","status":"retired"}\n')
         (self.racer / 'racer.txt').write_text('other writer\n')
-        self.git('-C', self.racer, 'add', 'racer.txt')
+        (self.racer / 'waiting').mkdir()
+        (self.racer / 'receipts').mkdir()
+        (self.racer / 'waiting' / 'other.md').write_text('{"event":"' + 'b' * 32 + '","session_id":"other"}\n')
+        (self.racer / 'receipts' / ('b' * 32 + '.json')).write_text('{"event":"' + 'b' * 32 + '","shard":"waiting/other.md","status":"retired"}\n')
+        self.git('-C', self.racer, 'add', 'racer.txt', 'waiting', 'receipts')
         self.git('-C', self.racer, 'commit', '-m', 'race')
         wrapper = self.root / 'bin'
         wrapper.mkdir()
@@ -93,11 +123,14 @@ class PushTests(unittest.TestCase):
         git_script.chmod(0o755)
         env = dict(self.env, PATH=str(wrapper) + os.pathsep + self.env['PATH'],
                    REAL_GIT=REAL_GIT, RACE_MARKER=str(marker), RACE_CLONE=str(self.racer))
-        result = self.publish('receipts/agent.json', env=env)
+        result = self.publish('receipts/' + 'a' * 32 + '.json', 'waiting/agent.md', env=env,
+                              extra=('--build-index', str(INDEX_BUILDER)))
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertTrue(marker.exists())
         self.assertEqual(self.git('--git-dir', self.remote, 'show', 'master:racer.txt'), 'other writer')
-        self.assertEqual(self.git('--git-dir', self.remote, 'show', 'master:receipts/agent.json'), '{"ok":true}')
+        index = self.git('--git-dir', self.remote, 'show', 'master:waiting/INDEX.md')
+        self.assertIn('[agent.md]', index)
+        self.assertIn('[other.md]', index)
         self.assertEqual(self.git('--git-dir', self.remote, 'rev-list', '--count', 'master'), '3')
 
 

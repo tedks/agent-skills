@@ -73,9 +73,8 @@ mutations = [
     ('Claude footer full row', "and re.fullmatch(r'✻ ", "and re.search(r'✻ ", 'test_claude_ui_footer_same_row_prose_is_pending'),
     ('Claude token row full suffix', "any(re.fullmatch(r' +[0-9]+ tokens', status) for status in claude_statuses)", 'True', 'test_claude_ui_footer_partial_tokens_is_pending'),
     ('loaded object', 'if not isinstance(record, dict):', 'if False:', 'test_malformed_state_and_history_preserved'),
-    ('receipt before exit', ["self.publish_locked(['receipts/' + receipt.name], index=True)", "record = receipt_record(self.git('show', 'origin/master:' + self.state['handoff_receipt']))"], ['pass  # Withhold verified receipt publication until after exit.', "record = receipt_record((self.repo / self.state['handoff_receipt']).read_text())"], 'test_retire_exit_to_shell_and_path_only_commit'),
+    ('receipt before exit', ["self.publish_locked(['receipts/' + receipt.name], index=True)", "record = receipt_record(self.git('show', 'origin/master:' + self.state['handoff_receipt']))"], ['pass  # Withhold verified receipt publication until after exit.', "record = receipt_record((self.records / self.state['handoff_receipt']).read_text())"], 'test_retire_exit_to_shell_and_path_only_commit'),
     ('shard object', 'if not isinstance(data, dict):', 'if False:', 'test_nonobject_shard_is_controlled_failure'),
-    ('index symlink', 'if index_path.is_symlink() or (index_path.exists() and not index_path.is_file()):', 'if False:', 'test_index_symlink_preserves_outside_file'),
     ('private origin', "if run([checker, url]).returncode:", 'if False:', 'test_private_and_missing_remotes_before_send'),
     ('process identity', "if self.identity() != self.state['identity']:", 'if False:', 'test_changed_identity_and_malformed_state'),
     ('exit gate', 'while not (self.ended() and self.fresh_exit_notice(session_id)):', 'while False:', 'test_no_successor_before_exit'),
@@ -85,27 +84,20 @@ mutations = [
     ('lingering core', "for core in original.get('cores', []):", 'for core in []:', 'test_wrapper_exit_waits_for_lingering_core'),
     ('pinned socket', "self.tmux = ['tmux', '-S', state['socket']]", 'pass  # Caller environment selects the wrong server.', 'test_resume_uses_pinned_socket'),
     ('server failure', 'except PaneAbsent:', 'except Stop:', 'test_socket_failure_is_not_pane_disappearance'),
-    ('steward index ownership', '(tracked and outside_section(original) != outside_section(baseline) and not owned_write)', 'False', 'test_steward_dirty_index_is_not_published'),
-    ('commit ownership', '        self.require_owned_commits()', '        pass  # Push unowned commits.', 'test_unowned_local_commit_is_not_pushed'),
     ('composer exclusion', "rows = self.screen.read_response_rows(self.args.pane, self.state['socket'])", "rows = checked(self.tmux + ['capture-pane', '-p', '-t', self.args.pane]).splitlines()", 'test_claude_composer_done_does_not_complete'),
     ('last polling interval', 'disposition = self.observe()  # Include the final polling interval.', 'pass', 'test_last_poll_interval_is_observed'),
     ('recorded DONE', "if ambiguous_offer or self.state.get('disposition') != 'DONE':", 'if True:', 'test_saved_done_survives_cleared_screen'),
     ('initial remote receipt', "self.publish(['receipts/' + receipt.name])  # Local presence is not a remote receipt.", 'pass', 'test_failed_initial_push_is_verified_before_resumed_offer'),
-    ('immutable successor brief', "preserved = self.git('show', self.state['shard_hash'], raw=True)", "preserved = (self.repo / self.state['shard']).read_text()", 'test_handoff_brief_reads_verified_blob'),
+    ('immutable successor brief', "preserved = self.git('show', self.state['shard_hash'], raw=True)", "preserved = (self.records / self.state['shard']).read_text()", 'test_handoff_brief_reads_verified_blob'),
     ('nonblocking shard snapshot', 'descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)', 'descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)', 'test_pending_fifo_swap_never_blocks'),
     ('receipt handoff status', "if record.get('status') not in ('handoff-verified', 'pending-exit', 'retired'):", 'if False:', 'test_remote_requested_receipt_cannot_authorize_successor'),
     ('owned atomic temporary', "descriptor, name = tempfile.mkstemp(prefix='.' + path.name + '-', suffix='.tmp', dir=path.parent)", "descriptor, name = os.open(path.with_suffix('.tmp'), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600), str(path.with_suffix('.tmp'))", 'test_foreign_adjacent_temp_preserved'),
     ('locked resume reread', 'self.load_resume()  # Another controller may have advanced state before this lock.', 'pass  # Trust stale pre-lock state.', 'test_resume_rereads_state_after_event_lock'),
     ('completion suffix', 'if tail and not (codex_footer or claude_footer):', 'if False:', 'test_codex_marker_suffix_is_not_completion'),
     ('pending evidence authority', "if self.state.get('handoff_receipt') and not getattr(self, 'evidence_verified', False):", 'if False:', 'test_remote_requested_receipt_cannot_authorize_successor'),
-    ('index preflight ordering', ['self.publication_preflight()  # Preconditions before any INDEX write.', "        if self.git('diff', 'HEAD', '--', *paths)"], ['pass  # Preconditions delayed until after index write.', "        self.publication_preflight()\n        if self.git('diff', 'HEAD', '--', *paths)"], 'test_index_preflight_failure_preserves_legacy_then_resumes'),
-    ('owned tracked index retry', "self.state['index_outside'] = hashlib.sha256(outside_section(updated).encode()).hexdigest()", 'pass  # Lose ownership of our tracked legacy index write.', 'test_own_legacy_index_write_recovers_after_commit_hook_failure'),
-    ('tracked index deletion', 'if tracked and not index_path.exists():', 'if False:', 'test_tracked_deleted_index_is_not_recreated'),
     ('padded completion marker', 'rows[position].rstrip()', 'rows[position]', 'test_padded_final_marker_completes'),
     ('receipt missing path', ['if evidence.returncode:', "if evidence.stdout.strip() != self.state['shard_hash']:"], ['if False:', 'if False:'], 'test_remote_bad_commit_receipt_never_self_heals'),
     ('receipt wrong blob', "if evidence.stdout.strip() != self.state['shard_hash']:", 'if False:', 'test_wrong_blob_receipt_never_self_heals'),
-    ('index receipt identity', "if record['event'] != data['event']:", 'if False:', 'test_corrupt_other_receipt_preserves_generated_index'),
-    ('corrupt index receipt', "                record = receipt_record(receipt_text)", '                try:\n                    record = json.loads(receipt_text)\n                except ValueError:\n                    continue\n                if not isinstance(record, dict):\n                    continue', 'test_corrupt_other_receipt_preserves_generated_index'),
 ]
 for label, before, after, test in mutations:
     if len(sys.argv) > 1 and label not in sys.argv[1:]:
@@ -121,6 +113,7 @@ for label, before, after, test in mutations:
         directory.mkdir(parents=True)
         shutil.copytree(HERE.parents[1] / '_shared', directory.parents[1] / '_shared')
         (directory / 'retire.py').write_text(mutated)
+        shutil.copy2(HERE / 'build-index.py', directory / 'build-index.py')
         entry = directory / 'retire.sh'
         entry.write_bytes((HERE / 'retire.sh').read_bytes())
         entry.chmod(0o700)

@@ -135,18 +135,18 @@ matching published Claude/Codex model-selection and guarded literal-Claude-exit
 contracts. No pane or unsent human text is saved.
 
 Git transactions hold `.git/retirement.lock` (the common directory for
-worktrees), around duplicate-session validation, canonical shard creation and
-publication together; a per-event lock protects longer orchestration.
-Commits are path-only. Uncommitted steward edits outside the generated INDEX
-section and unowned unpushed commits block publication. Retirement commits
-are owned only with private ledger evidence of their SHA and exact paths.
-Noncooperating Git actors still require coordination. Behind or diverged
-master requires deliberate reconciliation; failed push blocks exit.
-Publication preconditions run before INDEX writes; exact script-owned
-outside-section hashes allow recovery after a later Git hook failure. A
-HEAD-tracked INDEX deletion stops rather than recreating steward metadata.
+worktrees) around duplicate-session validation and publication; a per-event
+lock protects longer orchestration. Shards and receipts are staged under the
+event's private `.git/retirements/<event>.publication/` directory, not written
+to the shared checkout. The helper creates a disposable detached worktree at
+fetched `origin/master`, copies only the event's named paths, regenerates the
+bounded INDEX section against that current tree, commits and pushes. A
+non-fast-forward push retries from fresh origin at most three times. A failed
+push blocks exit and keeps the event's staging files for deliberate resume.
 Foreign JSON records are indexed only after a matching receipt claims their
-event and path; malformed claimed metadata stops with its bytes preserved.
+event and path; malformed claimed remote metadata stops without changing the
+shared checkout. The recovery procedure for an already drifted shared tree is
+in [README.md](../README.md).
 Verify the shard blob on fetched private `origin/master`, publish its unique
 ledger receipt, then request bare harness exit through the shared sender.
 Claude `/exit` uses `--literal-exit`; Codex `/exit` uses `--typed-command`.

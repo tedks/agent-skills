@@ -18,7 +18,7 @@ The sender must provide stable ordinary draft co-submission and guarded typed
 Codex / literal Claude exits. Configure `off_duty.path`, optional expected `off_duty.remote`, and
 `doctrine.roles_path` in the [shared configuration](../_shared/configuration.md).
 The generic handoff path is `<projects_root>/agent-handoffs`; the existing
-repository must use `master` and a verified private `origin`. No remote is
+repository must have a verified private `origin` with `master`. No remote is
 invented or cloned. Handoff mode requires a configured roles file or `--roles`.
 
 The controller resolves the pinned peer's provider-native session ID before
@@ -64,8 +64,11 @@ Changing input, a modal, missing evidence, or changed process identity defers
 retirement.
 
 Shards belong only in a private repository. Preserve one file per session,
-serialize Git transactions, and verify the shard on the private remote before
-recording its receipt and requesting exit. Keep operational recovery separate
+serialize publication, and use the shared `offduty-push.sh` helper from a
+private event staging directory; it commits from a temporary worktree at
+fetched `origin/master`, never from the shared checkout. Verify the shard
+on fetched `origin/master` before recording its receipt and requesting exit.
+Keep operational recovery separate
 from personal thanks. A provider-native resume handle comes last and must not
 be required to reconstruct the work.
 
@@ -118,6 +121,9 @@ the default is this checkout's sibling spawn-agent. The binding readers'
 standalone suites live under `../_shared/native/tests/`; run each `test-*.py`
 with Python, plus `--mutation-check`. Dotfiles' MCP wiring tests remain in
 that repository and require the MCP SDK.
+Run `python3 ../_shared/test-offduty-push.py` for the bare-remote push and
+non-fast-forward retry contract. The shared-checkout repair procedure is in
+[README.md](README.md).
 
 `scripts/test-retire-native.py` is an opt-in model-token test. Pass `--worktree`
 naming an exclusively owned, clean disposable Git directory, `--evidence`

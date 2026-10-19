@@ -5,15 +5,17 @@ set -euo pipefail
 repo=
 source_root=
 message=
+index_builder=
 allow_path=0
 paths=()
 while (($#)); do
     case $1 in
-        --repo|--source-root|-m)
+        --repo|--source-root|--build-index|-m)
             (($# >= 2)) || { echo "missing value for $1" >&2; exit 2; }
             case $1 in
                 --repo) repo=$2 ;;
                 --source-root) source_root=$2 ;;
+                --build-index) index_builder=$2 ;;
                 -m) message=$2 ;;
             esac
             shift 2 ;;
@@ -28,6 +30,7 @@ done
     exit 2
 }
 [[ -n $source_root ]] || source_root=$repo
+[[ -z $index_builder || -x $index_builder ]] || { echo 'index builder unavailable' >&2; exit 2; }
 repo=$(realpath -- "$repo")
 source_root=$(realpath -- "$source_root")
 [[ -d $source_root ]] || { echo 'source root missing' >&2; exit 2; }
@@ -35,7 +38,7 @@ source_root=$(realpath -- "$source_root")
     echo 'repo must be a working tree' >&2; exit 2;
 }
 for path in "${paths[@]}"; do
-    [[ $path != /* && $path != *//* && $path != */ && $path != .* && $path != */.* && $path != *'/../'* && $path != *'/./'* ]] || {
+    [[ $path != /* && $path != *//* && $path != */ && $path != .* && $path != */.* && $path != *'/../'* && $path != *'/./'* && $path != *$'\n'* && $path != *$'\r'* && $path != *$'\t'* ]] || {
         echo "unsafe path: $path" >&2; exit 2;
     }
     if (( ! allow_path )); then
@@ -47,15 +50,20 @@ for path in "${paths[@]}"; do
     [[ $canonical == "$source_root/"* ]] || { echo "source escapes root: $path" >&2; exit 2; }
 done
 
-scratch_base=${XDG_RUNTIME_DIR:-${TMPDIR:-/tmp}}
+scratch_base=${XDG_RUNTIME_DIR:-${TMPDIR:-${XDG_CACHE_HOME:-}}}
 [[ -d $scratch_base && -w $scratch_base ]] || { echo 'scratch directory unavailable' >&2; exit 2; }
 scratch=$(mktemp -d "$scratch_base/offduty-push.XXXXXXXX")
 worktree=$scratch/worktree
 cleanup() {
+    status=$?
     if [[ -e $worktree/.git ]]; then
-        git -C "$repo" worktree remove --force "$worktree" >&2 || true
+        if ! git -C "$repo" worktree remove --force "$worktree" >&2; then
+            echo "temporary worktree cleanup failed: $worktree" >&2
+            exit 1
+        fi
     fi
-    rmdir -- "$scratch" 2>/dev/null || true
+    rm -rf -- "$scratch"  # This invocation created this exact mktemp directory.
+    exit "$status"
 }
 trap cleanup EXIT
 
@@ -74,7 +82,12 @@ for attempt in 1 2 3; do
         mkdir -p -- "$(dirname -- "$worktree/$path")"
         cp -- "$source_root/$path" "$worktree/$path"
     done
-    git -C "$worktree" add -- "${paths[@]}"
+    if [[ -n $index_builder ]]; then
+        "$index_builder" "$worktree"
+        git -C "$worktree" add -- "${paths[@]}" waiting/INDEX.md
+    else
+        git -C "$worktree" add -- "${paths[@]}"
+    fi
     if git -C "$worktree" diff --cached --quiet; then
         printf '%s\n' "$base"
         exit 0

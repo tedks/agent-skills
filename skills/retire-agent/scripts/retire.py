@@ -541,13 +541,14 @@ class Retirement:
             raise Stop('lessons must be one to five lines')
         if data['session_id'] == 'unknown' and expected != 'caller':
             raise Stop('agent must establish its own session identity')
-        for previous in (self.repo / 'waiting').glob('*.md'):
-            if previous.name == 'INDEX.md':
+        self.git('fetch', 'origin', 'master')
+        for name in self.git('ls-tree', '-r', '--name-only', 'origin/master', '--', 'waiting').splitlines():
+            if name == 'waiting/INDEX.md' or not name.endswith('.md'):
                 continue
             try:
-                prior = json.loads(previous.read_text())
+                prior = json.loads(self.git('show', 'origin/master:' + name))
             except ValueError:
-                if len(data['session_id']) >= 8 and data['session_id'][:8].lower() in previous.name.lower():
+                if len(data['session_id']) >= 8 and data['session_id'][:8].lower() in Path(name).name.lower():
                     raise Stop('legacy session shard exists; reconcile deliberately')
                 continue
             if not isinstance(prior, dict):
@@ -577,111 +578,26 @@ class Retirement:
 
     def publish(self, paths, index=False):
         with locked(self.common / 'retirement.lock'):
-            self.publish_locked(paths, index)
+            return self.publish_locked(paths, index)
 
     def publish_locked(self, paths, index=False):
-        self.publication_preflight()  # Preconditions before any INDEX write.
+        self.private()
+        helper = Path(__file__).resolve().parents[2] / '_shared/offduty-push.sh'
+        command = [helper, '--repo', self.repo, '--source-root', self.records]
         if index:
-            entries = ['| Shard | Session | Provider | Role | State | Last verified |\n| --- | --- | --- | --- | --- | --- |\n']
-            def cell(value):
-                return str(value).replace('|', '/').replace('\n', ' ')
-            for path in sorted((self.repo / 'waiting').glob('*.md')):
-                if path.name == 'INDEX.md':
-                    continue
-                try:
-                    data = json.loads(path.read_text())
-                except ValueError:
-                    continue  # Non-JSON legacy metadata remains outside our section.
-                if not isinstance(data, dict) or not isinstance(data.get('event'), str) or not re.fullmatch(r'[0-9a-f]{32}', data['event']):
-                    continue
-                receipt = self.repo / 'receipts' / (data['event'] + '.json')
-                if not receipt.exists():
-                    continue
-                receipt_text = receipt.read_text()
-                record = receipt_record(receipt_text)
-                if record['event'] != data['event']:
-                    raise Stop('malformed retirement receipt event identity')
-                if record.get('shard') != 'waiting/' + path.name:
-                    continue  # Existing external/legacy metadata has another owner.
-                if any(key in data and not isinstance(data[key], str) for key in ('harness', 'session_id', 'role')):
-                    raise Stop('malformed index shard metadata')
-                status = record['status']
-                provider = {'codex': 'OpenAI', 'claude': 'Anthropic', 'agy': 'Google'}.get(data.get('harness'), 'unknown')
-                values = (data.get('session_id', 'unknown'), provider, data.get('role', 'unknown'), status, record.get('verified_at', 'unknown'))
-                entries.append(f'| [{path.name}]({path.name}) | ' + ' | '.join(cell(value) for value in values) + ' |\n')
-            index_path = self.repo / 'waiting' / 'INDEX.md'
-            if index_path.is_symlink() or (index_path.exists() and not index_path.is_file()):
-                raise Stop('unsafe index path; preserve for reconciliation')
-            tracked = run(['git', '-C', self.repo, 'cat-file', '-e', 'HEAD:waiting/INDEX.md']).returncode == 0
-            if tracked and not index_path.exists():
-                raise Stop('tracked INDEX deleted; preserve steward metadata before publication')
-            begin, end = '<!-- retire-agent:begin -->', '<!-- retire-agent:end -->'
-            original = index_path.read_text() if index_path.exists() else '# Waiting and retired sessions\n'
-            def outside_section(text):
-                if begin not in text and end not in text:
-                    return text
-                if text.count(begin) != 1 or text.count(end) != 1 or text.index(begin) >= text.index(end):
-                    raise Stop('malformed generated index section; preserve for reconciliation')
-                return text[:text.index(begin)] + text[text.index(end) + len(end):]
-            if index_path.exists():
-                baseline = self.git('show', 'HEAD:waiting/INDEX.md', raw=True) if tracked else '# Waiting and retired sessions\n'
-                owned_write = self.state.get('index_outside') == hashlib.sha256(outside_section(original).encode()).hexdigest()
-                if (not tracked and not owned_write) or (tracked and outside_section(original) != outside_section(baseline) and not owned_write):
-                    raise Stop('steward-owned index edits are uncommitted; preserve before publication')
-            section = begin + '\n' + ''.join(entries) + end
-            if begin in original or end in original:
-                if original.count(begin) != 1 or original.count(end) != 1 or original.index(begin) >= original.index(end):
-                    raise Stop('malformed generated index section; preserve for reconciliation')
-                updated = original[:original.index(begin)] + section + original[original.index(end) + len(end):]
-            else:
-                updated = original + '\n\n' + section + '\n'
-            self.state['index_outside'] = hashlib.sha256(outside_section(updated).encode()).hexdigest()
-            self.persist()
-            atomic_bytes(index_path, updated.encode())
-            paths = [*paths, 'waiting/INDEX.md']
-        if self.git('diff', 'HEAD', '--', *paths) or any(not run(['git', '-C', self.repo, 'ls-files', '--error-unmatch', p]).returncode == 0 for p in paths):
-            self.git('add', '--', *paths)
-            self.git('commit', '--only', '-m', 'Preserve retirement ' + self.state['id'], '--', *paths)
-            commit = self.git('rev-parse', 'HEAD')
-            changed = self.git('diff-tree', '--no-commit-id', '--name-only', '-r', commit).splitlines()
-            self.audit('retirement-commit', commit=commit, paths=changed)
-        self.require_owned_commits()
-        self.git('push', 'origin', 'HEAD:master')
+            command += ['--build-index', Path(__file__).with_name('build-index.py')]
+        command += [*paths, '-m', 'Preserve retirement ' + self.state['id']]
+        result = run(command)
+        if result.returncode or not re.fullmatch(r'[0-9a-f]{40,64}', result.stdout.strip()):
+            raise Stop('private publication failed: ' + result.stderr.strip()[-500:])
+        commit = result.stdout.strip()
         self.git('fetch', 'origin', 'master')
         for path in paths:
-            local = self.git('hash-object', path)
+            local = self.git('hash-object', str(self.records / path))
             remote = self.git('rev-parse', 'origin/master:' + path)
             if local != remote:
                 raise Stop('private remote shard verification failed')
-
-    def publication_preflight(self):
-        self.private()
-        if self.git('branch', '--show-current') != 'master':
-            raise Stop('private records checkout must be on master')
-        self.git('fetch', 'origin', 'master')
-        if run(['git', '-C', self.repo, 'merge-base', '--is-ancestor', 'origin/master', 'HEAD']).returncode:
-            raise Stop('private master is behind or diverged; reconcile deliberately')
-        self.require_owned_commits()
-
-    def require_owned_commits(self):
-        pending = self.git('rev-list', 'origin/master..HEAD').splitlines()
-        if not pending:
-            return
-        owned = {}
-        for ledger in self.path.parent.glob('*.jsonl'):
-            for line in ledger.read_text().splitlines():
-                record = object_record(line, 'attempt ledger')
-                if record.get('action') == 'retirement-commit':
-                    if (not isinstance(record.get('commit'), str) or not isinstance(record.get('paths'), list)
-                            or any(not isinstance(path, str) for path in record['paths'])):
-                        raise Stop('malformed retirement commit ownership')
-                    owned[record['commit']] = record
-        for commit in pending:
-            record = owned.get(commit)
-            changed = set(self.git('diff-tree', '--no-commit-id', '--name-only', '-r', commit).splitlines())
-            if (not record or self.git('show', '-s', '--format=%s', commit) != 'Preserve retirement ' + str(record.get('event'))
-                    or changed != set(record['paths'])):
-                raise Stop('unowned unpushed commits; publish them deliberately before retirement')
+        return commit
 
     def ended(self):
         original = self.state['identity']['process']
@@ -798,7 +714,12 @@ class Retirement:
             self.load_resume()  # Another controller may have advanced state before this lock.
         self.event_owned = True
         event = self.state['id']
-        receipt = self.repo / 'receipts' / (event + '.json')
+        self.records = directory / (event + '.publication')
+        if self.records.is_symlink():
+            raise Stop('unsafe event publication directory')
+        self.records.mkdir(mode=0o700, exist_ok=True)
+        self.records.chmod(0o700)
+        receipt = self.records / 'receipts' / (event + '.json')
         receipt.parent.mkdir(mode=0o700, exist_ok=True)
         if receipt.parent.is_symlink():
             raise Stop('receipt directory must not be a symlink')
@@ -858,7 +779,7 @@ class Retirement:
                     disposition = self.state.get('disposition')
                     if disposition not in ('DONE', 'DECLINED') or not self.codex_final_marker('RETIRE-' + disposition + '-' + event):
                         raise Stop('native final marker no longer current before handoff publication')
-                waiting = self.repo / 'waiting'
+                waiting = self.records / 'waiting'
                 waiting.mkdir(mode=0o700, exist_ok=True)
                 if waiting.is_symlink():
                     raise Stop('waiting directory must not be a symlink')
@@ -867,20 +788,20 @@ class Retirement:
                     raise Stop('canonical shard already exists with different content')
                 atomic_bytes(canonical, content)
                 self.state['shard'] = 'waiting/' + canonical.name
-                self.publish_locked([self.state['shard']], index=True)
-                receipt = self.repo / 'receipts' / (event + '.json')
+                shard_commit = self.publish_locked([self.state['shard']], index=True)
+                receipt = self.records / 'receipts' / (event + '.json')
                 receipt.parent.mkdir(mode=0o700, exist_ok=True)
-                save(receipt, {'event': event, 'shard': self.state['shard'], 'commit': self.git('rev-parse', 'origin/master'), 'author': data['author'], 'status': 'handoff-verified', 'verified_at': datetime.datetime.now(datetime.timezone.utc).isoformat()})
+                save(receipt, {'event': event, 'shard': self.state['shard'], 'commit': shard_commit, 'author': data['author'], 'status': 'handoff-verified', 'verified_at': datetime.datetime.now(datetime.timezone.utc).isoformat()})
                 self.publish_locked(['receipts/' + receipt.name], index=True)
                 self.state['handoff_receipt'] = 'receipts/' + receipt.name
-                self.state['shard_hash'] = self.git('rev-parse', 'origin/master:' + self.state['shard'])
+                self.state['shard_hash'] = self.git('hash-object', str(canonical))
                 self.persist()
                 self.audit('handoff-receipt', shard_path=self.state['shard'], receipt_path=self.state['handoff_receipt'])
         # Reverify immutable handoff evidence before resumed exit or successor.
         with locked(self.common / 'retirement.lock'):
             self.private()
             self.git('fetch', 'origin', 'master')
-            if self.git('hash-object', self.state['shard']) != self.state['shard_hash'] or self.git('rev-parse', 'origin/master:' + self.state['shard']) != self.state['shard_hash']:
+            if self.git('hash-object', str(self.records / self.state['shard'])) != self.state['shard_hash'] or self.git('rev-parse', 'origin/master:' + self.state['shard']) != self.state['shard_hash']:
                 raise Stop('preserved shard changed after receipt')
             record = receipt_record(self.git('show', 'origin/master:' + self.state['handoff_receipt']))
             if record.get('event') != event or record.get('shard') != self.state['shard'] or not re.fullmatch(r'[0-9a-f]{40,64}', record.get('commit', '')):
@@ -924,7 +845,7 @@ class Retirement:
         self.exit_verified = True  # Current process+notice pair, never loaded state authority.
         self.state['status'] = 'retired'
         self.persist()
-        receipt = self.repo / self.state['handoff_receipt']
+        receipt = self.records / self.state['handoff_receipt']
         record = receipt_record(receipt.read_text())
         record['status'] = 'retired'
         record['process_exit'] = 'original-process-and-recorded-native-core-ended'
@@ -964,7 +885,7 @@ class Retirement:
             return  # Preserve historical remote evidence; cached/forged state cannot republish it.
         if self.state.get('handoff_receipt') and not getattr(self, 'evidence_verified', False):
             return  # Revalidation failure must not launder cached handoff into a new receipt.
-        receipt = self.repo / 'receipts' / (self.state['id'] + '.json')
+        receipt = self.records / 'receipts' / (self.state['id'] + '.json')
         if receipt.exists():
             record = receipt_record(receipt.read_text())
             record['status'] = 'retired' if self.exit_verified else ('pending-exit' if self.state.get('handoff_receipt') else 'pending-handoff')
