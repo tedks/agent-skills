@@ -1044,7 +1044,7 @@ class ControlTests(unittest.TestCase):
     def test_receipt_explicit_evidence(self):
         result = self.control.record_checkpoint(self.evidence)
         self.assertIn('shard_bytes_in_exact_commit', result['verified'])
-        self.assertIn('remote_privacy_and_push', result['attested_not_verified'])
+        self.assertIn('remote_privacy', result['attested_not_verified'])
         self.assertEqual(0o600, (self.control.directory / ('checkpoint-' + result['receipt_id'] + '.json')).stat().st_mode & 0o777)
         for key in ('private_storage_attested', 'obligations_preserved', 'pause_state_preserved', 'active_inventory_reference', 'pause_state_reference', 'authority', 'resources_disposition'):
             bad = dict(self.evidence)
@@ -1063,6 +1063,43 @@ class ControlTests(unittest.TestCase):
         self.git('remote', 'add', 'origin', 'https://example.invalid/private.git')
         with self.assertRaises(h.ControlError):
             h.verify_checkpoint(self.evidence)
+
+    def test_remote_presence_requires_fetched_origin_master(self):
+        remote = self.root / 'remote.git'
+        subprocess.run(['git', 'init', '--bare', str(remote)], check=True, capture_output=True)
+        self.git('remote', 'add', 'origin', str(remote))
+        self.git('push', 'origin', 'HEAD:master')
+        self.shard.write_text('new local-only checkpoint\n')
+        self.git('add', 'handoff.md')
+        self.git('commit', '-qm', 'local-only shard')
+        evidence = {**self.evidence, 'sha256': hashlib.sha256(self.shard.read_bytes()).hexdigest(),
+                    'commit': self.git('rev-parse', 'HEAD').strip(),
+                    'push_attestation': 'pushed_private_remote'}
+        with self.assertRaisesRegex(h.ControlError, 'shard_not_on_origin_master'):
+            h.verify_checkpoint(evidence)
+        self.git('push', 'origin', 'HEAD:master')
+        self.assertIn('remote_presence', h.verify_checkpoint(evidence)['verified'])
+
+    def test_remote_presence_rejects_stale_tracking_ref_and_changed_bytes(self):
+        remote = self.root / 'remote.git'
+        racer = self.root / 'racer'
+        subprocess.run(['git', 'init', '--bare', str(remote)], check=True, capture_output=True)
+        self.git('remote', 'add', 'origin', str(remote))
+        self.git('push', 'origin', 'HEAD:master')
+        evidence = {**self.evidence, 'push_attestation': 'pushed_private_remote'}
+        self.assertIn('remote_presence', h.verify_checkpoint(evidence)['verified'])
+        subprocess.run(['git', 'clone', str(remote), str(racer)], check=True, capture_output=True)
+        self.git('config', '--replace-all', 'remote.origin.fetch',
+                 '+refs/heads/other:refs/remotes/origin/other')
+        (racer / 'handoff.md').write_text('different remote bytes\n')
+        subprocess.run(['git', '-C', str(racer), 'add', 'handoff.md'], check=True, capture_output=True)
+        subprocess.run(['git', '-C', str(racer), '-c', 'user.name=Fixture',
+                        '-c', 'user.email=fixture@example.invalid', 'commit', '-qm', 'change shard'],
+                       check=True, capture_output=True)
+        subprocess.run(['git', '-C', str(racer), 'push', 'origin', 'HEAD:master'],
+                       check=True, capture_output=True)
+        with self.assertRaisesRegex(h.ControlError, 'shard_not_on_origin_master'):
+            h.verify_checkpoint(evidence)
 
     def test_exit_requires_receipt_and_unchanged_shard(self):
         with self.assertRaises(h.ControlError):
