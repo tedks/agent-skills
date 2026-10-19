@@ -1064,6 +1064,22 @@ class ControlTests(unittest.TestCase):
         with self.assertRaises(h.ControlError):
             h.verify_checkpoint(self.evidence)
 
+    def test_remote_presence_requires_fetched_origin_master(self):
+        remote = self.root / 'remote.git'
+        subprocess.run(['git', 'init', '--bare', str(remote)], check=True, capture_output=True)
+        self.git('remote', 'add', 'origin', str(remote))
+        self.git('push', 'origin', 'HEAD:master')
+        self.shard.write_text('new local-only checkpoint\n')
+        self.git('add', 'handoff.md')
+        self.git('commit', '-qm', 'local-only shard')
+        evidence = {**self.evidence, 'sha256': hashlib.sha256(self.shard.read_bytes()).hexdigest(),
+                    'commit': self.git('rev-parse', 'HEAD').strip(),
+                    'push_attestation': 'pushed_private_remote'}
+        with self.assertRaisesRegex(h.ControlError, 'shard_not_on_origin_master'):
+            h.verify_checkpoint(evidence)
+        self.git('push', 'origin', 'HEAD:master')
+        self.assertIn('remote_presence', h.verify_checkpoint(evidence)['verified'])
+
     def test_exit_requires_receipt_and_unchanged_shard(self):
         with self.assertRaises(h.ControlError):
             self.control.request('exit')
