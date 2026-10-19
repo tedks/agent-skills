@@ -69,10 +69,67 @@ class PushTests(unittest.TestCase):
         self.assertEqual((self.shared / 'untracked').read_text(), 'leave me alone\n')
 
     def test_rejects_unapproved_and_escaping_paths(self):
-        for path in ('other/a', '../waiting/a', 'waiting/../other/a', '/waiting/a'):
+        (self.source / 'other').mkdir()
+        (self.source / 'other' / 'a').write_text('must stay local\n')
+        (self.root / 'waiting').mkdir()
+        (self.root / 'waiting' / 'a').write_text('outside source\n')
+        (self.source / 'waiting').mkdir()
+        (self.source / 'waiting' / '.x').write_text('dot file\n')
+        (self.source / 'waiting' / '.git').mkdir()
+        (self.source / 'waiting' / '.git' / 'config').write_text('unsafe metadata\n')
+        for path in ('other/a', '../waiting/a', 'waiting/../other/a', 'waiting/.x',
+                     'waiting/.git/config', '/waiting/a'):
             with self.subTest(path=path):
                 result = self.publish(path)
                 self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(self.git('--git-dir', self.remote, 'rev-list', '--count', 'master'), '1')
+
+    def test_stale_tracking_ref_cannot_claim_remote_presence(self):
+        (self.source / 'waiting').mkdir()
+        (self.source / 'waiting' / 'agent.md').write_text('preserved bytes\n')
+        first = self.publish('waiting/agent.md')
+        self.assertEqual(first.returncode, 0, first.stderr)
+        old_head = first.stdout.strip()
+        self.git('-C', self.shared, 'config', '--replace-all', 'remote.origin.fetch',
+                 '+refs/heads/other:refs/remotes/origin/other')
+        self.git('-C', self.racer, 'fetch', 'origin', 'master')
+        self.git('-C', self.racer, 'reset', '--hard', 'FETCH_HEAD')
+        self.git('-C', self.racer, 'rm', 'waiting/agent.md')
+        self.git('-C', self.racer, 'commit', '-m', 'remove shard')
+        self.git('-C', self.racer, 'push', 'origin', 'HEAD:master')
+        self.assertEqual(self.git('-C', self.shared, 'rev-parse', 'origin/master'), old_head)
+        result = self.publish('waiting/agent.md')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotEqual(result.stdout.strip(), old_head)
+        self.assertEqual(self.git('--git-dir', self.remote, 'show', 'master:waiting/agent.md'), 'preserved bytes')
+
+    def test_idempotent_publication_returns_remote_head(self):
+        (self.source / 'waiting').mkdir()
+        (self.source / 'waiting' / 'agent.md').write_text('same bytes\n')
+        first = self.publish('waiting/agent.md')
+        self.assertEqual(first.returncode, 0, first.stderr)
+        second = self.publish('waiting/agent.md')
+        self.assertEqual(second.returncode, 0, second.stderr)
+        self.assertEqual(second.stdout, first.stdout)
+        self.assertEqual(self.git('--git-dir', self.remote, 'rev-list', '--count', 'master'), '2')
+
+    def test_push_failure_without_advance_cleans_owned_worktree(self):
+        (self.source / 'waiting').mkdir()
+        (self.source / 'waiting' / 'agent.md').write_text('new bytes\n')
+        wrapper = self.root / 'bin'
+        wrapper.mkdir()
+        git_script = wrapper / 'git'
+        git_script.write_text('#!/bin/sh\n'
+                              'for arg in "$@"; do [ "$arg" = push ] && exit 1; done\n'
+                              'exec "$REAL_GIT" "$@"\n')
+        git_script.chmod(0o755)
+        env = dict(self.env, PATH=str(wrapper) + os.pathsep + self.env['PATH'], REAL_GIT=REAL_GIT)
+        before = self.git('-C', self.shared, 'worktree', 'list', '--porcelain')
+        result = self.publish('waiting/agent.md', env=env)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('push failed without a remote advance', result.stderr)
+        self.assertEqual(self.git('-C', self.shared, 'worktree', 'list', '--porcelain'), before)
+        self.assertEqual(list(self.root.glob('offduty-push.*')), [])
         self.assertEqual(self.git('--git-dir', self.remote, 'rev-list', '--count', 'master'), '1')
 
     def test_allow_path_is_explicit_and_source_symlink_is_rejected(self):
@@ -83,6 +140,11 @@ class PushTests(unittest.TestCase):
         (self.source / 'waiting').mkdir()
         (self.source / 'waiting' / 'link').symlink_to(self.source / 'other' / 'note')
         self.assertNotEqual(self.publish('waiting/link').returncode, 0)
+        outside = self.root / 'outside'
+        outside.mkdir()
+        (outside / 'note').write_text('outside source\n')
+        (self.source / 'lane-notes').symlink_to(outside, target_is_directory=True)
+        self.assertNotEqual(self.publish('lane-notes/note').returncode, 0)
 
     def test_existing_remote_symlink_does_not_redirect_copy(self):
         outside = self.root / 'outside'
@@ -132,6 +194,41 @@ class PushTests(unittest.TestCase):
         self.assertIn('[agent.md]', index)
         self.assertIn('[other.md]', index)
         self.assertEqual(self.git('--git-dir', self.remote, 'rev-list', '--count', 'master'), '3')
+
+    def test_retry_rechecks_duplicate_session_on_new_remote_tip(self):
+        event = 'a' * 32
+        (self.source / 'waiting').mkdir()
+        (self.source / 'receipts').mkdir()
+        (self.source / 'waiting' / 'agent.md').write_text(
+            '{"event":"' + event + '","session_id":"same-session"}\n')
+        (self.source / 'receipts' / (event + '.json')).write_text(
+            '{"event":"' + event + '","shard":"waiting/agent.md","status":"retired"}\n')
+        (self.racer / 'waiting').mkdir()
+        (self.racer / 'waiting' / 'other.md').write_text(
+            '{"event":"' + 'b' * 32 + '","session_id":"same-session"}\n')
+        self.git('-C', self.racer, 'add', 'waiting/other.md')
+        self.git('-C', self.racer, 'commit', '-m', 'racing duplicate')
+        wrapper = self.root / 'bin'
+        wrapper.mkdir()
+        git_script = wrapper / 'git'
+        git_script.write_text('#!/bin/sh\n'
+                              'for arg in "$@"; do [ "$arg" = push ] && is_push=1; done\n'
+                              'if [ "${is_push:-}" = 1 ] && [ ! -e "$RACE_MARKER" ]; then\n'
+                              '  : > "$RACE_MARKER"\n'
+                              '  "$REAL_GIT" -C "$RACE_CLONE" push origin HEAD:master >&2 || exit $?\n'
+                              'fi\n'
+                              'exec "$REAL_GIT" "$@"\n')
+        git_script.chmod(0o755)
+        marker = self.root / 'raced'
+        env = dict(self.env, PATH=str(wrapper) + os.pathsep + self.env['PATH'],
+                   REAL_GIT=REAL_GIT, RACE_MARKER=str(marker), RACE_CLONE=str(self.racer))
+        result = self.publish('receipts/' + event + '.json', 'waiting/agent.md', env=env,
+                              extra=('--build-index', str(INDEX_BUILDER),
+                                     '--session-id', 'same-session', '--event-id', event))
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('session already has a preserved shard', result.stderr)
+        self.assertTrue(marker.exists())
+        self.assertEqual(self.git('--git-dir', self.remote, 'rev-list', '--count', 'master'), '2')
 
 
 if __name__ == '__main__':

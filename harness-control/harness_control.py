@@ -141,7 +141,7 @@ def _git(repo, *args):
 def verify_checkpoint(evidence):
     """Verify shard bytes/commit; explicitly label all unverified attestations.
 
-    A fresh origin/master fetch establishes the shard commit and bytes on the
+    A fresh master fetch establishes the shard commit and bytes on the
     configured remote. Privacy, durability, and disposition remain attestations.
     """
     if not isinstance(evidence, dict):
@@ -185,23 +185,28 @@ def verify_checkpoint(evidence):
         raise ControlError('repository_has_no_remote')
     verified = ['shard_sha256', 'shard_bytes_in_exact_commit']
     if push == 'pushed_private_remote':
-        _git(repo, 'fetch', 'origin', 'master')
+        fetched_ref = 'refs/harness-control/checkpoint-' + uuid.uuid4().hex
         try:
-            present = subprocess.run(['git', '-C', str(repo), 'merge-base', '--is-ancestor', commit, 'origin/master'],
-                                     capture_output=True, timeout=10).returncode == 0
-        except (OSError, subprocess.SubprocessError) as exc:
-            raise ControlError('checkpoint_git_evidence_unavailable') from exc
-        if not present:
-            raise ControlError('shard_not_on_origin_master')
-        try:
-            remote_bytes = _git(repo, 'show', f'origin/master:{relative.as_posix()}')
-        except ControlError as exc:
-            raise ControlError('shard_not_on_origin_master') from exc
+            _git(repo, 'fetch', 'origin', '+refs/heads/master:' + fetched_ref)
+            remote_head = _git(repo, 'rev-parse', '--verify', fetched_ref).strip().decode()
+            try:
+                present = subprocess.run(['git', '-C', str(repo), 'merge-base', '--is-ancestor', commit, remote_head],
+                                         capture_output=True, timeout=10).returncode == 0
+            except (OSError, subprocess.SubprocessError) as exc:
+                raise ControlError('checkpoint_git_evidence_unavailable') from exc
+            if not present:
+                raise ControlError('shard_not_on_origin_master')
+            try:
+                remote_bytes = _git(repo, 'show', f'{remote_head}:{relative.as_posix()}')
+            except ControlError as exc:
+                raise ControlError('shard_not_on_origin_master') from exc
+        finally:
+            subprocess.run(['git', '-C', str(repo), 'update-ref', '-d', fetched_ref], capture_output=True, timeout=10)
         if hashlib.sha256(remote_bytes).hexdigest() != digest:
             raise ControlError('shard_not_on_origin_master')
         verified.append('remote_presence')
     return {'verified': verified,
-            'attested_not_verified': ['private_storage', 'remote_privacy_and_push', 'authority',
+            'attested_not_verified': ['private_storage', 'remote_privacy', 'authority',
                                       'resources_disposition', 'obligations', 'pause_state'],
             'evidence': evidence}
 

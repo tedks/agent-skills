@@ -1485,8 +1485,11 @@ class Tests(unittest.TestCase):
             with self.subTest(key=key):
                 changed = json.loads(original)
                 changed['offer'][key] = value
+                changed['disposition'] = 'DONE'  # Cached completion cannot bypass sender evidence.
                 path.write_text(json.dumps(changed))
-                self.assertEqual(self.invoke('--resume', str(path)).returncode, 2)
+                result = self.invoke('--resume', str(path))
+                self.assertEqual(result.returncode, 2, result.stderr)
+                self.assertIn('ambiguous offer lacks pinned positive input evidence', result.stderr)
                 self.assertEqual(self.observed()['pastes'], 1)
                 self.assertEqual(self.observed().get('exit_enters', 0), 0)
                 self.assertNotIn('handoff_receipt', self.state()[1])
@@ -1498,6 +1501,17 @@ class Tests(unittest.TestCase):
         self.assertEqual(self.invoke('--resume', str(path)).returncode, 2)
         self.assertEqual(self.observed().get('exit_enters', 0), 0)
         self.assertNotIn('handoff_receipt', self.state()[1])
+
+    def test_ambiguous_offer_evidence_gate_runs_on_resume(self):
+        self.actor('ambiguous-done')
+        self.assertEqual(self.invoke().returncode, 2)
+        path, _ = self.state()
+        anchor = '    def observe_ambiguous_offer(self):\n'
+        entry = self.instrument(anchor, anchor + "        raise Stop('ambiguous offer evidence gate reached')\n")
+        with patch.dict(os.environ, {'RETIRE_TEST_SCRIPT': str(entry)}):
+            result = self.invoke('--resume', str(path))
+        self.assertEqual(result.returncode, 2, result.stderr)
+        self.assertIn('ambiguous offer evidence gate reached', result.stderr)
 
     def test_ambiguous_offer_rechecks_cached_done_after_bad_shard(self):
         self.actor('ambiguous-done')
@@ -1538,6 +1552,8 @@ class Tests(unittest.TestCase):
                     payload.symlink_to(target)
                 result = self.invoke('--resume', str(path))
                 self.assertEqual(result.returncode, 2)
+                if variant == 'fragments':
+                    self.assertIn('preserved ambiguous offer payload does not match pinned event', result.stderr)
                 self.assertNotIn('handoff_receipt', self.state()[1])
                 self.assertEqual(self.observed()['pastes'], 1)
                 self.assertEqual(self.observed().get('exit_enters', 0), 0)
@@ -1784,6 +1800,17 @@ class Tests(unittest.TestCase):
         self.assertEqual(result.returncode, 2)
         self.assertIn('legacy session shard', result.stderr)
         self.assertFalse((self.directory / 'exit-order.json').exists())
+
+    def test_non_ascii_foreign_shard_does_not_block_retirement(self):
+        waiting = self.repo / 'waiting'
+        waiting.mkdir()
+        (waiting / 'é.md').write_text('{}\n')
+        self.git('add', 'waiting')
+        self.git('commit', '-m', 'foreign unicode shard')
+        self.git('push')
+        self.actor()
+        result = self.invoke()
+        self.assertEqual(result.returncode, 0, result.stderr)
 
     def test_nonobject_shard_is_controlled_failure(self):
         self.actor('waiting-bad')
@@ -2361,6 +2388,23 @@ class Tests(unittest.TestCase):
             self.assertFalse((self.directory / 'spawn.json').exists())
             self.assertEqual(self.git('show', 'origin/master:' + state['handoff_receipt']), tampered)
             self.assertEqual(receipt.read_text(), json.dumps(data))
+
+    def test_stale_tracking_ref_cannot_authorize_exit_after_remote_removal(self):
+        self.actor('hold')
+        self.invoke('--handoff', 'codex', 'model', '--roles', str(self.roles))
+        path, state = self.state()
+        editor = self.remote_editor()
+        self.editor_git(editor, 'rm', state['shard'])
+        self.editor_git(editor, 'commit', '-m', 'remove remote shard')
+        self.editor_git(editor, 'push', 'origin', 'HEAD:master')
+        self.git('config', '--replace-all', 'remote.origin.fetch',
+                 '+refs/heads/other:refs/remotes/origin/other')
+        (self.directory / 'human-independent-exit').touch()
+        self.wait_for(lambda: not Path('/proc/' + str(state['identity']['process']['pid'])).exists())
+        result = self.invoke('--handoff', 'codex', 'model', '--roles', str(self.roles), '--resume', str(path))
+        self.assertEqual(result.returncode, 2, result.stderr)
+        self.assertIn('preserved shard changed after receipt', result.stderr)
+        self.assertFalse((self.directory / 'spawn.json').exists())
 
     def test_resume_rereads_state_after_event_lock(self):
         self.actor('waiting-bad')

@@ -6,16 +6,20 @@ repo=
 source_root=
 message=
 index_builder=
+session_id=
+event_id=
 allow_path=0
 paths=()
 while (($#)); do
     case $1 in
-        --repo|--source-root|--build-index|-m)
+        --repo|--source-root|--build-index|--session-id|--event-id|-m)
             (($# >= 2)) || { echo "missing value for $1" >&2; exit 2; }
             case $1 in
                 --repo) repo=$2 ;;
                 --source-root) source_root=$2 ;;
                 --build-index) index_builder=$2 ;;
+                --session-id) session_id=$2 ;;
+                --event-id) event_id=$2 ;;
                 -m) message=$2 ;;
             esac
             shift 2 ;;
@@ -31,6 +35,9 @@ done
 }
 [[ -n $source_root ]] || source_root=$repo
 [[ -z $index_builder || -x $index_builder ]] || { echo 'index builder unavailable' >&2; exit 2; }
+[[ -z $session_id && -z $event_id || -n $index_builder && -n $session_id && -n $event_id ]] || {
+    echo 'session identity requires an index builder and both identifiers' >&2; exit 2;
+}
 repo=$(realpath -- "$repo")
 source_root=$(realpath -- "$source_root")
 [[ -d $source_root ]] || { echo 'source root missing' >&2; exit 2; }
@@ -50,10 +57,11 @@ for path in "${paths[@]}"; do
     [[ $canonical == "$source_root/"* ]] || { echo "source escapes root: $path" >&2; exit 2; }
 done
 
-scratch_base=${XDG_RUNTIME_DIR:-${TMPDIR:-${XDG_CACHE_HOME:-}}}
+scratch_base=${XDG_RUNTIME_DIR:-${TMPDIR:-${XDG_CACHE_HOME:-/tmp}}}
 [[ -d $scratch_base && -w $scratch_base ]] || { echo 'scratch directory unavailable' >&2; exit 2; }
 scratch=$(mktemp -d "$scratch_base/offduty-push.XXXXXXXX")
 worktree=$scratch/worktree
+fetched_ref=refs/offduty-push/$$-$RANDOM-$RANDOM
 cleanup() {
     status=$?
     if [[ -e $worktree/.git ]]; then
@@ -62,14 +70,15 @@ cleanup() {
             exit 1
         fi
     fi
+    git -C "$repo" update-ref -d "$fetched_ref" 2>/dev/null || true
     rm -rf -- "$scratch"  # This invocation created this exact mktemp directory.
     exit "$status"
 }
 trap cleanup EXIT
 
 for attempt in 1 2 3; do
-    git -C "$repo" fetch --quiet origin master
-    git -C "$repo" worktree add --quiet --detach "$worktree" origin/master
+    git -C "$repo" fetch --quiet origin "+refs/heads/master:$fetched_ref"
+    git -C "$repo" worktree add --quiet --detach "$worktree" "$fetched_ref"
     base=$(git -C "$worktree" rev-parse HEAD)
     for path in "${paths[@]}"; do
         # An existing remote tree must not redirect a copy through a symlink.
@@ -83,7 +92,7 @@ for attempt in 1 2 3; do
         cp -- "$source_root/$path" "$worktree/$path"
     done
     if [[ -n $index_builder ]]; then
-        "$index_builder" "$worktree"
+        "$index_builder" "$worktree" "$session_id" "$event_id"
         git -C "$worktree" add -- "${paths[@]}" waiting/INDEX.md
     else
         git -C "$worktree" add -- "${paths[@]}"
@@ -98,8 +107,8 @@ for attempt in 1 2 3; do
         printf '%s\n' "$commit"
         exit 0
     fi
-    git -C "$repo" fetch --quiet origin master
-    current=$(git -C "$repo" rev-parse origin/master)
+    git -C "$repo" fetch --quiet origin "+refs/heads/master:$fetched_ref"
+    current=$(git -C "$repo" rev-parse "$fetched_ref")
     [[ $current != "$base" ]] || { echo 'push failed without a remote advance' >&2; exit 1; }
     git -C "$repo" worktree remove --force "$worktree"
 done

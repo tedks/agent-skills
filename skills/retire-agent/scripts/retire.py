@@ -176,6 +176,15 @@ class Retirement:
     def git(self, *args, raw=False):
         return checked(['git', '-C', self.repo, *args], strip=not raw)
 
+    def fetch_master(self):
+        """Return the fetched master commit, independent of remote fetch mappings."""
+        ref = 'refs/retire-agent/fetch-' + uuid.uuid4().hex
+        try:
+            self.git('fetch', 'origin', '+refs/heads/master:' + ref)
+            return self.git('rev-parse', '--verify', ref)
+        finally:
+            run(['git', '-C', self.repo, 'update-ref', '-d', ref])
+
     def private(self):
         urls = set(self.git('remote', 'get-url', '--all', 'origin').splitlines())
         urls.update(self.git('remote', 'get-url', '--push', '--all', 'origin').splitlines())
@@ -541,12 +550,12 @@ class Retirement:
             raise Stop('lessons must be one to five lines')
         if data['session_id'] == 'unknown' and expected != 'caller':
             raise Stop('agent must establish its own session identity')
-        self.git('fetch', 'origin', 'master')
-        for name in self.git('ls-tree', '-r', '--name-only', 'origin/master', '--', 'waiting').splitlines():
+        remote_head = self.fetch_master()
+        for name in self.git('ls-tree', '-rz', '--name-only', remote_head, '--', 'waiting').split('\0'):
             if name == 'waiting/INDEX.md' or not name.endswith('.md'):
                 continue
             try:
-                prior = json.loads(self.git('show', 'origin/master:' + name))
+                prior = json.loads(self.git('show', remote_head + ':' + name))
             except ValueError:
                 if len(data['session_id']) >= 8 and data['session_id'][:8].lower() in Path(name).name.lower():
                     raise Stop('legacy session shard exists; reconcile deliberately')
@@ -586,15 +595,18 @@ class Retirement:
         command = [helper, '--repo', self.repo, '--source-root', self.records]
         if index:
             command += ['--build-index', Path(__file__).with_name('build-index.py')]
+            shard_path = self.records / self.state['shard']
+            shard = object_record(shard_path.read_text(), 'staged shard')
+            command += ['--session-id', shard['session_id'], '--event-id', self.state['id']]
         command += [*paths, '-m', 'Preserve retirement ' + self.state['id']]
         result = run(command)
         if result.returncode or not re.fullmatch(r'[0-9a-f]{40,64}', result.stdout.strip()):
             raise Stop('private publication failed: ' + result.stderr.strip()[-500:])
         commit = result.stdout.strip()
-        self.git('fetch', 'origin', 'master')
+        remote_head = self.fetch_master()
         for path in paths:
-            local = self.git('hash-object', str(self.records / path))
-            remote = self.git('rev-parse', 'origin/master:' + path)
+            local = self.git('hash-object', '--path=' + path, str(self.records / path))
+            remote = self.git('rev-parse', remote_head + ':' + path)
             if local != remote:
                 raise Stop('private remote shard verification failed')
         return commit
@@ -794,16 +806,22 @@ class Retirement:
                 save(receipt, {'event': event, 'shard': self.state['shard'], 'commit': shard_commit, 'author': data['author'], 'status': 'handoff-verified', 'verified_at': datetime.datetime.now(datetime.timezone.utc).isoformat()})
                 self.publish_locked(['receipts/' + receipt.name], index=True)
                 self.state['handoff_receipt'] = 'receipts/' + receipt.name
-                self.state['shard_hash'] = self.git('hash-object', str(canonical))
+                self.state['shard_hash'] = self.git('hash-object', '--path=' + self.state['shard'], str(canonical))
                 self.persist()
                 self.audit('handoff-receipt', shard_path=self.state['shard'], receipt_path=self.state['handoff_receipt'])
         # Reverify immutable handoff evidence before resumed exit or successor.
         with locked(self.common / 'retirement.lock'):
             self.private()
-            self.git('fetch', 'origin', 'master')
-            if self.git('hash-object', str(self.records / self.state['shard'])) != self.state['shard_hash'] or self.git('rev-parse', 'origin/master:' + self.state['shard']) != self.state['shard_hash']:
+            remote_head = self.fetch_master()
+            if self.git('hash-object', '--path=' + self.state['shard'], str(self.records / self.state['shard'])) != self.state['shard_hash']:
                 raise Stop('preserved shard changed after receipt')
-            record = receipt_record(self.git('show', 'origin/master:' + self.state['handoff_receipt']))
+            try:
+                remote_shard = self.git('rev-parse', remote_head + ':' + self.state['shard'])
+            except Stop as error:
+                raise Stop('preserved shard changed after receipt') from error
+            if remote_shard != self.state['shard_hash']:
+                raise Stop('preserved shard changed after receipt')
+            record = receipt_record(self.git('show', remote_head + ':' + self.state['handoff_receipt']))
             if record.get('event') != event or record.get('shard') != self.state['shard'] or not re.fullmatch(r'[0-9a-f]{40,64}', record.get('commit', '')):
                 raise Stop('private handoff receipt changed or missing')
             if record.get('status') not in ('handoff-verified', 'pending-exit', 'retired'):
@@ -881,6 +899,9 @@ class Retirement:
     def record_pending(self):
         if not self.state or not getattr(self, 'event_owned', False):
             return
+        records = getattr(self, 'records', None)
+        if records is None or records.is_symlink() or (records / 'receipts').is_symlink():
+            return  # An unsafe or uninitialized publication stage must remain untouched.
         if self.state.get('status') == 'retired' and not self.exit_verified:
             return  # Preserve historical remote evidence; cached/forged state cannot republish it.
         if self.state.get('handoff_receipt') and not getattr(self, 'evidence_verified', False):
