@@ -1631,7 +1631,9 @@ class Tests(unittest.TestCase):
 
     def test_symlink_shard_blocks_exit(self):
         self.actor('path')
-        self.assertEqual(self.invoke().returncode, 2)
+        result = self.invoke()
+        self.assertEqual(result.returncode, 2, result.stderr)
+        self.assertIn('missing or unsafe unique shard', result.stderr)
         self.assertFalse((self.directory / 'exit-order.json').exists())
 
     def test_handoff_brief_model_after_exit(self):
@@ -1687,7 +1689,9 @@ class Tests(unittest.TestCase):
 
     def test_wrapped_user_done_does_not_complete(self):
         self.actor('quoted')
-        self.assertEqual(self.invoke().returncode, 2)
+        result = self.invoke()
+        self.assertEqual(result.returncode, 2, result.stderr)
+        self.assertIn('DONE not observed', result.stderr)
         self.assertEqual(self.observed()['pastes'], 1)
         self.assertFalse((self.directory / 'exit-order.json').exists())
 
@@ -1811,6 +1815,21 @@ class Tests(unittest.TestCase):
         self.actor()
         result = self.invoke()
         self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_symlinked_publication_stage_stays_untouched_on_resume(self):
+        self.actor('waiting-bad')
+        self.assertEqual(self.invoke('--waiting').returncode, 2)
+        path, state = self.state()
+        stage = path.parent / (state['id'] + '.publication')
+        stage.rename(self.directory / 'preserved-stage')
+        outside = self.directory / 'outside-stage'
+        outside.mkdir()
+        (outside / 'sentinel').write_text('untouched\n')
+        stage.symlink_to(outside, target_is_directory=True)
+        result = self.invoke('--waiting', '--resume', str(path))
+        self.assertEqual(result.returncode, 2, result.stderr)
+        self.assertIn('unsafe event publication directory', result.stderr)
+        self.assertEqual(sorted(item.name for item in outside.iterdir()), ['sentinel'])
 
     def test_nonobject_shard_is_controlled_failure(self):
         self.actor('waiting-bad')

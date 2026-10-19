@@ -11,6 +11,8 @@ HERE = Path(__file__).resolve().parent
 source = (HERE / 'retire.py').read_text()
 builder_source = (HERE / 'build-index.py').read_text()
 helper_source = (HERE.parents[1] / '_shared/offduty-push.sh').read_text()
+# Cross-host duplicate-session protection now lives in the retry-time index
+# builder and is exercised by test-offduty-push.py; the local lock is additive.
 mutations = [
     ('missing shared reader blocks before offer', 'if not helper.is_file():', 'if False:', 'test_missing_shared_binding_blocks_before_offer'),
     ('pinned peer lookup PID', "pin = ProcessPin(actor['pid'], actor['start'], actor['boot'])", "pin = ProcessPin(os.getpid(), actor['start'], actor['boot'])", 'test_codex_offer_supplies_verified_id_and_resources'),
@@ -42,7 +44,6 @@ mutations = [
     ('foreign private state namespace', "                           if re.fullmatch(r'[0-9a-f]{32}\\.json', path.name)", '', 'test_foreign_private_json_does_not_block_new_retirement'),
     ('long handoff observation', 'not 0 < args.wait <= 1800', 'not 0 < args.wait <= 600', 'test_twenty_minute_wait_is_accepted'),
     ('remote host', "'https://github.com/' + match[1]", 'match[1]', 'test_gh_privacy_pins_remote_host'),
-    ('session transaction', "with locked(self.common / 'retirement.lock'):  # Unique session publication.", "with locked(self.common / (self.state['id'] + '.transaction.lock')):", 'test_duplicate_session_transaction_race'),
     ('independent exit requires notice request', "raise Stop('handoff verified; original ended before exit request, fresh notice unavailable')", 'pass', 'test_independent_exit_after_handoff_remains_pending'),
     ('literal Claude exit', "control = ['--literal-exit'] if self.state['identity']['process']['agent'] == 'claude' else ['--typed-command']", "control = [] if self.state['identity']['process']['agent'] == 'claude' else ['--typed-command']", 'test_claude_literal_exit_real_terminal'),
     ('Codex typed exit composer guard', "else ['--typed-command']", 'else []', 'test_codex_stable_ordinary_draft_defers_typed_exit'),

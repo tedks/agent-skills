@@ -159,6 +159,52 @@ class PushTests(unittest.TestCase):
         self.assertNotEqual(self.publish('waiting/agent.md').returncode, 0)
         self.assertEqual(outside.read_text(), 'untouched\n')
 
+    def test_existing_remote_directory_symlink_does_not_redirect_copy(self):
+        outside = self.root / 'outside'
+        outside.mkdir()
+        (self.shared / 'waiting').symlink_to(outside, target_is_directory=True)
+        self.git('-C', self.shared, 'add', 'waiting')
+        self.git('-C', self.shared, 'commit', '-m', 'remote directory link')
+        self.git('-C', self.shared, 'push', 'origin', 'HEAD:master')
+        (self.source / 'waiting').mkdir()
+        (self.source / 'waiting' / 'agent.md').write_text('new bytes\n')
+        result = self.publish('waiting/agent.md')
+        self.assertNotEqual(result.returncode, 0)
+        self.assertFalse((outside / 'agent.md').exists())
+
+    def test_three_remote_advances_stop_with_stage_preserved(self):
+        (self.source / 'waiting').mkdir()
+        shard = self.source / 'waiting' / 'agent.md'
+        shard.write_text('staged bytes\n')
+        wrapper = self.root / 'bin'
+        wrapper.mkdir()
+        counter = self.root / 'race-count'
+        git_script = wrapper / 'git'
+        git_script.write_text('#!/bin/sh\n'
+                              'for arg in "$@"; do [ "$arg" = push ] && is_push=1; done\n'
+                              'if [ "${is_push:-}" = 1 ]; then\n'
+                              '  n=0; [ ! -e "$RACE_COUNT" ] || n=$(cat "$RACE_COUNT")\n'
+                              '  n=$((n + 1)); printf "%s\\n" "$n" > "$RACE_COUNT"\n'
+                              '  "$REAL_GIT" -C "$RACE_CLONE" fetch origin master >&2 || exit $?\n'
+                              '  "$REAL_GIT" -C "$RACE_CLONE" reset --hard FETCH_HEAD >&2 || exit $?\n'
+                              '  printf "race %s\\n" "$n" > "$RACE_CLONE/race$n"\n'
+                              '  "$REAL_GIT" -C "$RACE_CLONE" add "race$n" || exit $?\n'
+                              '  "$REAL_GIT" -C "$RACE_CLONE" commit -m "race $n" >&2 || exit $?\n'
+                              '  "$REAL_GIT" -C "$RACE_CLONE" push origin HEAD:master >&2 || exit $?\n'
+                              'fi\n'
+                              'exec "$REAL_GIT" "$@"\n')
+        git_script.chmod(0o755)
+        env = dict(self.env, PATH=str(wrapper) + os.pathsep + self.env['PATH'],
+                   REAL_GIT=REAL_GIT, RACE_COUNT=str(counter), RACE_CLONE=str(self.racer))
+        before = self.git('-C', self.shared, 'worktree', 'list', '--porcelain')
+        result = self.publish('waiting/agent.md', env=env)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('push failed after three remote advances', result.stderr)
+        self.assertEqual(counter.read_text().strip(), '3')
+        self.assertEqual(shard.read_text(), 'staged bytes\n')
+        self.assertEqual(self.git('-C', self.shared, 'worktree', 'list', '--porcelain'), before)
+        self.assertEqual(list(self.root.glob('offduty-push.*')), [])
+
     def test_retries_non_fast_forward_on_latest_remote_commit(self):
         (self.source / 'receipts').mkdir()
         (self.source / 'waiting').mkdir()
