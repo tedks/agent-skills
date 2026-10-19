@@ -30,7 +30,10 @@ writers and record its path. Do not run `pull --rebase`, `stash`, `reset`, or
    the shared checkout. Confirm no writer resumed. Then reset its branch with
    `git reset --hard origin/master`. Remove only the reviewed untracked paths
    from the manifest, one exact entry at a time. Verify `git status --short`
-   is empty and `HEAD` equals `origin/master`.
+   is empty and `HEAD` equals `origin/master`. If Git attributes normalize
+   `waiting/` or `receipts/`, an exact-byte shard can appear modified after
+   checkout; reconcile that attribute rule before treating a dirty status as
+   an unpublished shard.
 
 The 2026-10-18 repair followed this sequence: a redundant ahead shard commit
 was byte identical to remote content; newer receipt states were published to

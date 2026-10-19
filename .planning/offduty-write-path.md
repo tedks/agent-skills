@@ -14,6 +14,7 @@ Retirement can leave a shard on one machine while another process advances the p
 - [x] (2026-10-19 02:31Z) Move retire-agent's publication files into per-event private state and add an index builder that runs on every retry.
 - [x] (2026-10-19 02:33Z) Open draft orgs PR #31 with the retirement rule.
 - [x] (2026-10-19 03:05Z) Fix council's stale-ref finding across helper, retirement, and checkpoint evidence; confirm a prior-version red regression and current green offline checks.
+- [x] (2026-10-19 03:15Z) Converge council review through four rounds. The final fix stores requested files as unfiltered Git blobs, preserving exact source bytes under committed and dirty attributes. OpenAI native and Anthropic Opus seats are CLEAN; Google was unavailable at quota.
 - [ ] Bring retirement and helper tests to green, including the complete mutation sweep.
 - [ ] Run repository configuration and harness-control gates, review the full diff, and complete council review to fixpoint.
 - [ ] Push both PR heads, record issue status, and prepare a private retirement shard through the helper.
@@ -24,13 +25,14 @@ The current shared sender requires a measured Claude composer with a nonbreaking
 
 The old retirement tests also expected canonical files and the generated index to appear in the shared checkout. Those expectations moved to the private staging directory or fetched remote. The shared checkout's dirty files became negative assertions: they stay unchanged.
 
-Council round one found that `git fetch origin master` can succeed without updating `origin/master` under a custom fetch refspec. The old helper could return a stale commit on its no-op path, and retirement could authorize exit after a remote shard was removed. The helper and verification paths now fetch into unique refs, use the resulting commit ID, and delete only their own temporary refs. A new helper test failed against commit `c5765f4` with the stale-ref false positive and passes on this branch.
+Council round one found that `git fetch origin master` can succeed without updating `origin/master` under a custom fetch refspec. The old helper could return a stale commit on its no-op path, and retirement could authorize exit after a remote shard was removed. The helper and verification paths now fetch into unique refs, use the resulting commit ID, and delete only their own temporary refs. A new helper test failed against commit `c5765f4` with the stale-ref false positive and passes on this branch. Later convergence rounds found an `unknown` caller-session collision and a source-byte mismatch under Git attributes; both have red-before-green regressions and are fixed.
 
 ## Decision Log
 
 - Decision: Keep each existing receipt state and publish each transition. Rationale: downstream readers already consume these states, and retaining them avoids a receipt contract change. Date/Author: 2026-10-19, off-duty write-path lead.
 - Decision: Build the index and recheck session identity inside each fresh temporary worktree after copying the event files. Rationale: a static index copied from an older checkout could erase a row added by a concurrent writer during a non-fast-forward retry, or accept a same-session shard from another host. Date/Author: 2026-10-19, off-duty write-path lead.
 - Decision: Keep private event staging files in the Git common directory for resume. Rationale: a failed publication must not strand a receipt in the shared checkout or lose the source bytes needed for an exact retry. Date/Author: 2026-10-19, off-duty write-path lead.
+- Decision: Stage each named file as an unfiltered Git blob. Rationale: verification promises the exact caller-owned bytes even if remote or shared checkout attributes request conversion. Date/Author: 2026-10-19, off-duty write-path lead.
 
 ## Outcomes & Retrospective
 
