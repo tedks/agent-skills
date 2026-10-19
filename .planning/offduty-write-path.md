@@ -2,6 +2,8 @@
 
 This ExecPlan is a living document maintained under `.planning/PLANS.md`.
 
+Current state (2026-10-19 03:27Z): implementation is pushed to draft agent-skills PR #12 and the one-sentence public rule is in draft orgs PR #31. OpenAI and Anthropic council seats reached CLEAN on the final code delta; the Google seat was unavailable at quota. All changed-skill, native-reader, configuration, and Nix gates passed on the final code. `tests/test_setup_leaks.py` still fails on older tracked planning files under existing issue `setup-leaks-existing-plans`. The CTO owns the ruling for ready/merge and the post-merge installed Nix snapshot.
+
 ## Purpose / Big Picture
 
 Retirement can leave a shard on one machine while another process advances the private remote. A local file check can then claim handoff success even though the remote lacks the shard. After this change, callers publish named shard and receipt files from their own private staging directory through a disposable worktree based on fetched `origin/master`. A fetch and byte comparison establish the remote handoff before exit.
@@ -15,9 +17,9 @@ Retirement can leave a shard on one machine while another process advances the p
 - [x] (2026-10-19 02:33Z) Open draft orgs PR #31 with the retirement rule.
 - [x] (2026-10-19 03:05Z) Fix council's stale-ref finding across helper, retirement, and checkpoint evidence; confirm a prior-version red regression and current green offline checks.
 - [x] (2026-10-19 03:15Z) Converge council review through four rounds. The final fix stores requested files as unfiltered Git blobs, preserving exact source bytes under committed and dirty attributes. OpenAI native and Anthropic Opus seats are CLEAN; Google was unavailable at quota.
-- [ ] Bring retirement and helper tests to green, including the complete mutation sweep.
-- [ ] Run repository configuration and harness-control gates, review the full diff, and complete council review to fixpoint.
-- [ ] Push both PR heads, record issue status, and prepare a private retirement shard through the helper.
+- [x] (2026-10-19 03:18Z) Bring retirement (165 tests), helper (12 tests), and the complete retirement mutation sweep to green.
+- [x] (2026-10-19 03:27Z) Run harness-control (115), configuration (21 and 6), native-reader suites and mutations, and `nix flake check`; complete council review to fixpoint. The pre-existing setup-leak failure is tracked separately.
+- [ ] Record final draft PR heads and issue status, then publish the private lead shard through this helper.
 
 ## Surprises & Discoveries
 
@@ -36,7 +38,7 @@ Council round one found that `git fetch origin master` can succeed without updat
 
 ## Outcomes & Retrospective
 
-In progress. The helper tests exercise a dirty and ahead shared checkout, path rejection, idempotence, failure cleanup, a stale tracking ref, and remote races that add another index entry or a duplicate session. The retirement happy path, drifted checkout, Unicode foreign shard, and stale-ref exit regressions pass in focused runs. The full retirement and mutation suites are running.
+The helper tests exercise a dirty and ahead shared checkout, path rejection, idempotence, failure cleanup, a stale tracking ref, exact blobs under attributes, and remote races that add another index entry or a duplicate session. The full retirement suite passed 165 tests and every active retirement mutation was caught. Harness-control passed 115 tests; repository configuration passed 21 and 6 tests; native readers passed 10, 12, and 63 tests and their mutation checks. `nix flake check` passed its transport, package, and unit checks, including the harness-control mutation gate. The separate setup-leak test has an unrelated known failure in existing `.planning/harness-compact-*.md` files (`setup-leaks-existing-plans`).
 
 ## Context and Orientation
 
