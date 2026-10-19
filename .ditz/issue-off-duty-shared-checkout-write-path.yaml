@@ -45,3 +45,32 @@ log_events:
   who: Ted Smith
   what: started
   comment: ""
+- time: 2026-10-19T03:27:46-00:00
+  who: Ted Smith
+  what: commented
+  comment: 'Implementation is pushed in draft agent-skills PR #12 at 9e198154ae11f9a88e5aedfa568b3dbdba470876
+    and draft public orgs PR #31 at 5871c6c. The final code commit is 5e0b98e; later
+    agent-skills commits are documentation only. The helper publishes exact bytes
+    from a disposable worktree at a uniquely fetched remote master commit. Retire-agent
+    stages shards and every receipt state privately, rebuilds the index and checks
+    known-session duplicates on each retry, and verifies fetched remote bytes before
+    exit. Harness-control checks remote presence against a fresh fetched commit.
+
+
+    Local evidence: 12 helper tests, 165 retirement tests, all active retirement mutations
+    caught, 115 harness-control tests, 21 configuration and 6 native-helper tests,
+    native reader suites 10/12/63 plus their mutation checks, and nix flake check
+    (transport/package/unit, including 92 harness-control mutations) passed. New stale-ref,
+    unknown caller-session, dirty-attributes, and committed-attributes regressions
+    were each observed red against the prior behavior. The separate setup-leak gate
+    still fails on older tracked .planning/harness-compact files under existing issue
+    setup-leaks-existing-plans.
+
+
+    Council fixpoint: native Codex gpt-6-sol and foreign Claude Opus seats CLEAN on
+    final code delta 2d3454a..5e0b98e. Google agy was unavailable at quota and remained
+    empty. Recovery and attribute caveat are documented in the skill README. Follow-ups
+    filed: off-duty-push-interruption-recovery and off-duty-malformed-index-recovery.
+    Keep this issue in_progress until the CTO rules on ready/merge and runs the post-merge
+    installed Nix snapshot. The README filename remains as requested by the lead brief;
+    no product question remains open.'
