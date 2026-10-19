@@ -13,7 +13,8 @@ Retirement can leave a shard on one machine while another process advances the p
 - [x] (2026-10-19 02:28Z) Add a remote-presence regression test, observe its false positive, and require fetched remote commit and bytes.
 - [x] (2026-10-19 02:31Z) Move retire-agent's publication files into per-event private state and add an index builder that runs on every retry.
 - [x] (2026-10-19 02:33Z) Open draft orgs PR #31 with the retirement rule.
-- [ ] Bring retirement and helper tests to green, including mutation checks.
+- [x] (2026-10-19 03:05Z) Fix council's stale-ref finding across helper, retirement, and checkpoint evidence; confirm a prior-version red regression and current green offline checks.
+- [ ] Bring retirement and helper tests to green, including the complete mutation sweep.
 - [ ] Run repository configuration and harness-control gates, review the full diff, and complete council review to fixpoint.
 - [ ] Push both PR heads, record issue status, and prepare a private retirement shard through the helper.
 
@@ -21,25 +22,27 @@ Retirement can leave a shard on one machine while another process advances the p
 
 The current shared sender requires a measured Claude composer with a nonbreaking space after its prompt glyph. The retire-agent fixture used an ordinary space, so Claude fixture tests failed even against the previous retire-agent implementation. The fixture now renders the measured prompt shape.
 
-The old retirement tests also expected canonical files and the generated index to appear in the shared checkout. Those expectations must move to the private staging directory or fetched remote. The shared checkout's dirty files become negative assertions: they stay unchanged.
+The old retirement tests also expected canonical files and the generated index to appear in the shared checkout. Those expectations moved to the private staging directory or fetched remote. The shared checkout's dirty files became negative assertions: they stay unchanged.
+
+Council round one found that `git fetch origin master` can succeed without updating `origin/master` under a custom fetch refspec. The old helper could return a stale commit on its no-op path, and retirement could authorize exit after a remote shard was removed. The helper and verification paths now fetch into unique refs, use the resulting commit ID, and delete only their own temporary refs. A new helper test failed against commit `c5765f4` with the stale-ref false positive and passes on this branch.
 
 ## Decision Log
 
 - Decision: Keep each existing receipt state and publish each transition. Rationale: downstream readers already consume these states, and retaining them avoids a receipt contract change. Date/Author: 2026-10-19, off-duty write-path lead.
-- Decision: Build the index inside each fresh temporary worktree after copying the event files. Rationale: a static index copied from an older checkout could erase a row added by a concurrent writer during a non-fast-forward retry. Date/Author: 2026-10-19, off-duty write-path lead.
+- Decision: Build the index and recheck session identity inside each fresh temporary worktree after copying the event files. Rationale: a static index copied from an older checkout could erase a row added by a concurrent writer during a non-fast-forward retry, or accept a same-session shard from another host. Date/Author: 2026-10-19, off-duty write-path lead.
 - Decision: Keep private event staging files in the Git common directory for resume. Rationale: a failed publication must not strand a receipt in the shared checkout or lose the source bytes needed for an exact retry. Date/Author: 2026-10-19, off-duty write-path lead.
 
 ## Outcomes & Retrospective
 
-In progress. The helper tests exercise a dirty and ahead shared checkout, path rejection, and a remote race that adds another index entry. The retirement happy path and drifted checkout regression pass; the larger retirement suite is being reconciled with the new source location.
+In progress. The helper tests exercise a dirty and ahead shared checkout, path rejection, idempotence, failure cleanup, a stale tracking ref, and remote races that add another index entry or a duplicate session. The retirement happy path, drifted checkout, Unicode foreign shard, and stale-ref exit regressions pass in focused runs. The full retirement and mutation suites are running.
 
 ## Context and Orientation
 
-`skills/_shared/offduty-push.sh` is the publication entry point. Its `--repo` argument names an existing private Git working tree, `--source-root` names a caller-owned tree containing repository-relative files, and each positional file path is copied from that tree. By default it accepts only `waiting/`, `receipts/`, `lane-notes/`, and `writing/`; `--allow-path` is an explicit exception. The helper fetches `origin/master`, creates a detached worktree under XDG or TMPDIR scratch, commits only the requested files, and pushes `HEAD:master`. On a remote advance it removes that worktree and tries again, at most three times.
+`skills/_shared/offduty-push.sh` is the publication entry point. Its `--repo` argument names an existing private Git working tree, `--source-root` names a caller-owned tree containing repository-relative files, and each positional file path is copied from that tree. By default it accepts only `waiting/`, `receipts/`, `lane-notes/`, and `writing/`; `--allow-path` is an explicit exception. The helper fetches master into a unique private ref, creates a detached worktree under XDG, TMPDIR, XDG cache, or `/tmp` scratch, commits only the requested files, and pushes `HEAD:master`. On a remote advance it removes that worktree and tries again, at most three times.
 
 `skills/retire-agent/scripts/retire.py` controls the lifecycle. It stores mutable private state under the repository Git common directory. It now stages each event's shard and receipt under `<event>.publication/` there and calls the helper. `skills/retire-agent/scripts/build-index.py` regenerates the bounded section of `waiting/INDEX.md` in the temporary worktree on each attempt, preserving the steward's surrounding text.
 
-`harness-control/harness_control.py` checks checkpoint evidence. A pushed-remote attestation now triggers a fetch and verifies that the named commit is on `origin/master` and that the remote shard bytes match the recorded SHA-256 digest. `skills/retire-agent/README.md` documents repair of an already drifted shared checkout. The orgs rule is a separate public documentation PR.
+`harness-control/harness_control.py` checks checkpoint evidence. A pushed-remote attestation now fetches master into a unique ref and verifies that the named commit is on that fetched tip and that the remote shard bytes match the recorded SHA-256 digest. `skills/retire-agent/README.md` documents repair of an already drifted shared checkout. The orgs rule is a separate public documentation PR.
 
 ## Plan of Work
 
@@ -63,6 +66,6 @@ The first helper test run failed because the helper did not exist. The first che
 
 ## Interfaces and Dependencies
 
-The helper uses Bash, Git, and a caller-provided XDG or TMPDIR scratch directory. It accepts `--repo REPO --source-root ROOT FILE... -m MESSAGE`, with optional `--allow-path` and the retire-agent-owned `--build-index EXECUTABLE` hook. It prints one commit hash on stdout. The index builder accepts exactly one argument, the temporary worktree path. Python 3.11 or later is required by retire-agent and its tests. No real network or private remote is needed for the local gates.
+The helper uses Bash, Git, and a private scratch directory. It accepts `--repo REPO --source-root ROOT FILE... -m MESSAGE`, with optional `--allow-path` and the retire-agent-owned `--build-index EXECUTABLE` hook. It prints one commit hash on stdout. The index builder accepts the temporary worktree path and optional session/event identifiers for retry-time duplicate detection. Python 3.11 or later is required by retire-agent and its tests. No real network or private remote is needed for the local gates.
 
 Plan update 2026-10-19: recorded the implemented architecture and the fixture compatibility finding so the current suite reconciliation can resume from this file alone.

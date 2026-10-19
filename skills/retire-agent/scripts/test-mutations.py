@@ -9,10 +9,12 @@ import tempfile
 
 HERE = Path(__file__).resolve().parent
 source = (HERE / 'retire.py').read_text()
+builder_source = (HERE / 'build-index.py').read_text()
+helper_source = (HERE.parents[1] / '_shared/offduty-push.sh').read_text()
 mutations = [
     ('missing shared reader blocks before offer', 'if not helper.is_file():', 'if False:', 'test_missing_shared_binding_blocks_before_offer'),
     ('pinned peer lookup PID', "pin = ProcessPin(actor['pid'], actor['start'], actor['boot'])", "pin = ProcessPin(os.getpid(), actor['start'], actor['boot'])", 'test_codex_offer_supplies_verified_id_and_resources'),
-    ('ambiguous offer evidence verification', 'self.observe_ambiguous_offer()  # Recheck even a cached DONE before publication.', 'pass  # Drop ambiguous offer evidence verification.', 'test_ambiguous_offer_positive_input_and_shard_gates'),
+    ('ambiguous offer evidence verification', 'self.observe_ambiguous_offer()  # Recheck even a cached DONE before publication.', 'pass  # Drop ambiguous offer evidence verification.', 'test_ambiguous_offer_evidence_gate_runs_on_resume'),
     ('ambiguous offer never resends', 'if not ambiguous_offer:\n                        self.send(\'offer\', self.offer_payload(event, shard))', 'if True:\n                        self.send(\'offer\', self.offer_payload(event, shard))', 'test_ambiguous_offer_observed_done_resumes_without_replay'),
     ('ambiguous offer positive Enter', "or type(attempt.get('enters')) is not int or attempt['enters'] < 1", 'or False', 'test_ambiguous_offer_positive_input_and_shard_gates'),
     ('ambiguous offer pinned payload', "or attempt.get('payload') != str(expected)", 'or False', 'test_ambiguous_offer_positive_input_and_shard_gates'),
@@ -73,7 +75,7 @@ mutations = [
     ('Claude footer full row', "and re.fullmatch(r'✻ ", "and re.search(r'✻ ", 'test_claude_ui_footer_same_row_prose_is_pending'),
     ('Claude token row full suffix', "any(re.fullmatch(r' +[0-9]+ tokens', status) for status in claude_statuses)", 'True', 'test_claude_ui_footer_partial_tokens_is_pending'),
     ('loaded object', 'if not isinstance(record, dict):', 'if False:', 'test_malformed_state_and_history_preserved'),
-    ('receipt before exit', ["self.publish_locked(['receipts/' + receipt.name], index=True)", "record = receipt_record(self.git('show', 'origin/master:' + self.state['handoff_receipt']))"], ['pass  # Withhold verified receipt publication until after exit.', "record = receipt_record((self.records / self.state['handoff_receipt']).read_text())"], 'test_retire_exit_to_shell_and_path_only_commit'),
+    ('receipt before exit', ["self.publish_locked(['receipts/' + receipt.name], index=True)", "record = receipt_record(self.git('show', remote_head + ':' + self.state['handoff_receipt']))"], ['pass  # Withhold verified receipt publication until after exit.', "record = receipt_record((self.records / self.state['handoff_receipt']).read_text())"], 'test_retire_exit_to_shell_and_path_only_commit'),
     ('shard object', 'if not isinstance(data, dict):', 'if False:', 'test_nonobject_shard_is_controlled_failure'),
     ('private origin', "if run([checker, url]).returncode:", 'if False:', 'test_private_and_missing_remotes_before_send'),
     ('process identity', "if self.identity() != self.state['identity']:", 'if False:', 'test_changed_identity_and_malformed_state'),
@@ -98,12 +100,19 @@ mutations = [
     ('padded completion marker', 'rows[position].rstrip()', 'rows[position]', 'test_padded_final_marker_completes'),
     ('receipt missing path', ['if evidence.returncode:', "if evidence.stdout.strip() != self.state['shard_hash']:"], ['if False:', 'if False:'], 'test_remote_bad_commit_receipt_never_self_heals'),
     ('receipt wrong blob', "if evidence.stdout.strip() != self.state['shard_hash']:", 'if False:', 'test_wrong_blob_receipt_never_self_heals'),
+    ('index symlink', "if index.is_symlink() or (index.exists() and not index.is_file()):", 'if False:', 'test_index_symlink_preserves_outside_file'),
+    ('index receipt identity', "if record['event'] != data['event']:", 'if False:', 'test_corrupt_other_receipt_preserves_generated_index'),
+    ('corrupt index receipt', "raise ValueError('malformed retirement receipt') from error", 'continue', 'test_corrupt_other_receipt_preserves_generated_index'),
+    ('remote base ownership', 'worktree add --quiet --detach "$worktree" "$fetched_ref"', 'worktree add --quiet --detach "$worktree" HEAD', 'test_unowned_local_commit_does_not_block_or_get_pushed'),
 ]
+builder_mutations = {'index symlink', 'index receipt identity', 'corrupt index receipt'}
+helper_mutations = {'remote base ownership'}
+survivors = []
 for label, before, after, test in mutations:
     if len(sys.argv) > 1 and label not in sys.argv[1:]:
         continue
     replacements = list(zip(before, after)) if isinstance(before, list) else [(before, after)]
-    mutated = source
+    mutated = builder_source if label in builder_mutations else helper_source if label in helper_mutations else source
     for before, after in replacements:
         assert before in mutated, label
         mutated = mutated.replace(before, after, 2 if label == 'commit ownership' else 1)
@@ -112,8 +121,12 @@ for label, before, after, test in mutations:
         directory = directory / 'skills/retire-agent/scripts'
         directory.mkdir(parents=True)
         shutil.copytree(HERE.parents[1] / '_shared', directory.parents[1] / '_shared')
-        (directory / 'retire.py').write_text(mutated)
-        shutil.copy2(HERE / 'build-index.py', directory / 'build-index.py')
+        (directory / 'retire.py').write_text(mutated if label not in builder_mutations | helper_mutations else source)
+        (directory / 'build-index.py').write_text(mutated if label in builder_mutations else builder_source)
+        if label in helper_mutations:
+            helper = directory.parents[1] / '_shared/offduty-push.sh'
+            helper.write_text(mutated)
+            helper.chmod(0o755)
         entry = directory / 'retire.sh'
         entry.write_bytes((HERE / 'retire.sh').read_bytes())
         entry.chmod(0o700)
@@ -121,9 +134,13 @@ for label, before, after, test in mutations:
         result = subprocess.run([sys.executable, str(HERE / 'test-retire.py'), 'Tests.' + test], env=env,
                                 text=True, capture_output=True, timeout=30)
         if result.returncode == 0:
-            raise SystemExit('SURVIVED: ' + label)
+            survivors.append(label)
+            print('SURVIVED: ' + label, flush=True)
+            continue
         if 'INVALID-INSTRUMENTATION:' in result.stderr:
             raise SystemExit('Invalid mutation instrumentation: ' + label + '\n' + result.stderr)
         if 'FAILED' not in result.stderr:
             raise SystemExit('Invalid mutation test failure: ' + label + '\n' + result.stderr)
-        print('KILLED: ' + label)
+        print('KILLED: ' + label, flush=True)
+if survivors:
+    raise SystemExit('Surviving mutations: ' + ', '.join(survivors))

@@ -18,6 +18,10 @@ writers and record its path. Do not run `pull --rebase`, `stash`, `reset`, or
 3. Copy newer shard and receipt states into a private scratch source tree at
    their repository relative paths. Publish that reviewed set through
    `skills/_shared/offduty-push.sh --repo SHARED --source-root SCRATCH FILE... -m MESSAGE`.
+   Before calling the helper directly, confirm both origin fetch and push URLs
+   equal the configured `off_duty.remote`, and verify that repository is private
+   (for GitHub, `gh repo view URL --json isPrivate --jq .isPrivate` must print
+   `true`). The retirement controller performs these checks itself.
    Fetch again and compare the remote bytes. If two copies differ and neither
    should replace the other, preserve the alternate on a private salvage
    branch and record its commit. Never silently choose one.
