@@ -196,9 +196,13 @@ def records(frame, inp, strict_claude_submitted=False, archived_codex_status=Non
         # Full-screen redraw can archive an UNSENT input box in scrollback.
         # Its footer/rules still identify it as a composer, not a receipt.
         rule = lambda row: bool(row.strip()) and set(row.strip()) == {"─"}
-        archived_codex_box = (archived_codex_status is not None
-                              and (inp.kind == "unknown" or
-                                   (inp.kind == "text" and normalized(inp.text) == normalized(text)))
+        status_body = archived_codex_status.strip() if archived_codex_status else ""
+        # Status text can change model as well as trailing fields. A structured
+        # status keeps its field separators; an unstructured status has no
+        # comparable shape, so the ambiguous bold box stays excluded.
+        status_like = (not re.search(r"\s+[|·]\s+", status_body)
+                       or bool(re.search(r"\s+[|·]\s+", following)))
+        archived_codex_box = (archived_codex_status is not None and status_like
                               and end < len(lines) and not lines[end].strip()
                               and styles.sgr_span(rows[index], "›", "bold")
                               and following.startswith("  ") and following.strip()

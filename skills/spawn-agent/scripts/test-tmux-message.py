@@ -1028,6 +1028,30 @@ assert screen.observe(frame, 'outgoing', 6, 1, pathlib.Path(sys.argv[2])) == 'dr
                                    archived_codex_status='  GPT-6.1-Sol | main | active')
                          [('submitted', 'shortpayload')], 1)
 
+    def test_codex_unknown_footer_outside_clear_cannot_turn_archive_into_receipt(self):
+        base = codex_fixture_frame('SYNTHETIC-codex-idle-unrecognized-footer')
+        for archived_status in ('GPT-6.1-Sol | main | intermediate',
+                                'GPT-6.2-Sol | main | intermediate'):
+            with self.subTest(archived_status=archived_status):
+                t = Terminal(payload='short payload', dropped=99)
+                def frame():
+                    visible_text = '' if t.enters else t.draft
+                    raw = (base.raw.replace('\x1b[2mAsk Codex to do anything\x1b[0m',
+                                            visible_text) if visible_text else base.raw)
+                    archived = ''
+                    if t.enters:
+                        archived = base.raw.replace('\x1b[2mAsk Codex to do anything\x1b[0m',
+                                                    t.payload).replace(
+                            'GPT-6.1-Sol | main | active', archived_status)
+                    return m.Frame(raw, 2 + m.styles.cell_width(visible_text), base.y,
+                                   archived + raw)
+                t.frame = frame
+                with self.assertRaisesRegex(m.DeliveryError, 'receipt-timeout'):
+                    deliver(t, max_wait=5, stable_wait=3, submit_delay=1,
+                            receipt_wait=5, retry_wait=1)
+                self.assertIsNone(t.accepted_at)
+                self.assertEqual((t.pastes, t.enters), (1, 1))
+
     def test_codex_unknown_footer_delivers_multiline_and_collapsed_pastes(self):
         base = codex_fixture_frame('SYNTHETIC-codex-idle-unrecognized-footer')
         for collapsed in (False, True):
