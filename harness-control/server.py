@@ -358,9 +358,39 @@ def _mark_superseded(session_buckets, account_latest):
     return marked
 
 
+def _read_usage_posture() -> dict:
+    """Read the shared quota decision through its stable CLI interface."""
+    import shutil
+    executable = shutil.which('token-usage')
+    if not executable:
+        return {'state': 'unavailable', 'reason': 'token_usage_cli_unavailable'}
+    try:
+        completed = subprocess.run(
+            [executable, 'posture', '--no-scan', '--json'],
+            capture_output=True, text=True, timeout=5, check=False)
+    except subprocess.TimeoutExpired:
+        return {'state': 'unavailable', 'reason': 'token_usage_posture_timeout'}
+    except OSError:
+        return {'state': 'unavailable', 'reason': 'token_usage_posture_failed'}
+    if completed.returncode != 0:
+        return {'state': 'unavailable', 'reason': 'token_usage_posture_failed'}
+    try:
+        posture = json.loads(completed.stdout)
+    except (TypeError, ValueError):
+        return {'state': 'unavailable', 'reason': 'token_usage_posture_malformed'}
+    if (not isinstance(posture, dict) or posture.get('provider') not in ('openai', 'anthropic', 'none')
+            or not all(isinstance(posture.get(key), dict)
+                       and all(provider in posture[key] for provider in ('openai', 'anthropic'))
+                       for key in ('scores', 'used_percent', 'resets_at'))
+            or not isinstance(posture.get('staleness'), dict)
+            or not isinstance(posture.get('reason'), str)):
+        return {'state': 'unavailable', 'reason': 'token_usage_posture_malformed'}
+    return posture
+
+
 @mcp.tool()
 async def get_usage() -> dict:
-    """Last observed provider quota buckets and reset times, never context tokens.
+    """Last observed provider quota buckets, reset times, and quota posture; never context tokens.
 
     Read-only file observation. Missing/expired meters are unknown. The source
     timestamp must accompany decisions; this is not a live provider query.
@@ -381,12 +411,15 @@ async def get_usage() -> dict:
     import time
     from harness_identity import IdentityError
     from harness_status import parse_claude_usage
+    posture = await asyncio.to_thread(_read_usage_posture)
     try:
         identity = _own_identity()
         binding = await asyncio.to_thread(_native_observation, identity)
         if identity.harness == 'claude':
             sid, snapshot = _claude_snapshot(binding) if binding['state'] == 'observed' else (None, None)
-            return parse_claude_usage(snapshot, sid, now=time.time())
+            result = parse_claude_usage(snapshot, sid, now=time.time())
+            result['posture'] = posture
+            return result
         state = binding.get('observation', {'state': 'unsupported', 'source': 'codex_rollout',
                                             'reason': binding.get('reason', 'native_binding_unavailable')})
         result = {key: value for key, value in state.items()
@@ -407,9 +440,10 @@ async def get_usage() -> dict:
         result['account_latest'] = latest
         if 'quota_buckets' in result:
             result['quota_buckets'] = _mark_superseded(result['quota_buckets'], latest)
+        result['posture'] = posture
         return result
     except IdentityError as exc:
-        return {"state": "unavailable", "reason": str(exc)}
+        return {"state": "unavailable", "reason": str(exc), 'posture': posture}
 
 
 # Lifecycle tools never accept target identity, session id or transcript paths.
