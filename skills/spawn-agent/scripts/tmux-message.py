@@ -109,8 +109,7 @@ def composer(frame, expected_codex_text=None, expected_codex_footer=None):
                 if (not styles.sgr_span(raw[idx], "›", "bold")
                         or status < idx + 2 or lines[status - 1].strip()
                         or not lines[status].startswith("  ")
-                        or any(glyph in lines[status] for glyph in "›❯")
-                        or any(row.strip() for row in lines[status + 1:])):
+                        or any(glyph in lines[status] for glyph in "›❯")):
                     continue
                 content = lines[idx + 1:status - 1]
                 pasted = "\n".join([first] + [row[2:] for row in content])
@@ -147,7 +146,7 @@ def composer(frame, expected_codex_text=None, expected_codex_footer=None):
     return Input("unknown")
 
 
-def records(frame, inp, strict_claude_submitted=False):
+def records(frame, inp, strict_claude_submitted=False, archived_codex_status=None):
     """Candidate receipts outside the live composer, with semantic row markers.
 
     A new occurrence is required relative to the pre-paste history. Assistant
@@ -164,6 +163,11 @@ def records(frame, inp, strict_claude_submitted=False):
     visible_plain = styles.strip_ansi(frame.raw).splitlines()
     observed_status = (visible_plain[inp.end] if inp.harness == "codex"
                        and 0 <= inp.end < len(visible_plain) else None)
+    # A redraw can archive a still-unsent fallback composer while its live
+    # status row changes and the current input becomes unknown. Keep the row
+    # observed before paste as an exclusion in that case.
+    composer_statuses = {status for status in (observed_status, archived_codex_status)
+                         if status is not None}
     queued = False
     for index, line in enumerate(lines):
         if QUEUE.search(line):
@@ -193,8 +197,7 @@ def records(frame, inp, strict_claude_submitted=False):
         # Its footer/rules still identify it as a composer, not a receipt.
         rule = lambda row: bool(row.strip()) and set(row.strip()) == {"─"}
         if kind == "submitted" and (FOOTER.match(following) or rule(following)
-                                    or rule(previous) or (observed_status is not None
-                                    and following == observed_status)):
+                                    or rule(previous) or following in composer_statuses):
             continue
         result[(kind, normalized(text))] += 1
     return result
@@ -613,7 +616,8 @@ class Sender:
             self.draft_harness = check.harness
             self.expected = check.text + "\n" + self.payload
         claude_co_submit = bool(self.stale_draft_length and self.draft_harness == "claude")
-        baseline = records(before, check, strict_claude_submitted=claude_co_submit)
+        baseline = records(before, check, strict_claude_submitted=claude_co_submit,
+                           archived_codex_status=self.codex_fallback_footer)
         claude_receipt_baseline = (claude_combined_receipts(
             before, check, self.original_draft, self.payload) if claude_co_submit else 0)
         if literal:
@@ -646,7 +650,8 @@ class Sender:
             now = self.clock()
             if now >= deadline:
                 break
-            receipt = records(frame, current, strict_claude_submitted=claude_co_submit)
+            receipt = records(frame, current, strict_claude_submitted=claude_co_submit,
+                              archived_codex_status=self.codex_fallback_footer)
             if literal and self.enters == 1 and current.kind == "unknown":
                 resumed = resume_records(frame)
                 fresh = [session for session, count in resumed.items() if count > resume_before[session]]
@@ -683,7 +688,8 @@ class Sender:
                         and self.enters < max_enters and not input_disappeared):
                     # Refresh receipt AND input immediately before each Enter.
                     confirm, live = self.sample()
-                    fresh = records(confirm, live, strict_claude_submitted=claude_co_submit)
+                    fresh = records(confirm, live, strict_claude_submitted=claude_co_submit,
+                                    archived_codex_status=self.codex_fallback_footer)
                     for kind in ("submitted", "queued"):
                         if not literal and self.enters and any(fresh[(kind, form)] > baseline[(kind, form)] for form in accepted_forms):
                             return {"status": "delivered", "receipt": kind, "enters": self.enters}

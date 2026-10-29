@@ -987,20 +987,30 @@ assert screen.observe(frame, 'outgoing', 6, 1, pathlib.Path(sys.argv[2])) == 'dr
 
     def test_codex_unknown_footer_dropped_enter_redraw_is_not_receipt(self):
         base = codex_fixture_frame('SYNTHETIC-codex-idle-unrecognized-footer')
-        t = Terminal(payload='short payload', dropped=99)
-        def frame():
-            raw = base.raw.replace('\x1b[2mAsk Codex to do anything\x1b[0m', t.draft) if t.draft else base.raw
-            # A full-screen redraw can move the still-unsent composer into
-            # scrollback. It must not become a submitted receipt.
-            archived = raw if t.enters else ''
-            return m.Frame(raw, 2 + m.styles.cell_width(t.draft), base.y,
-                           archived + raw)
-        t.frame = frame
-        with self.assertRaisesRegex(m.DeliveryError, 'receipt-timeout'):
-            deliver(t, max_wait=5, stable_wait=3, submit_delay=1,
-                    receipt_wait=5, retry_wait=1)
-        self.assertEqual(t.accepted_at, None)
-        self.assertEqual(t.pastes, 1)
+        for payload, footer_changes in (('short payload', False),
+                                        ('short payload', True),
+                                        ('first line\nsecond line', False)):
+            with self.subTest(payload=payload, footer_changes=footer_changes):
+                t = Terminal(payload=payload, dropped=99)
+                def frame():
+                    parts = t.draft.split('\n')
+                    raw = (base.raw.replace('\x1b[2mAsk Codex to do anything\x1b[0m',
+                                            parts[0] + ''.join('\n  ' + row for row in parts[1:]))
+                           if t.draft else base.raw)
+                    # A full-screen redraw can archive the still-unsent
+                    # composer; the live footer may also change afterwards.
+                    archived = raw if t.enters else ''
+                    if t.enters and footer_changes:
+                        raw = raw.replace('GPT-6.1-Sol | main | active',
+                                          'GPT-6.1-Sol | main | updated')
+                    return m.Frame(raw, 2 + m.styles.cell_width(parts[-1]),
+                                   base.y + len(parts) - 1, archived + raw)
+                t.frame = frame
+                with self.assertRaises(m.DeliveryError):
+                    deliver(t, max_wait=5, stable_wait=3, submit_delay=1,
+                            receipt_wait=5, retry_wait=1)
+                self.assertEqual(t.accepted_at, None)
+                self.assertEqual(t.pastes, 1)
 
     def test_codex_unknown_footer_delivers_multiline_and_collapsed_pastes(self):
         base = codex_fixture_frame('SYNTHETIC-codex-idle-unrecognized-footer')
