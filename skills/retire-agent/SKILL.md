@@ -1,13 +1,16 @@
 ---
 name: retire-agent
-description: Preserve a private, resumable agent handoff and verify a polite exit, or transfer the handoff to a freshly spawned successor.
+description: Preserve a private retirement shard, give the agent off-duty time after publication, and optionally verify a requested exit or model migration.
 ---
 
 # retire-agent
 
 Use this for an explicitly authorized retirement, waiting handoff, or migration.
-A saved handoff and an ended agent process are separate receipts. Preserve
-human input and leave a session open when either receipt cannot be established.
+The mission ends at DONE with the shard written. A successful private push
+starts retirement and gives the agent its own time; the agent may stay off duty
+or request exit. Controller checks and pending receipts do not gate that time.
+Preserve human input and leave a session open when an explicitly requested
+exit cannot be established.
 Read [the shard and recovery contract](references/protocol.md) before invoking
 the script. Linux `/proc`, tmux, Git, Python 3.11+ and the installed spawn-agent
 skill are required. Native verification loads the canonical sibling readers in
@@ -32,14 +35,19 @@ rollout.
 
 ## Modes
 
-- `scripts/retire.sh %PANE --retire`: thank the agent, preserve its handoff,
-  verify the private remote copy, then request exit.
-- `scripts/retire.sh %PANE --waiting`: the same sequence, with the pending
+- `scripts/retire.sh %PANE --retire`: offer off-duty time, preserve the shard,
+  and privately publish it. `RETIRE-DONE-<event>` keeps the session off duty;
+  `RETIRE-EXIT-REQUEST-<event>` explicitly asks the controller to send `/exit`
+  after verifying the private shard. `RETIRE-DECLINED-<event>` leaves the
+  authorized caller to write the recovery shard.
+- `scripts/retire.sh %PANE --waiting`: the same lifecycle, with the pending
   human decision and its owner named in the shard.
-- `scripts/retire.sh %PANE --handoff AGENT MODEL`: retire, then spawn a fresh
-  successor through spawn-agent's published launcher. Its brief is the shard
-  plus the orgs doctrine's ROLES.md. Reconstruct state from artifacts alone
-  and write the first durable record before acting.
+- `scripts/retire.sh %PANE --handoff AGENT MODEL --mission-file FILE`: use only
+  for migration across models or providers. The controller launches the
+  successor without the shard, verifies its actual model/provider, then sends
+  a fresh bounded mission, the verified shard, and ROLES.md as a separate
+  brief. A same-identity or unverifiable successor remains unbriefed and the
+  package stays unassigned.
 
 Offer thanks and off-duty time to **every** agent, including Utility. An agent
 may decline; the caller then writes the same operational shard with `author:
@@ -66,9 +74,10 @@ retirement.
 Shards belong only in a private repository. Preserve one file per session,
 serialize publication, and use the shared `offduty-push.sh` helper from a
 private event staging directory; it commits from a temporary worktree at
-fetched `origin/master`, never from the shared checkout. Verify the shard
-on fetched `origin/master` before recording its receipt and requesting exit.
-Keep operational recovery separate
+fetched `origin/master`, never from the shared checkout. The successful push
+starts off-duty time. Exact-byte verification records the controller receipt
+and is required before a requested exit or migration brief, but pending
+verification does not revoke or delay off-duty time. Keep operational recovery separate
 from personal thanks. A provider-native resume handle comes last and must not
 be required to reconstruct the work.
 
@@ -78,23 +87,25 @@ exit, match the immutable shard UUID to that offered ID and the pinned process:
 Codex uses its unique writable CLI rollout descriptor, which only a session
 running in its own process holds (not a client of the app-server daemon); Claude uses its
 per-process session pointer with start/boot identity. Missing or conflicting
-bindings leave the handoff pending without exit input. Verify all pinned
-original processes ended and a fresh native resume notice
-names the immutable shard's same session UUID; an exit transport result alone is
-insufficient. Never kill a session. Do not stop unrelated services or delete
+bindings leave a requested exit pending without exit input; this does not
+delay off-duty time. For a requested exit, verify all pinned original
+processes ended and a fresh native resume notice names the immutable shard's
+same session UUID; an exit transport result alone is insufficient. Never kill
+a session. Do not stop unrelated services or delete
 worktrees, branches, transcripts, or another actor's files.
 
 The wrapper directly `exec`s Python: pending or usage failure exits nonzero
-(2), and only completed retirement exits zero. If piping output through `tail`
+(2); zero means the private shard was published, with the JSON status
+distinguishing `off-duty` from `retired`. If piping output through `tail`
 or another command, enable shell `pipefail` so the caller retains that status.
 Use `--wait 1200` for a 10–20 minute shard; the maximum is 1800 seconds.
 The script emits a private state path on failure. `scripts/retire.sh %PANE --resume PATH` continues
 observation after a delivered offer, without resending it. After an observed
 decline, author the assigned shard then use `scripts/retire.sh %PANE --resume PATH --caller-shard`.
-Only a proven pre-paste deferral permits `scripts/retire.sh %PANE --resume PATH --retry-deferred offer`
-(or `exit`). An ambiguous offer with a pinned positive paste and Enter can be
+Only a proven pre-paste deferral permits `scripts/retire.sh %PANE --resume PATH --retry-deferred offer`,
+`exit`, or `successor-brief`. An ambiguous offer with a pinned positive paste and Enter can be
 observed on `scripts/retire.sh %PANE --resume PATH` without replay: only a final assistant
-`RETIRE-DONE` or `RETIRE-DECLINED` for that exact event advances disposition.
+`RETIRE-DONE`, `RETIRE-EXIT-REQUEST` or `RETIRE-DECLINED` for that exact event advances disposition.
 The sender result remains ambiguous; absent or unsupported completion stays
 pending. Ambiguous exit attempts still require the independent native notice
 and original-process end, never another blind command.

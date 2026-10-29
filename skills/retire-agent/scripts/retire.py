@@ -109,6 +109,10 @@ def state_record(text):
     for key in ('shard', 'handoff_receipt', 'shard_hash'):
         if key in record and not isinstance(record[key], str):
             raise Stop('malformed retirement evidence: ' + key)
+    if 'off_duty_started_at' in record and not isinstance(record['off_duty_started_at'], str):
+        raise Stop('malformed off-duty receipt time')
+    if 'exit_requested' in record and type(record['exit_requested']) is not bool:
+        raise Stop('malformed exit choice')
     if 'native_session_id' in record and (not isinstance(record['native_session_id'], str) or
             not re.fullmatch(r'[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}', record['native_session_id'])):
         raise Stop('malformed pinned native session identity')
@@ -123,7 +127,27 @@ def receipt_record(text):
     for key in ('shard', 'commit', 'author', 'verified_at'):
         if key in record and not isinstance(record[key], str):
             raise Stop('malformed retirement receipt field: ' + key)
+    if 'off_duty_started_at' in record and not isinstance(record['off_duty_started_at'], str):
+        raise Stop('malformed retirement receipt field: off_duty_started_at')
     return record
+
+
+def selected_model(argv, agent):
+    options = ('--model',) if agent == 'claude' else ('-m', '--model') if agent == 'codex' else ()
+    for index, value in enumerate(argv):
+        if isinstance(value, bytes):
+            value = value.decode(errors='replace')
+        if value in options and index + 1 < len(argv):
+            return argv[index + 1].decode(errors='replace') if isinstance(argv[index + 1], bytes) else str(argv[index + 1])
+        if agent == 'claude' and value.startswith('--model='):
+            return value.partition('=')[2]
+        if agent == 'codex' and (value.startswith('--model=') or value.startswith('-m=')):
+            return value.partition('=')[2]
+    return None
+
+
+def migration_differs(successor_agent, successor_model, outgoing_agent, outgoing_model):
+    return successor_agent != outgoing_agent or successor_model != outgoing_model
 
 
 def proc(pid):
@@ -153,6 +177,7 @@ def proc(pid):
                 agent = 'codex' if '@openai/codex/' in entry else 'claude'
         return {'pid': int(pid), 'parent': int(text[1]), 'start': text[19],
                 'agent': agent, 'boot': Path('/proc/sys/kernel/random/boot_id').read_text().strip(),
+                'model': selected_model(argv, agent),
                 'wrapper': Path(executable).name == 'node' and agent in ('codex', 'claude'),
                 'native': '/@openai/codex/' in executable and '/vendor/' in executable}
     except (OSError, ValueError, UnicodeError):
@@ -267,6 +292,114 @@ class Retirement:
         if self.identity() != self.state['identity']:
             raise Stop('pane/process identity changed')
 
+    def verify_successor_identity(self):
+        spawn = self.state.get('spawn')
+        if not isinstance(spawn, dict) or not isinstance(spawn.get('target'), str):
+            raise Stop('successor target is not pinned')
+        rows = checked(self.tmux + ['list-panes', '-a', '-F',
+                                    '#{pane_id}\t#{pane_pid}\t#{session_name}\t#{window_name}\t#{pane_current_path}'])
+        matches = [row.split('\t') for row in rows.splitlines()
+                   if len(row.split('\t')) == 5 and row.split('\t')[2] + ':' + row.split('\t')[3] == spawn['target']]
+        if len(matches) != 1:
+            raise Stop('successor pane is missing or ambiguous; shard briefing withheld')
+        pane_id, root_pid, _session, _window, directory = matches[0]
+        if not re.fullmatch(r'%[0-9]+', pane_id) or directory != self.state['identity']['directory']:
+            raise Stop('successor pane identity differs; shard briefing withheld')
+        actors = self.actors(root_pid)
+        if len(actors) != 1:
+            raise Stop('successor harness identity is not unique; shard briefing withheld')
+        actor = actors[0]
+        expected_agent, expected_model = self.args.handoff
+        if actor['agent'] != expected_agent or actor.get('model') != expected_model:
+            raise Stop('successor actual model/provider differs from approved migration; shard briefing withheld')
+        pinned = {'pane': pane_id, 'pid': actor['pid'], 'start': actor['start'], 'boot': actor['boot'],
+                  'agent': actor['agent'], 'model': actor.get('model')}
+        prior = spawn.get('identity')
+        if prior is not None and prior != pinned:
+            raise Stop('successor process identity changed; shard briefing withheld')
+        spawn['identity'] = pinned
+        spawn['pane'] = pane_id
+        self.persist()
+        return pinned
+
+    def handoff_successor(self, directory, event):
+        agent, model = self.args.handoff
+        target = self.state['identity']['session'] + ':successor-' + event[:12]
+        spawn = self.state.get('spawn')
+        if spawn is None:
+            self.state['spawn'] = {'status': 'attempting', 'target': target, 'agent': agent, 'model': model}
+            self.persist()
+            self.audit('successor-attempt', agent=agent, model=model)
+            try:
+                result = run([self.shared / 'agent-spawn.sh', target, agent,
+                              self.state['identity']['directory'], '--model', model], env=self.transport_env())
+            except subprocess.TimeoutExpired as error:
+                self.state['spawn'].update(status='unconfirmed', reason='launcher-timeout; inspect before retry')
+                self.persist()
+                self.audit('successor-timeout', status='unconfirmed')
+                raise Stop('successor timeout is unconfirmed; inspect before retry') from error
+            if result.returncode:
+                self.state['spawn'].update(status='unconfirmed', reason='launcher-returned-nonzero; inspect before retry')
+                self.persist()
+                self.audit('successor-result', transport_exit=result.returncode, status='unconfirmed')
+                raise Stop('successor launcher unconfirmed; inspect pane before any retry')
+            self.state['spawn']['status'] = 'launched'
+            self.persist()
+            self.audit('successor-result', transport_exit=0, status='launched')
+        elif spawn.get('status') not in ('launched', 'ready', 'briefed') or spawn.get('target') != target:
+            raise Stop('successor launch already attempted or changed; inspect before retry')
+
+        deadline = time.monotonic() + self.args.wait
+        while True:
+            try:
+                identity = self.verify_successor_identity()
+                break
+            except Stop as error:
+                if 'actual model/provider differs' in str(error):
+                    self.state['spawn']['status'] = 'mismatch'
+                    self.persist()
+                    self.audit('successor-model-mismatch', status='mismatch')
+                    raise
+                if time.monotonic() >= deadline:
+                    self.state['spawn']['status'] = 'unconfirmed'
+                    self.persist()
+                    raise Stop('successor identity did not become verifiable; shard briefing withheld') from error
+                time.sleep(min(self.args.poll, max(0, deadline - time.monotonic())))
+
+        shard = object_record(self.git('show', self.state['shard_hash'], raw=True), 'preserved shard')
+        if not migration_differs(identity['agent'], identity['model'], shard['harness'], shard['model']):
+            self.state['spawn']['status'] = 'mismatch'
+            self.persist()
+            raise Stop('successor actual model/provider matches outgoing lane; shard briefing withheld')
+        mission_path = Path(self.args.mission_file).expanduser()
+        if mission_path.is_symlink() or not mission_path.is_file():
+            raise Stop('fresh bounded mission file is missing or unsafe')
+        mission_stat = mission_path.stat()
+        if not stat.S_ISREG(mission_stat.st_mode) or mission_stat.st_size > 65536:
+            raise Stop('fresh bounded mission file must be a regular file no larger than 64 KiB')
+        mission_bytes = mission_path.read_bytes()
+        if not mission_bytes.strip():
+            raise Stop('fresh bounded mission file is empty')
+        mission_digest = hashlib.sha256(mission_bytes).hexdigest()
+        if self.state.get('mission_sha256') not in (None, mission_digest):
+            raise Stop('fresh mission changed during handoff; shard briefing withheld')
+        self.state['mission_sha256'] = mission_digest
+        self.persist()
+        roles_path = Path(self.args.roles).expanduser().resolve()
+        brief = (b'Cold-start audit before action: reconstruct state from this shard and committed artifacts alone; file any protocol defect first.\n'
+                 b'\nApproved fresh bounded mission:\n' + mission_bytes + b'\n\nShard:\n'
+                 + self.git('show', self.state['shard_hash'], raw=True) + b'\n\nROLES.md:\n'
+                 + roles_path.read_bytes())
+        if self.state.get('spawn', {}).get('status') != 'briefed':
+            self.state['spawn']['status'] = 'ready'
+            self.persist()
+            self.send('successor-brief', brief.decode())
+            self.verify_successor_identity()
+            self.state['spawn']['status'] = 'briefed'
+            self.persist()
+            self.audit('successor-briefed', agent=agent, model=model, pane=identity['pane'])
+        return identity
+
     def native_binding(self):
         """Observe only the controller-selected peer through the shared reader."""
         self.verify_identity()
@@ -324,7 +457,12 @@ class Retirement:
             os.fsync(ledger.fileno())
 
     def send(self, phase, payload):
-        self.verify_identity()
+        target = self.args.pane
+        if phase == 'successor-brief':
+            self.verify_successor_identity()
+            target = self.state['spawn']['pane']
+        else:
+            self.verify_identity()
         attempt = self.state.get(phase)
         if attempt:
             if attempt['status'] == 'delivered':
@@ -350,7 +488,7 @@ class Retirement:
         if phase == 'exit':
             control = ['--literal-exit'] if self.state['identity']['process']['agent'] == 'claude' else ['--typed-command']
         try:
-            result = run([self.shared / 'tmux-message.sh', 'send', self.args.pane,
+            result = run([self.shared / 'tmux-message.sh', 'send', target,
                           *control, '--backoff', '--max-wait', '10', '--prompt-file', payload_path], env=self.transport_env())
         except subprocess.TimeoutExpired as error:
             self.state[phase].update(status='ambiguous', reason='sender-timeout; inspect before retry')
@@ -372,7 +510,7 @@ class Retirement:
         else:
             self.state[phase]['status'] = 'ambiguous'
         self.persist()
-        self.audit('sender-result', phase=phase, transport_exit=result.returncode,
+        self.audit('sender-result', phase=phase, delivery_target=target, transport_exit=result.returncode,
                    receipt_type=report.get('receipt'), status=self.state[phase]['status'])
         if self.state[phase]['status'] != 'delivered':
             raise Stop(f'{phase} {self.state[phase]["status"]}; exact payload preserved')
@@ -380,6 +518,9 @@ class Retirement:
     def offer_payload(self, event, shard, legacy=False):
         # legacy is the installed pre-change offer, not an intermediate PR commit.
         protocol = Path(__file__).resolve().parents[1] / 'references' / 'protocol.md'
+        if legacy:
+            return (f'Thank you for your work. Every agent at every tier is offered retirement and off-duty time. Event {event}. Stop product work; preserve operational recovery separately from any personal thanks. Read {protocol} and write {shard} using its complete JSON schema, event {event}, identity {json.dumps(self.state["identity"])}. Include date/session_id/harness/model/working_directory/tmux_window/role/landed_work/lessons/provenance, structured recovery and resources. Do not exit. After writing your shard, your ENTIRE final reply must be RETIRE-DONE-{event}, with no preface, suffix or extra lines. You may decline; your ENTIRE final reply must then be RETIRE-DECLINED-{event}, with no extra text, and the caller will author recovery with honest attribution. Off-duty is not permission for product work.'
+                    + (' Include waiting.decision and waiting.owner for the pending human decision.' if self.args.waiting else ''))
         binding = ''
         if not legacy:
             proof = self.native_binding()
@@ -392,7 +533,7 @@ class Retirement:
                        'Use that exact session_id in the assigned shard. If the session has changed, '
                        'report a blocker; do not infer another ID from cwd, environment, or newest files.')
         resources = '' if legacy else ' Retain handles for any running exec calls: yielding output is not completion. For every owned child process, verify actual exit or accepted transfer before claiming release; a parent shell ending does not prove its descendants ended. Stop only processes whose ownership and identity you verified.'
-        return f'Thank you for your work. Every agent at every tier is offered retirement and off-duty time. Event {event}. Stop product work; preserve operational recovery separately from any personal thanks. Read {protocol} and write {shard} using its complete JSON schema, event {event}, identity {json.dumps(self.state["identity"])}.{binding} Include date/session_id/harness/model/working_directory/tmux_window/role/landed_work/lessons/provenance, structured recovery and resources.{resources} Do not exit. After writing your shard, your ENTIRE final reply must be RETIRE-DONE-{event}, with no preface, suffix or extra lines. You may decline; your ENTIRE final reply must then be RETIRE-DECLINED-{event}, with no extra text, and the caller will author recovery with honest attribution. Off-duty is not permission for product work.' + (' Include waiting.decision and waiting.owner for the pending human decision.' if self.args.waiting else '')
+        return f'Thank you for your work. Every agent at every tier is offered retirement and off-duty time. Event {event}. Stop product work; preserve operational recovery separately from any personal thanks. Read {protocol} and write {shard} using its complete JSON schema, event {event}, identity {json.dumps(self.state["identity"])}.{binding} Include date/session_id/harness/model/working_directory/tmux_window/role/landed_work/lessons/provenance, structured recovery and resources.{resources} Do not exit. After writing the shard, choose whether you want the controller to send /exit after the private push is verified. To keep the session off duty, your ENTIRE final reply must be RETIRE-DONE-{event}. To leave after publication, your ENTIRE final reply must be RETIRE-EXIT-REQUEST-{event}; this is your explicit request for the controller to send /exit after publication and verification. Do not ask the controller to exit before the shard is verified. You may decline; your ENTIRE final reply must then be RETIRE-DECLINED-{event}, with no extra text, and the caller will author recovery with honest attribution. Off-duty is not permission for product work.' + (' Include waiting.decision and waiting.owner for the pending human decision.' if self.args.waiting else '')
 
     def observe_ambiguous_offer(self):
         """Permit observation after a proven offer input attempt, never a resend."""
@@ -469,6 +610,12 @@ class Retirement:
         except (Stop, OSError, ValueError, TypeError, IndexError, KeyError):
             return False
 
+    def expected_final_marker(self):
+        if self.state.get('exit_requested'):
+            return 'RETIRE-EXIT-REQUEST-' + self.state['id']
+        disposition = self.state.get('disposition')
+        return 'RETIRE-' + disposition + '-' + self.state['id']
+
     def observe(self):
         self.verify_identity()
         try:
@@ -490,14 +637,14 @@ class Retirement:
         if not candidates:
             return None
         position = candidates[-1]
-        marker = re.fullmatch(r'[●•] RETIRE-(DONE|DECLINED)-' + event, rows[position].rstrip())
+        marker = re.fullmatch(r'[●•] RETIRE-(DONE|DECLINED|EXIT-REQUEST)-' + event, rows[position].rstrip())
         # A bullet-shaped Codex duration row is visually indistinguishable
         # from another assistant reply. Ignore it only when the pinned native
         # rollout says the latest completed turn ended with this marker.
         if (not marker and agent == 'codex' and len(candidates) >= 2
                 and codex_footer_row.fullmatch(rows[position].rstrip())):
             preceding = candidates[-2]
-            native_marker = re.fullmatch(r'[●•] RETIRE-(DONE|DECLINED)-' + event,
+            native_marker = re.fullmatch(r'[●•] RETIRE-(DONE|DECLINED|EXIT-REQUEST)-' + event,
                                          rows[preceding].rstrip())
             if (native_marker and self.codex_final_marker('RETIRE-' + native_marker[1] + '-' + event)):
                 position, marker = preceding, native_marker
@@ -529,6 +676,9 @@ class Retirement:
                               or any(re.fullmatch(r' +globalVersion: [0-9]+(?:\.[0-9]+)+ · latestVersion: [0-9]+(?:\.[0-9]+)+(?: ✘ Auto-update failed: no write permission to npm prefix · Run claude doctor)?', status) for status in claude_statuses)))
         if tail and not (codex_footer or claude_footer):
             return None
+        if marker[1] == 'EXIT-REQUEST':
+            self.state['exit_requested'] = True
+            return 'DONE'
         return marker[1]
 
     def validate_shard(self, path):
@@ -552,6 +702,8 @@ class Retirement:
         for key in ('date', 'session_id', 'harness', 'model', 'working_directory', 'tmux_window', 'role', 'landed_work', 'lessons', 'provenance'):
             if not isinstance(data.get(key), str) or not data[key].strip():
                 raise Stop('shard requires ' + key)
+        if self.args.handoff and not migration_differs(self.args.handoff[0], self.args.handoff[1], data['harness'], data['model']):
+            raise Stop('open-package handoff requires a different successor model or provider')
         if not re.fullmatch(r'\d{4}-\d{2}-\d{2}', data['date']) or not re.fullmatch(r'[\w.-]{1,128}', data['session_id']):
             raise Stop('invalid date/session identity')
         datetime.date.fromisoformat(data['date'])
@@ -803,7 +955,7 @@ class Retirement:
                 data, content = self.validate_shard(shard)
                 if self.state.get('native_marker_witness'):
                     disposition = self.state.get('disposition')
-                    if disposition not in ('DONE', 'DECLINED') or not self.codex_final_marker('RETIRE-' + disposition + '-' + event):
+                    if disposition not in ('DONE', 'DECLINED') or not self.codex_final_marker(self.expected_final_marker()):
                         raise Stop('native final marker no longer current before handoff publication')
                 waiting = self.records / 'waiting'
                 waiting.mkdir(mode=0o700, exist_ok=True)
@@ -838,7 +990,7 @@ class Retirement:
             record = receipt_record(self.git('show', remote_head + ':' + self.state['handoff_receipt']))
             if record.get('event') != event or record.get('shard') != self.state['shard'] or not re.fullmatch(r'[0-9a-f]{40,64}', record.get('commit', '')):
                 raise Stop('private handoff receipt changed or missing')
-            if record.get('status') not in ('handoff-verified', 'pending-exit', 'retired'):
+            if record.get('status') not in ('handoff-verified', 'off-duty', 'pending-exit', 'retired'):
                 raise Stop('private receipt does not establish handoff')
             evidence = run(['git', '-C', self.repo, 'rev-parse', '--verify', record['commit'] + ':' + self.state['shard']])
             if evidence.returncode:
@@ -846,69 +998,67 @@ class Retirement:
             if evidence.stdout.strip() != self.state['shard_hash']:
                 raise Stop('private receipt commit contains different shard bytes')
             self.evidence_verified = True  # Current execution, never cached state authority.
+        if record.get('status') != 'retired':
+            off_duty_at = self.state.get('off_duty_started_at')
+            off_duty_new = not isinstance(off_duty_at, str)
+            if not isinstance(off_duty_at, str):
+                off_duty_at = datetime.datetime.now(datetime.timezone.utc).isoformat()
+                self.state['off_duty_started_at'] = off_duty_at
+            self.state['status'] = 'off-duty'
+            self.persist()
+            receipt = self.records / self.state['handoff_receipt']
+            record = receipt_record(receipt.read_text())
+            record['status'] = 'off-duty'
+            record['off_duty_started_at'] = off_duty_at
+            save(receipt, record)
+            self.publish([self.state['handoff_receipt']], index=True)
+            if off_duty_new:
+                self.audit('off-duty-started', shard_path=self.state['shard'])
         preserved = object_record(self.git('show', self.state['shard_hash'], raw=True), 'preserved shard')
         session_id = preserved.get('session_id')
         if not isinstance(session_id, str):
             raise Stop('handoff verified; missing native session identity')
-        if not self.state.get('exit'):
-            if self.ended():
-                raise Stop('handoff verified; original ended before exit request, fresh notice unavailable')
-            self.verify_native_session(session_id)
-            if self.state.get('native_marker_witness'):
-                disposition = self.state.get('disposition')
-                if disposition not in ('DONE', 'DECLINED') or not self.codex_final_marker('RETIRE-' + disposition + '-' + event):
+        if self.state.get('exit') and not self.state.get('exit_requested'):
+            raise Stop('legacy exit attempt has no recorded agent request; inspect without resending')
+        if self.state.get('exit_requested'):
+            if not self.state.get('exit'):
+                if self.ended():
+                    raise Stop('handoff verified; original ended before requested exit, fresh notice unavailable')
+                self.verify_native_session(session_id)
+                if self.state.get('native_marker_witness') and not self.codex_final_marker(self.expected_final_marker()):
                     raise Stop('handoff verified; native final marker no longer current')
-            if self.state.get('native_session_id') and session_id != self.state['native_session_id']:
-                raise Stop('handoff verified; shard differs from offered native session ID')
-            self.state['exit_notice'] = {'session_id': session_id, 'before': self.exit_notice_count(session_id)}
-            self.persist()  # Save only the count before any exit input, for safe resume.
-            try:
-                self.send('exit', '/exit' if self.state['identity']['process']['agent'] != 'agy' else '/quit')
-            except Stop:
-                if not self.state.get('exit'):
-                    raise
-                if self.state['exit']['status'] == 'deferred' and not self.ended():
-                    raise Stop('exit deferred before submission; --resume STATE --retry-deferred exit')
-        deadline = time.monotonic() + self.args.wait
-        while not (self.ended() and self.fresh_exit_notice(session_id)):
-            if time.monotonic() >= deadline:
-                raise Stop('handoff verified; retirement pending original process end and fresh same-session exit notice')
-            time.sleep(.25)
-        self.exit_verified = True  # Current process+notice pair, never loaded state authority.
-        self.state['status'] = 'retired'
-        self.persist()
-        receipt = self.records / self.state['handoff_receipt']
-        record = receipt_record(receipt.read_text())
-        record['status'] = 'retired'
-        record['process_exit'] = 'original-process-and-recorded-native-core-ended'
-        record['exit_notice_session'] = session_id
-        record['verified_at'] = datetime.datetime.now(datetime.timezone.utc).isoformat()
-        save(receipt, record)
-        self.publish([self.state['handoff_receipt']], index=True)
-        self.audit('original-exit-confirmed', exit_confirmed=True, shard_path=self.state['shard'])
+                if self.state.get('native_session_id') and session_id != self.state['native_session_id']:
+                    raise Stop('handoff verified; shard differs from offered native session ID')
+                self.state['exit_notice'] = {'session_id': session_id, 'before': self.exit_notice_count(session_id)}
+                self.persist()  # Save only the count before the explicitly requested exit input.
+                try:
+                    self.send('exit', '/exit' if self.state['identity']['process']['agent'] != 'agy' else '/quit')
+                except Stop:
+                    if not self.state.get('exit'):
+                        raise
+                    if self.state['exit']['status'] == 'deferred' and not self.ended():
+                        raise Stop('exit deferred before submission; --resume STATE --retry-deferred exit')
+            deadline = time.monotonic() + self.args.wait
+            while not (self.ended() and self.fresh_exit_notice(session_id)):
+                if time.monotonic() >= deadline:
+                    raise Stop('handoff verified; requested exit is pending original process end and fresh same-session exit notice')
+                time.sleep(.25)
+            self.exit_verified = True  # Current process+notice pair, never loaded state authority.
+            self.state['status'] = 'retired'
+            self.persist()
+            receipt = self.records / self.state['handoff_receipt']
+            record = receipt_record(receipt.read_text())
+            record['status'] = 'retired'
+            record['process_exit'] = 'original-process-and-recorded-native-core-ended'
+            record['exit_notice_session'] = session_id
+            record['verified_at'] = datetime.datetime.now(datetime.timezone.utc).isoformat()
+            save(receipt, record)
+            self.publish([self.state['handoff_receipt']], index=True)
+            self.audit('original-exit-confirmed', exit_confirmed=True, shard_path=self.state['shard'])
         if self.args.handoff:
-            if self.state.get('spawn'):
-                raise Stop('successor already attempted; inspect launcher receipt, never respawn')
-            roles = Path(self.args.roles).expanduser().resolve()
-            brief = directory / (event + '-brief.txt')
-            preserved = self.git('show', self.state['shard_hash'], raw=True)
-            atomic_bytes(brief, ('Cold-start audit before action: reconstruct state from this shard and committed artifacts alone; file any protocol defect first. Establish identity and write your first durable record before acting.\n\n' + preserved + '\n\n' + roles.read_text()).encode())
-            self.state['spawn'] = {'status': 'attempting', 'brief': str(brief)}
-            self.persist()
-            self.audit('successor-attempt', agent=self.args.handoff[0], model=self.args.handoff[1])
-            try:
-                result = run([self.shared / 'agent-spawn.sh', self.state['identity']['session'] + ':successor-' + event[:12], self.args.handoff[0], self.state['identity']['directory'], '--model', self.args.handoff[1], '--prompt-file', brief], env=self.transport_env())
-            except subprocess.TimeoutExpired as error:
-                self.state['spawn'].update(status='unconfirmed', reason='launcher-timeout; inspect before retry')
-                self.persist()
-                self.audit('successor-timeout', status='unconfirmed')
-                raise Stop('successor timeout is unconfirmed; inspect before retry') from error
-            self.state['spawn']['status'] = 'delivered' if result.returncode == 0 else 'unconfirmed'
-            self.persist()
-            self.audit('successor-result', transport_exit=result.returncode, status=self.state['spawn']['status'])
-            if result.returncode:
-                raise Stop('successor launcher unconfirmed; inspect private brief and launcher pane before any retry')
-        print(json.dumps({'status': 'retired', 'state': str(self.path), 'receipt': self.state['handoff_receipt']}))
+            self.handoff_successor(directory, event)
+        result_status = 'retired' if self.exit_verified else 'off-duty'
+        print(json.dumps({'status': result_status, 'state': str(self.path), 'receipt': self.state['handoff_receipt']}))
 
     def record_pending(self):
         if not self.state or not getattr(self, 'event_owned', False):
@@ -923,7 +1073,9 @@ class Retirement:
         receipt = self.records / 'receipts' / (self.state['id'] + '.json')
         if receipt.exists():
             record = receipt_record(receipt.read_text())
-            record['status'] = 'retired' if self.exit_verified else ('pending-exit' if self.state.get('handoff_receipt') else 'pending-handoff')
+            record['status'] = ('retired' if self.exit_verified else
+                                'pending-exit' if self.state.get('exit_requested') and self.state.get('handoff_receipt') else
+                                'off-duty' if self.state.get('handoff_receipt') else 'pending-handoff')
             record['offer'] = self.state.get('offer', {}).get('status', 'not-attempted')
             record['exit'] = self.state.get('exit', {}).get('status', 'not-attempted')
             save(receipt, record)
@@ -939,10 +1091,11 @@ def main():
     modes.add_argument('--handoff', nargs=2, metavar=('AGENT', 'MODEL'))
     parser.add_argument('--resume')
     parser.add_argument('--caller-shard', action='store_true')
-    parser.add_argument('--retry-deferred', choices=('offer', 'exit'))
+    parser.add_argument('--retry-deferred', choices=('offer', 'exit', 'successor-brief'))
     parser.add_argument('--wait', type=float, default=300)
     parser.add_argument('--poll', type=float, default=60)
     parser.add_argument('--roles')
+    parser.add_argument('--mission-file')
     args = parser.parse_args()
     try:
         config = load_config()
@@ -958,6 +1111,11 @@ def main():
         parser.error('published launcher supports explicit model selection for codex/claude only')
     if args.handoff and (not args.handoff[1].strip() or not args.roles or not Path(args.roles).expanduser().is_file()):
         parser.error('handoff needs model and readable ROLES.md')
+    if args.handoff and (not args.mission_file or Path(args.mission_file).expanduser().is_symlink()
+                         or not Path(args.mission_file).expanduser().is_file()):
+        parser.error('handoff needs a regular bounded mission file')
+    if args.mission_file and not args.handoff:
+        parser.error('--mission-file requires --handoff')
     args.mode = 'handoff:' + ':'.join(args.handoff) if args.handoff else ('waiting' if args.waiting else 'retire')
     try:
         retirement = Retirement(args, config=config)

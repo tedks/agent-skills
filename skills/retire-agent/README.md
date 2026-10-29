@@ -1,5 +1,15 @@
 # Recover a drifted shared off-duty checkout
 
+## Retirement lifecycle
+
+This page covers checkout repair. Retirement itself ends the mission at DONE
+with the shard written. A successful private push begins the agent's off-duty
+time; controller verification and receipt updates are bookkeeping. The agent
+chooses whether to stay off duty or request exit. A shard briefs a successor
+only during model/provider migration, after the launched successor's actual
+identity is verified. See [SKILL.md](SKILL.md) and the
+[shard and recovery contract](references/protocol.md) for the full procedure.
+
 Only the repository steward should repair the shared checkout. First stop new
 writers and record its path. Do not run `pull --rebase`, `stash`, `reset`, or
 `clean` before the evidence below has been inspected and preserved.
