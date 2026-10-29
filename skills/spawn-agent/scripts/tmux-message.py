@@ -197,6 +197,8 @@ def records(frame, inp, strict_claude_submitted=False, archived_codex_status=Non
         # Its footer/rules still identify it as a composer, not a receipt.
         rule = lambda row: bool(row.strip()) and set(row.strip()) == {"─"}
         archived_codex_box = (archived_codex_status is not None
+                              and (inp.kind == "unknown" or
+                                   (inp.kind == "text" and normalized(inp.text) == normalized(text)))
                               and end < len(lines) and not lines[end].strip()
                               and styles.sgr_span(rows[index], "›", "bold")
                               and following.startswith("  ") and following.strip()

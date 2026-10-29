@@ -990,6 +990,7 @@ assert screen.observe(frame, 'outgoing', 6, 1, pathlib.Path(sys.argv[2])) == 'dr
         for payload, footer_changes in (('short payload', 0),
                                         ('short payload', 1),
                                         ('short payload', 2),
+                                        ('short payload', 3),
                                         ('first line\nsecond line', 0),
                                         ('first line\nsecond line', 2)):
             with self.subTest(payload=payload, footer_changes=footer_changes):
@@ -1002,10 +1003,10 @@ assert screen.observe(frame, 'outgoing', 6, 1, pathlib.Path(sys.argv[2])) == 'dr
                     # A full-screen redraw can archive the still-unsent
                     # composer; the live footer may also change afterwards.
                     archived = raw if t.enters else ''
-                    if t.enters and footer_changes == 2:
+                    if t.enters and footer_changes in (2, 3):
                         archived = archived.replace('GPT-6.1-Sol | main | active',
                                                     'GPT-6.1-Sol | main | intermediate')
-                    if t.enters and footer_changes:
+                    if t.enters and footer_changes in (1, 2):
                         raw = raw.replace('GPT-6.1-Sol | main | active',
                                           'GPT-6.1-Sol | main | updated')
                     return m.Frame(raw, 2 + m.styles.cell_width(parts[-1]),
@@ -1016,6 +1017,16 @@ assert screen.observe(frame, 'outgoing', 6, 1, pathlib.Path(sys.argv[2])) == 'dr
                             receipt_wait=5, retry_wait=1)
                 self.assertEqual(t.accepted_at, None)
                 self.assertEqual(t.pastes, 1)
+
+    def test_codex_unknown_footer_bold_submitted_receipt_with_indented_reply(self):
+        base = codex_fixture_frame('SYNTHETIC-codex-idle-unrecognized-footer')
+        submitted = '\x1b[1m›\x1b[0m short payload\n\n  I received your message.\n'
+        frame = m.Frame(base.raw, base.x, base.y, submitted + base.raw)
+        inp = m.composer(frame)
+        self.assertEqual(inp.kind, 'empty')
+        self.assertEqual(m.records(frame, inp,
+                                   archived_codex_status='  GPT-6.1-Sol | main | active')
+                         [('submitted', 'shortpayload')], 1)
 
     def test_codex_unknown_footer_delivers_multiline_and_collapsed_pastes(self):
         base = codex_fixture_frame('SYNTHETIC-codex-idle-unrecognized-footer')
