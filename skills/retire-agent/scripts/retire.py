@@ -54,7 +54,7 @@ def run(args, **kwargs):
 
 def read_regular_bytes(path, limit, label, require_nonempty=False):
     try:
-        descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_NOCTTY)
     except OSError as error:
         raise Stop(label + ' is missing or unsafe') from error
     try:
@@ -390,6 +390,8 @@ class Retirement:
         agent, model = self.args.handoff
         mission_path = Path(self.args.mission_file).expanduser()
         mission_bytes = read_regular_bytes(mission_path, 65536, 'fresh bounded mission file', require_nonempty=True)
+        # The configured doctrine path may intentionally be a symlink; resolve
+        # it before the bounded no-follow open to preserve that configuration.
         roles_path = Path(self.args.roles).expanduser().resolve()
         roles_bytes = read_regular_bytes(roles_path, 1048576, 'ROLES.md', require_nonempty=True)
         try:

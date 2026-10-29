@@ -50,6 +50,9 @@ rollout.
   brief. A same-identity or unverifiable successor remains unbriefed and the
   package stays unassigned. If the original chose DONE, it may remain open
   off duty while the successor owns active work in the shared worktree.
+  The mission must be non-empty UTF-8 text no larger than 64 KiB; configured
+  ROLES.md must be non-empty UTF-8 text no larger than 1 MiB. The ROLES path
+  is resolved before its bounded read, so configured symlinks remain supported.
 
 Offer thanks and off-duty time to **every** agent, including Utility. An agent
 may decline; the caller then writes the same operational shard with `author:

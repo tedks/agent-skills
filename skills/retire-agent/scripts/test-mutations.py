@@ -81,7 +81,7 @@ mutations = [
     ('private origin', "if run([checker, url]).returncode:", 'if False:', 'test_private_and_missing_remotes_before_send'),
     ('process identity', 'if ignore_unrecorded_model(observed, expected) != expected:', 'if False:', 'test_changed_identity_and_malformed_state'),
     ('exit gate', 'while not (self.ended() and self.fresh_exit_notice(session_id)):', 'while False:', 'test_no_successor_before_exit'),
-    ('safe shard', ["if path.is_symlink() or not path.is_file() or path.resolve() != self.path.parent / (self.state['id'] + '.shard'):", 'descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)'], ['if False:', 'descriptor = os.open(path, os.O_RDONLY | os.O_NONBLOCK)'], 'test_symlink_shard_blocks_exit'),
+    ('safe shard', ["if path.is_symlink() or not path.is_file() or path.resolve() != self.path.parent / (self.state['id'] + '.shard'):", "            raise Stop('missing or unsafe unique shard')\n        descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)"], ['if False:', "            raise Stop('missing or unsafe unique shard')\n        descriptor = os.open(path, os.O_RDONLY | os.O_NONBLOCK)"], 'test_symlink_shard_blocks_exit'),
     ('DONE provenance', [r"r'^[●•] '", r"r'[●•] RETIRE-(DONE|DECLINED|EXIT-REQUEST)-'"], [r"r'^(?:[●•] )?RETIRE-'", r"r'(?:[●•] )?RETIRE-(DONE|DECLINED|EXIT-REQUEST)-'"], 'test_wrapped_user_done_does_not_complete'),
     ('validated snapshot', 'atomic_bytes(canonical, content)', 'atomic_bytes(canonical, shard.read_bytes())', 'test_validated_snapshot_ignores_later_symlink_swap'),
     ('lingering core', "for core in original.get('cores', []):", 'for core in []:', 'test_wrapper_exit_waits_for_lingering_core'),
