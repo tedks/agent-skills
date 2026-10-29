@@ -956,8 +956,34 @@ assert screen.observe(frame, 'outgoing', 6, 1, pathlib.Path(sys.argv[2])) == 'dr
         self.assertEqual(m.composer(m.Frame(frame.raw, 3, frame.y)).kind, 'unknown')
         plain = frame.raw.replace('\x1b[2mAsk Codex to do anything', 'Ask Codex to do anything')
         self.assertNotEqual(m.composer(m.Frame(plain, 2, frame.y)).kind, 'empty')
+        unstyled_prompt = frame.raw.replace('\x1b[1m›\x1b[0m', '›')
+        self.assertEqual(m.composer(m.Frame(unstyled_prompt, 2, frame.y)).kind, 'unknown')
         choice = frame.raw.replace('Ask Codex to do anything', '1. Allow')
         self.assertEqual(m.composer(m.Frame(choice, 2, frame.y)).kind, 'unknown')
+        pasted = frame.raw.replace('\x1b[2mAsk Codex to do anything\x1b[0m', 'short payload')
+        pasted_frame = m.Frame(pasted, 2 + len('short payload'), frame.y)
+        self.assertEqual(m.composer(pasted_frame).kind, 'unknown')
+        self.assertEqual(m.composer(pasted_frame, 'short payload',
+                                    '  GPT-6.1-Sol | main | active').kind, 'text')
+        self.assertEqual(m.composer(pasted_frame, 'short payload',
+                                    '  GPT-6.1-Sol | changed').kind, 'unknown')
+
+    def test_codex_unknown_footer_delivers_only_its_observed_paste(self):
+        base = codex_fixture_frame('SYNTHETIC-codex-idle-unrecognized-footer')
+        t = Terminal(payload='MODAL-M2 short receipt probe')
+        def frame():
+            if t.draft:
+                raw = base.raw.replace('\x1b[2mAsk Codex to do anything\x1b[0m', t.draft)
+            else:
+                raw = base.raw
+            submitted = ''
+            if t.accepted_at is not None:
+                submitted = '› ' + t.submitted + '\n\n'
+            return m.Frame(raw, 2 + m.styles.cell_width(t.draft), base.y, submitted + raw)
+        t.frame = frame
+        result = deliver(t, max_wait=5, stable_wait=3, submit_delay=1)
+        self.assertEqual((result['status'], result['receipt']), ('delivered', 'submitted'))
+        self.assertEqual((t.pastes, t.enters, t.submitted), (1, 1, t.payload))
 
     def test_readiness_distinguishes_unknown_from_never_stable(self):
         frame = codex_fixture_frame('codex-2026-10-18-live-current-748-scrubbed')
@@ -977,6 +1003,34 @@ assert screen.observe(frame, 'outgoing', 6, 1, pathlib.Path(sys.argv[2])) == 'dr
                 with self.assertRaisesRegex(m.DeliveryError, expected):
                     sender.ready()
                 self.assertEqual(t.actions, [])
+
+    def test_codex_idle_survives_interleaved_unreadable_snapshots(self):
+        # A moving output frame can make a coordinate/capture sample unreadable
+        # while the same empty composer remains visible before and after it.
+        frame = codex_fixture_frame('codex-2026-10-18-live-current-749-scrubbed')
+        t = Terminal()
+        samples = 0
+        def sample():
+            nonlocal samples
+            samples += 1
+            return m.Frame('', -1, -1) if samples % 4 == 0 else frame
+        t.frame = sample
+        o = SimpleNamespace(max_wait=5, stable_wait=3, poll_interval=.25,
+                            backoff=True)
+        sender = m.Sender(t, o, t.payload, Path('/unused'), t.clock, t.sleep)
+        self.assertEqual(sender.ready()[1].kind, 'empty')
+        self.assertEqual(t.actions, [])
+
+    def test_unknown_gap_does_not_hide_changed_draft(self):
+        t = Terminal()
+        samples = iter((screen('alpha'), m.Frame('', -1, -1), screen('beta')))
+        t.frame = lambda: next(samples, screen('beta'))
+        o = SimpleNamespace(max_wait=5, stable_wait=1, poll_interval=.25,
+                            backoff=False)
+        sender = m.Sender(t, o, t.payload, Path('/unused'), t.clock, t.sleep)
+        with self.assertRaisesRegex(m.DeliveryError, 'human-typing'):
+            sender.ready()
+        self.assertEqual(t.actions, [])
 
     def test_claude_dialogs_and_footers_by_fixture(self):
         fixtures = (

@@ -11,8 +11,9 @@ An idle Codex input should accept guarded `tmux-message` delivery even if the st
 - [x] (2026-10-29) Recovered the private checkpoint, read Lead doctrine and issue, confirmed the old branch clean, and created `fix/tmux-message-codex-idle-layout` from `origin/master` at `f703451`.
 - [x] (2026-10-29) Started and synced ditz `tmux-message-codex-idle-unsupported-layout`.
 - [x] (2026-10-29) Inspected two read-only, scrubbed October 18 live-current captures. Their original incident panes are gone; both captures classify `empty` today and are not incident reproductions.
-- [ ] Add scrubbed live fixtures with honest provenance and synthetic failing footer/stability regressions; observe red on base behavior.
-- [ ] Make the smallest composer and reason change, validate mutation probes and skill/config tests.
+- [x] (2026-10-29) Committed the two scrubbed live-current fixtures and one labeled synthetic footer variant at `6238a09`. The old source failed two focused tests: changed footer returned `unknown`, and recognized/unknown alternation reported `unsupported-layout`.
+- [x] (2026-10-29) Opened draft PR #13 with the red-test commit and sent `MODAL-M2-ACK MODAL-CHECKPOINT` to `%321` with a verified submitted receipt.
+- [x] (2026-10-29) Added guarded changed-footer recognition, exact post-paste ownership, transient-unknown readiness handling, and distinct `unstable-composer` diagnosis. Red tests covered the old behavior, the readiness-only intermediate state, and the interleaved-unknown state. Final local gates: Python 128 pass, tmux alias pass, private live tmux pass, legacy sender pass, config 21 pass, syntax/diff pass.
 - [ ] Push, open draft PR, review to Lead-tier council fixpoint, run final gates, merge normally, close/sync issue, and report `MODAL-CHECKPOINT` to `%321`.
 
 ## Surprises & Discoveries
@@ -20,11 +21,15 @@ An idle Codex input should accept guarded `tmux-message` delivery even if the st
 - The October 18 captures are after the incidents: `%748` says Context 79% left and `%749` says 96%, not the reported 38%. The originals are unavailable; fixture names must preserve that distinction.
 - `tmux-message.py:composer` requires a footer regex after a Codex prompt. `ready()` initializes `last_reason` to `unsupported-layout` and can time out for unknown samples or moving recognized samples under the same label. Output above the composer is already excluded from `Input.fingerprint`.
 - Harness-control used `--max-wait 5 --stable-wait 3`, so a correctly recognized stable composer had a chance to pass. The saved operation records only the deferred reason, not raw screen samples; the exact incident failure mode cannot be proved retrospectively.
+- Readiness-only recognition was insufficient: the sender could paste into the synthetic changed-footer frame, then could not verify its own text and returned `paste-not-observed` before Enter. The post-paste test was red on that intermediate implementation.
+- A 5-second readiness window with 3-second stability requirement fails on the real normal-footer fixture when a single unreadable capture appears every fourth sample; the pre-change loop reset stability on every unknown frame and timed out `unstable-composer`. The operation log did not save screen samples, so this is a plausible mechanism, not proof of the three original incidents.
 
 ## Decision Log
 
 - Decision: use the two scrubbed captures as real layout evidence but not as reproduced failures; construct a clearly synthetic footer variant to exercise the missing-footer branch. Rationale: the incident panes have ended and the captured states classify ready on current code. Date/Author: 2026-10-29, Codex Lead.
 - Decision: keep the cursor and selected-choice guards when recognizing a new footer. Rationale: a quoted prompt or choice screen must not authorize input. Date/Author: 2026-10-29, Codex Lead.
+- Decision: the fallback accepts the measured bold Codex prompt, dim idle placeholder, blank separator, and one indented final status row with arbitrary wording. After paste, it accepts only the exact outgoing single-line text at the end cursor with the same status row observed immediately before paste. Rationale: preserve unknown choice and unrelated draft deferrals while completing one guarded send. Date/Author: 2026-10-29, Codex Lead.
+- Decision: an unreadable readiness sample does not erase a previously seen composer fingerprint; acting still requires two fresh consecutive recognized samples after the gap and an immediate unchanged sample before paste. A changed known draft across the gap remains `human-typing`. Rationale: transient capture races should not consume harness-control's bounded readiness window, while uncertain or changing input stays closed. Date/Author: 2026-10-29, Codex Lead.
 
 ## Outcomes & Retrospective
 
@@ -43,7 +48,7 @@ Owned source is `skills/spawn-agent/scripts/tmux-message.py`; its `composer()` r
 
 ## Plan of Work
 
-First commit red tests using the two scrubbed real captures and a labeled synthetic footer variant, plus a readiness test showing the two timeout reasons. Run the focused tests against unmodified source and record the failure. Then adjust Codex composer recognition based on cursor and measured prompt structure while leaving modal and input ownership guards intact. Adjust the readiness reason only when the observed kind is known or unknown. Run focused tests, full changed-skill gates and repository config tests, then mutate the fix away to prove the regression tests are active. Push and open a draft PR. Review the whole PR and subsequent fix deltas with one native Codex Lead seat and available foreign Lead seats to a clean round.
+The red-test commit is in draft PR #13. Adjust Codex composer recognition based on cursor and measured prompt structure while leaving modal and input ownership guards intact. A post-paste test proves delivery requires exact owned text and a new receipt. Adjust readiness reason when recognized samples never stabilize. Run focused tests, full changed-skill gates and repository config tests; the pre-fix red runs supply mutation evidence. Review the whole PR and subsequent fix deltas with one native Codex Lead seat and available foreign Lead seats to a clean round.
 
 ## Concrete Steps
 
@@ -59,7 +64,7 @@ All tests use recorded or synthetic screens and local mocks. Re-running them doe
 
 ## Artifacts and Notes
 
-Evidence: 2026-10-18 read-only `capture-pane -e -p` scrubbed captures, with placeholder transcript rows and preserved composer/footer. The fixture table in the PR must say “live current, after incident.”
+Evidence: 2026-10-18 read-only `capture-pane -e -p` scrubbed captures, with placeholder transcript rows and preserved composer/footer. The PR table says “live current, after incident.” At `6238a09`, focused tests had 2 failures of 3; after a readiness-only patch, the full-delivery test failed `paste-not-observed` with zero Enters.
 
 ## Interfaces and Dependencies
 
@@ -68,3 +73,5 @@ Keep `composer(Frame) -> Input` and `Sender.ready() -> (Frame, Input)` or `Deliv
 ## Revision note
 
 2026-10-29: Created after resuming the October 18 checkpoint; records the unavailable incident capture and the current base before edits.
+
+2026-10-29: Updated after the red-test commit, post-paste ownership failure, and interleaved-unreadable-capture failure; narrowed the fallback and retained exact evidence labels.

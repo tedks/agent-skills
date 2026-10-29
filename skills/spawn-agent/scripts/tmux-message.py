@@ -71,7 +71,7 @@ class Input:
         return self.kind, self.text, self.cursor, self.harness
 
 
-def composer(frame):
+def composer(frame, expected_codex_text=None, expected_codex_footer=None):
     lines = styles.strip_ansi(frame.raw).splitlines()
     raw = frame.raw.splitlines()
     # Keep the pre-existing dialog guard on Codex and unknown layouts. A
@@ -94,9 +94,31 @@ def composer(frame):
             harness = "claude"
         else:
             footers = [i for i in range(idx + 1, len(lines)) if FOOTER.match(lines[i])]
-            if not footers:
-                continue
-            end = footers[0]
+            if footers:
+                end = footers[0]
+            else:
+                # An idle Codex placeholder with the cursor at its start is
+                # still a composer when the single status row changes wording.
+                # Require the measured blank separator and indented final
+                # status row; arbitrary transcript/choice rows stay unknown.
+                suffix = lines[idx + 1:]
+                ghost = (first in {"", "Ask Codex to do anything"}
+                         and (not first or styles.dim_span(raw[idx], first))
+                         and frame.x == 2)
+                own_paste = (expected_codex_text is not None
+                             and expected_codex_footer is not None
+                             and "\n" not in expected_codex_text
+                             and first == expected_codex_text
+                             and frame.x == 2 + styles.cell_width(first))
+                if (frame.y != idx or not styles.sgr_span(raw[idx], "›", "bold")
+                        or not (ghost or own_paste)
+                        or len(suffix) < 2 or suffix[0].strip()
+                        or not suffix[1].startswith("  ") or not suffix[1].strip()
+                        or any(glyph in suffix[1] for glyph in "›❯")
+                        or (own_paste and suffix[1] != expected_codex_footer)
+                        or any(row.strip() for row in suffix[2:])):
+                    continue
+                end = idx + 2
             harness = "codex"
         if not idx <= frame.y < end:
             continue
@@ -377,6 +399,7 @@ class Sender:
         self.draft_harness = ""
         self.clear_attempted = False
         self.cleared_command_draft_length = 0
+        self.codex_fallback_footer = None
         if self.typed and getattr(options, "literal_exit", False):
             raise DeliveryError("conflicting-input-modes")
         if self.typed and (len(payload.encode("utf-8")) > 200 or payload != payload.rstrip() or payload.endswith(";")):
@@ -415,7 +438,9 @@ class Sender:
 
     def sample(self):
         frame = self.tmux.frame()
-        return frame, composer(frame)
+        return frame, composer(frame,
+                               self.expected if self.pasted and self.codex_fallback_footer else None,
+                               self.codex_fallback_footer)
 
     def at_end(self, inp):
         return inp.cursor == (2 + styles.cell_width(inp.text.rsplit("\n", 1)[-1]), inp.text.count("\n"))
@@ -430,12 +455,30 @@ class Sender:
         stable_since = self.clock()
         probed = False
         last_reason = "unsupported-layout"
+        seen_composer = False
+        consecutive_known = 0
         while self.clock() < deadline:
             frame, inp = self.sample()
             now = self.clock()
             fp = inp.fingerprint()
             if now >= deadline:
                 break
+            if inp.kind == "modal":
+                raise DeliveryError("modal")
+            if inp.kind == "unknown":
+                # A coordinate/capture race is not evidence that input
+                # changed. Keep the last known fingerprint, but require two
+                # fresh known samples after the gap before acting on it.
+                consecutive_known = 0
+                if seen_composer and last_reason != "human-typing":
+                    last_reason = "unstable-composer"
+                self.sleep(min(self.o.poll_interval, max(0, deadline - self.clock())))
+                continue
+            consecutive_known += 1
+            if inp.kind in {"empty", "text", "suggestion"}:
+                seen_composer = True
+                if last_reason == "unsupported-layout":
+                    last_reason = "unstable-composer"
             if previous is None:
                 stable_since = now
             if previous is not None and fp != previous:
@@ -446,10 +489,8 @@ class Sender:
                         raise DeliveryError("human-typing")
                     last_reason = "human-typing"
                 stable_since = now
-            twice = previous is not None and fp == previous
+            twice = consecutive_known >= 2 and previous is not None and fp == previous
             previous = fp
-            if inp.kind == "modal":
-                raise DeliveryError("modal")
             if twice and now - stable_since >= getattr(self.o, "stable_window", self.o.stable_wait):
                 if inp.kind == "empty":
                     return frame, inp
@@ -499,6 +540,10 @@ class Sender:
         before, check = self.sample()
         if check.fingerprint() != inp.fingerprint():
             raise DeliveryError("input-changed-before-paste")
+        if check.harness == "codex":
+            rows = styles.strip_ansi(before.raw).splitlines()
+            if check.end < len(rows) and not FOOTER.match(rows[check.end]):
+                self.codex_fallback_footer = rows[check.end]
         if check.kind == "text" and styles.command_like(check.text) and not self.command_shape(before, check):
             raise DeliveryError("input-changed-before-clear")
         if check.kind == "text" and not self.at_end(check):
@@ -708,7 +753,7 @@ def main():
             code = 3
         reason = error.reason if isinstance(error, DeliveryError) else "tmux-operation-failed"
         result = {"status": "ambiguous" if changed else "deferred", "reason": reason,
-                  "pending_file": str(path), "needs_review": changed or reason in {"unsupported-layout", "modal"},
+                  "pending_file": str(path), "needs_review": changed or reason in {"unsupported-layout", "unstable-composer", "modal"},
                   "paste_attempted": pasted and not sender.typed,
                   "input_attempted": pasted, "input_method": "typed" if o.typed_command or o.literal_exit else "paste",
                   "enters": sender.enters if sender else 0}
