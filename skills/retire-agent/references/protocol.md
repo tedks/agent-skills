@@ -9,9 +9,12 @@ The agent must already have permission to write that private path. Workspace
 sandboxing or an approval modal can prevent this; never bypass permissions or
 send into a modal. The agent can decline, letting the authorized caller write
 the recovery shard through the deliberate caller continuation.
-A completion is a fresh assistant response row `RETIRE-DONE-<event>` after
-writing the shard; a decline is `RETIRE-DECLINED-<event>`. The marker must be
-the agent's entire final reply, without prose before or after it. The terminal
+A completion is a fresh assistant response row after writing the shard. The
+agent chooses `RETIRE-DONE-<event>` to stay off duty, or
+`RETIRE-EXIT-REQUEST-<event>` to ask the controller to send `/exit` after
+private publication and exact-byte verification. A decline is
+`RETIRE-DECLINED-<event>`. The marker must be the agent's entire final reply,
+without prose before or after it. The terminal
 must show that marker as the final assistant block; trailing continuation text
 or a later assistant response keeps completion pending. Trailing UI whitespace
 is ignored. Blank rows and the
@@ -21,9 +24,9 @@ Codex target may also render one measured UI footer `  Worked for 1m 21s · 12:2
 layout is recognized; additional prose, duplicate footers, other status text,
 and that footer on a Claude target still keep completion pending. A bullet-prefixed
 Codex footer is accepted only when the pinned rollout's latest completed turn
-has the exact DONE or DECLINED marker as `last_agent_message`; a later started
+has the exact DONE, EXIT-REQUEST or DECLINED marker as `last_agent_message`; a later started
 turn, partial rollout or changed final message keeps it pending. This witness
-is rechecked before private handoff publication and before exit.
+is rechecked before private shard publication and, if requested, before exit.
 A pinned Claude target may render one native duration row, optionally followed by
 one padded integer `tokens` status row or the measured Claude 2.1.288
 `globalVersion` / `latestVersion` auto-update status row. A narrow pane may
@@ -142,13 +145,17 @@ to the shared checkout. The helper creates a disposable detached worktree at
 fetched `origin/master`, copies only the event's named paths, regenerates the
 bounded INDEX section against that current tree, commits and pushes. A
 non-fast-forward push retries from fresh origin at most three times. A failed
-push blocks exit and keeps the event's staging files for deliberate resume.
+push prevents off-duty publication and keeps the event's staging files for
+deliberate resume.
 Foreign JSON records are indexed only after a matching receipt claims their
 event and path; malformed claimed remote metadata stops without changing the
 shared checkout. The recovery procedure for an already drifted shared tree is
 in [README.md](../README.md).
-Verify the shard blob on fetched private `origin/master`, publish its unique
-ledger receipt, then request bare harness exit through the shared sender.
+The successful private shard push starts off-duty time. Later exact-byte and
+receipt checks are controller bookkeeping; they do not delay or revoke that
+time. Verify the shard blob on fetched private `origin/master` before
+recording the receipt. Only an explicit `RETIRE-EXIT-REQUEST-<event>` permits
+the controller to request bare harness exit through the shared sender.
 Claude `/exit` uses `--literal-exit`; Codex `/exit` uses `--typed-command`.
 Both require an empty composer and type the command using the shared bounded
 Enter recovery; Claude literal exit permits one Enter, Codex typed command
@@ -174,7 +181,8 @@ new publication authority. Historical accepted evidence and current pending
 reverification are distinct.
 An old notice, wrong UUID, bare resume command, absent pane or ended process
 alone cannot establish retirement. Unsupported layouts and unknown caller
-session IDs preserve the handoff pending exit verification. If the original
+session IDs leave requested exit verification pending, but do not delay
+off-duty time. If the original
 ended before any exit request, leave pending without sending into its shell.
 
 Before offering retirement, the controller observes the pinned peer through
@@ -229,7 +237,7 @@ After a failed immutable-shard or receipt revalidation, failure handling only
 records the private attempt audit; it does not publish a handoff-authorizing
 receipt from cached state. Repeated resumes preserve the rejected evidence
 until the operator reconciles it deliberately.
-The ledger records pending handoff, pending exit and retired;
+The ledger records pending handoff, off duty, pending exit and retired;
 its index preserves all steward-owned legacy metadata outside the bounded
 generated section. A legacy filename matching the same session ID prefix
 (eight characters or more) blocks another shard until deliberate reconciliation.
@@ -257,8 +265,8 @@ Observation consumes only spawn-agent's published `read_response_rows(pane,
 socket)` and `DeliveryError` Python contract. It excludes archived redraws and
 the live composer. Keep the final marker visible until the controller records
 DONE. For an ambiguous offer, every resume before the handoff receipt rechecks
-the exact preserved offer and current final marker, even after a recorded DONE
-or DECLINED. A delivered offer may use its recorded disposition on resume.
+the exact preserved offer and current final marker, even after a recorded DONE,
+EXIT-REQUEST or DECLINED. A delivered offer may use its recorded disposition on resume.
 The socket is pinned in private state and reused for observation and transport;
 server failure is not evidence that the pane disappeared. Recognized
 `codex mcp-server` and exact Nix `codex-desktop` `app-server --listen stdio://`

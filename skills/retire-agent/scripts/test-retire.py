@@ -29,7 +29,7 @@ SHARED = Path(os.environ.get('RETIRE_TEST_SHARED_SCRIPTS', str(HERE.parents[1] /
 def shard_data(event, identity):
     return {'event': event, 'identity': identity, 'author': 'agent',
             'date': '2026-09-26', 'session_id': 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa', 'harness': identity['process']['agent'],
-            'model': 'test-model', 'working_directory': identity['directory'], 'tmux_window': 'private-test:0',
+            'model': 'outgoing-model', 'working_directory': identity['directory'], 'tmux_window': 'private-test:0',
             'role': 'Utility', 'landed_work': 'none', 'lessons': 'Record receipts before exit.', 'provenance': 'fixture-agent',
             'recovery': {'mission': 'Mission authorized', 'authorization': 'fixture caller', 'pauses': 'none',
                          'worktree': identity['directory'], 'branch': 'master', 'heads': 'fixture seed',
@@ -194,14 +194,14 @@ def terminal(directory, mode):
                 draw()
             if due is not None and time.monotonic() >= due:
                 if mode in ('claude-real-reply-row-late', 'claude-real-reply-row-status-late'):
-                    history += '● RETIRE-DONE-' + event + '\r\n✻ Baked for 37s · done 6:25 PM\r\n'
+                    history += '● RETIRE-EXIT-REQUEST-' + event + '\r\n✻ Baked for 37s · done 6:25 PM\r\n'
                     if mode == 'claude-real-reply-row-status-late':
                         history += '  globalVersion: 2.1.288 · latestVersion: 2.1.289 ✘ Auto-update failed: no write permission to npm prefix · Run claude doctor\r\n'
                 elif mode == 'codex-real-reply-row-late':
-                    history += '• RETIRE-DONE-' + event + '\r\n• Worked for 19s • 19:35\r\n'
-                    record_codex_completion('RETIRE-DONE-' + event)
+                    history += '• RETIRE-EXIT-REQUEST-' + event + '\r\n• Worked for 19s • 19:35\r\n'
+                    record_codex_completion('RETIRE-EXIT-REQUEST-' + event)
                 else:
-                    history += '● RETIRE-DONE-' + event + '\r\n'
+                    history += '● RETIRE-EXIT-REQUEST-' + event + '\r\n'
                 due = None
                 draw()
             cleared = directory / 'human-cleared-history'
@@ -263,7 +263,7 @@ def terminal(directory, mode):
                                 verified_hash = subprocess.run(['git', '--git-dir', str(remote), 'rev-parse', record.get('commit', 'missing') + ':' + expected], capture_output=True, text=True)
                                 recorded_blob = subprocess.run(['git', '--git-dir', str(remote), 'show', record.get('commit', 'missing') + ':' + expected], capture_output=True)
                                 master_blob = subprocess.run(['git', '--git-dir', str(remote), 'show', 'master:' + expected], capture_output=True)
-                                verified = (record.get('status') in ('handoff-verified', 'pending-exit') and record.get('event') == event
+                                verified = (record.get('status') in ('handoff-verified', 'off-duty', 'pending-exit') and record.get('event') == event
                                             and record.get('shard') == expected and remote_hash.returncode == 0
                                             and verified_hash.returncode == 0 and remote_hash.stdout == verified_hash.stdout
                                             and recorded_blob.returncode == 0 and master_blob.returncode == 0
@@ -336,7 +336,8 @@ def terminal(directory, mode):
                             history = 'Assistant continues without acceptance evidence.\r\n'
                             if mode != 'ambiguous':
                                 marker_event = '0' * 32 if mode == 'ambiguous-done-wrong' else event
-                                disposition = 'DECLINED' if mode == 'ambiguous-decline' else 'DONE'
+                                disposition = ('DECLINED' if mode == 'ambiguous-decline' else
+                                               'DONE' if mode == 'ambiguous-keep' else 'EXIT-REQUEST')
                                 history += '● RETIRE-' + disposition + '-' + marker_event + '\r\n'
                                 if mode == 'ambiguous-done-suffix':
                                     history += '  Shard still needs correction.\r\n'
@@ -348,7 +349,8 @@ def terminal(directory, mode):
                         else:
                             history += '• Accepted\r\n'
                             if payload != '/exit' and mode not in ('composer', 'claude-composer'):
-                                disposition = 'DECLINED' if mode.startswith('decline') else 'DONE'
+                                disposition = ('DECLINED' if mode.startswith('decline') else
+                                               'DONE' if mode == 'keep' else 'EXIT-REQUEST')
                                 if mode == 'quoted':
                                     history += 'RETIRE-DONE-' + event + '\r\n'
                                 elif mode == 'old':
@@ -467,13 +469,15 @@ class Tests(unittest.TestCase):
         sender.chmod(0o700)
         (shared / 'tmux-message.py').symlink_to(SHARED / 'tmux-message.py')
         spawn = shared / 'agent-spawn.sh'
-        spawn.write_text('#!/usr/bin/env python3\nimport json,sys\nfrom pathlib import Path\nargs=sys.argv[1:]\nbrief=Path(args[args.index("--prompt-file")+1]).read_text()\nPath(' + repr(str(self.directory / 'spawn.json')) + ').write_text(json.dumps({"args":args,"brief":brief}))\n')
+        spawn.write_text('#!/usr/bin/env python3\nimport json,sys\nfrom pathlib import Path\nargs=sys.argv[1:]\nPath(' + repr(str(self.directory / 'spawn.json')) + ').write_text(json.dumps({"args":args}))\n')
         spawn.chmod(0o700)
         checker = self.directory / 'private-check'
         checker.write_text('#!/bin/sh\n[ "$1" = ' + shlex.quote(str(self.directory / 'remote.git')) + ' ]\n')
         checker.chmod(0o700)
         self.roles = self.directory / 'ROLES.md'
         self.roles.write_text('Common to every hat: first record before action.\n')
+        self.mission = self.directory / 'mission.md'
+        self.mission.write_text('Fresh bounded migration mission.\n')
         config = self.directory / 'config.toml'
         config.write_text('')
         self.env = dict(os.environ, AGENT_SKILLS_CONFIG=str(config), SPAWN_TMUX_LABEL=self.label, RETIRE_REPO=str(self.repo), RETIRE_PRIVATE_CHECK=str(checker), RETIRE_SPAWN_SKILL=str(shared.parent), RETIRE_TEST_PYTHON=sys.executable)
@@ -542,7 +546,8 @@ class Tests(unittest.TestCase):
             fixture = link
             if relative:
                 fixture = Path('codex')
-        command = shlex.join([sys.executable, str(fixture), '--terminal', str(self.directory), mode])
+        command = shlex.join([sys.executable, str(fixture), '--terminal', str(self.directory), mode,
+                              '--model', 'outgoing-model'])
         # argv[0] is the harness identity; outer shell survives process exit.
         inner = 'exec -a ' + ('node' if node else ('claude' if mode.startswith('claude') else 'codex')) + ' ' + command
         outer = fixture_command(self.directory, inner)
@@ -559,6 +564,8 @@ class Tests(unittest.TestCase):
             time.sleep(.02)
 
     def invoke(self, *args):
+        if '--handoff' in args:
+            args = (*args, '--mission-file', str(self.mission))
         return subprocess.run([os.environ.get('RETIRE_TEST_SCRIPT', str(HERE / 'retire.sh')), self.pane, '--wait', '.4', '--poll', '.02', *args], env=self.env, text=True, capture_output=True, timeout=12)
 
     def state(self):
@@ -717,6 +724,103 @@ class Tests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(self.observed()['exit_enters'], 1)
 
+    def test_done_starts_off_duty_without_sending_exit(self):
+        self.actor('keep')
+        result = self.invoke()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads(result.stdout)['status'], 'off-duty')
+        self.assertFalse((self.directory / 'exit-order.json').exists())
+        path, state = self.state()
+        self.assertEqual(state['status'], 'off-duty')
+        receipt = json.loads(self.git('show', 'origin/master:' + state['handoff_receipt']))
+        self.assertEqual(receipt['status'], 'off-duty')
+        self.assertTrue(receipt.get('off_duty_started_at'))
+        self.assertTrue(Path('/proc/' + str(state['identity']['process']['pid'])).exists())
+
+    def test_migration_must_change_model_or_provider(self):
+        self.actor()
+        result = self.invoke('--handoff', 'codex', 'outgoing-model', '--roles', str(self.roles))
+        self.assertEqual(result.returncode, 2, result.stderr)
+        self.assertIn('different successor model or provider', result.stderr)
+        self.assertNotIn('handoff_receipt', self.state()[1])
+        self.assertFalse((self.directory / 'exit-order.json').exists())
+
+    def test_rejected_migration_can_be_retargeted_before_publication(self):
+        self.actor()
+        rejected = self.invoke('--handoff', 'codex', 'outgoing-model', '--roles', str(self.roles))
+        self.assertEqual(rejected.returncode, 2, rejected.stderr)
+        path, state = self.state()
+        self.assertNotIn('handoff_receipt', state)
+
+        resumed = self.invoke('--resume', str(path), '--handoff', 'codex', 'new-model', '--roles', str(self.roles))
+        self.assertEqual(resumed.returncode, 2, resumed.stderr)
+        self.assertIn('shard briefing withheld', resumed.stderr)
+        updated = self.state()[1]
+        self.assertEqual(updated['mode'], 'handoff:codex:new-model')
+        self.assertTrue(updated.get('handoff_receipt'))
+        self.assertTrue(updated.get('spawn'))
+
+    def test_rejected_migration_can_return_to_retirement(self):
+        self.actor()
+        rejected = self.invoke('--handoff', 'codex', 'outgoing-model', '--roles', str(self.roles))
+        self.assertEqual(rejected.returncode, 2, rejected.stderr)
+        path, _state = self.state()
+        resumed = self.invoke('--resume', str(path), '--retire')
+        self.assertEqual(resumed.returncode, 0, resumed.stderr)
+        updated = self.state()[1]
+        self.assertEqual(updated['mode'], 'retire')
+        self.assertFalse(updated.get('spawn'))
+
+    def test_migration_compares_live_model_selectors(self):
+        spec = importlib.util.spec_from_file_location('retirement-model-alias-test', Path(os.environ.get('RETIRE_TEST_SCRIPT', str(HERE / 'retire.sh'))).with_name('retire.py'))
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        self.assertFalse(module.migration_differs('claude', 'opus', 'claude', 'opus'))
+        self.assertFalse(module.migration_differs('claude', 'opus', 'claude', 'claude-opus-5-5'))
+        self.assertTrue(module.migration_differs('claude', 'claude-opus-5-5', 'claude', 'claude-opus-4-1'))
+        self.assertTrue(module.migration_differs('codex', 'opus', 'claude', None))
+
+    def test_non_utf8_migration_mission_rejected_before_offer(self):
+        self.actor()
+        self.mission.write_bytes(b'\xff\xfe')
+        result = self.invoke('--handoff', 'claude', 'opus', '--roles', str(self.roles))
+        self.assertEqual(result.returncode, 2)
+        self.assertIn('UTF-8 text', result.stderr)
+        self.assertEqual(self.observed()['pastes'], 0)
+        self.assertFalse((self.repo / '.git' / 'retirements').exists())
+        self.assertFalse((self.directory / 'spawn.json').exists())
+
+    def test_oversize_mission_rejected_before_offer(self):
+        self.actor()
+        self.mission.write_bytes(b'x' * (65536 + 1))
+        result = self.invoke('--handoff', 'claude', 'opus', '--roles', str(self.roles))
+        self.assertEqual(result.returncode, 2)
+        self.assertIn('size limit', result.stderr)
+        self.assertEqual(self.observed()['pastes'], 0)
+        self.assertFalse((self.repo / '.git' / 'retirements').exists())
+
+    def test_nonregular_mission_read_is_nonblocking(self):
+        spec = importlib.util.spec_from_file_location('retirement-safe-read-test', Path(os.environ.get('RETIRE_TEST_SCRIPT', str(HERE / 'retire.sh'))).with_name('retire.py'))
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        fifo = self.directory / 'mission-fifo'
+        os.mkfifo(fifo)
+        with self.assertRaisesRegex(module.Stop, 'regular file'):
+            module.read_regular_bytes(fifo, 65536, 'mission file')
+
+    def test_legacy_identity_without_model_remains_resumable(self):
+        spec = importlib.util.spec_from_file_location('retirement-legacy-identity-test', Path(os.environ.get('RETIRE_TEST_SCRIPT', str(HERE / 'retire.sh'))).with_name('retire.py'))
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        instance = object.__new__(module.Retirement)
+        expected = {'process': {'pid': 7, 'agent': 'codex'}, 'pane_pid': '8',
+                    'session': 'lane', 'directory': '/owned'}
+        observed = {'process': {'pid': 7, 'agent': 'codex', 'model': 'gpt-5-codex'},
+                    'pane_pid': '8', 'session': 'lane', 'directory': '/owned'}
+        instance.state = {'identity': expected}
+        instance.identity = lambda: observed
+        instance.verify_identity()
+
     def test_claude_reply_row_with_space_at_wrap(self):
         self.actor('claude-real-reply-row-status-late')
         first = self.invoke('--wait', '.05')
@@ -772,10 +876,10 @@ class Tests(unittest.TestCase):
 
     def test_codex_footer_witness_rechecked_before_exit(self):
         self.actor('codex-real-reply-row')
-        before = "            self.verify_native_session(session_id)\n"
-        after = ("            self.verify_native_session(session_id)\n"
-                 "            with open(self.native_binding()['observation']['rollout_path'], 'a') as stream:\n"
-                 "                stream.write(json.dumps({'type': 'event_msg', 'payload': {'type': 'task_started', 'turn_id': 'later-turn'}}) + '\\n')\n")
+        before = "                self.verify_native_session(session_id)\n"
+        after = ("                self.verify_native_session(session_id)\n"
+                 "                with open(self.native_binding()['observation']['rollout_path'], 'a') as stream:\n"
+                 "                    stream.write(json.dumps({'type': 'event_msg', 'payload': {'type': 'task_started', 'turn_id': 'later-turn'}}) + '\\n')\n")
         entry = self.instrument(before, after)
         with patch.dict(os.environ, {'RETIRE_TEST_SCRIPT': str(entry)}):
             result = self.invoke()
@@ -1192,8 +1296,8 @@ class Tests(unittest.TestCase):
         data.update(author='caller', session_id='unknown', declined=True, provenance='caller cannot establish native identity')
         path.with_suffix('.shard').write_text(json.dumps(data))
         result = self.invoke('--resume', str(path), '--caller-shard')
-        self.assertEqual(result.returncode, 2, result.stderr)
-        self.assertIn('verifiable native session UUID', result.stderr)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads(result.stdout)['status'], 'off-duty')
         self.assertTrue(self.state()[1].get('handoff_receipt'))
         self.assertFalse((self.directory / 'exit-order.json').exists())
 
@@ -1310,12 +1414,47 @@ class Tests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         path, state = self.state()
         receipt_before = self.git('show', 'origin/master:' + state['handoff_receipt'])
+        state.pop('exit_requested')  # Simulate a historical state from before the choice field existed.
+        path.write_text(json.dumps(state))
+        editor = self.remote_editor()
+        remote_receipt = editor / state['handoff_receipt']
+        tampered = json.loads(remote_receipt.read_text())
+        tampered['status'] = 'off-duty'
+        tampered['injected'] = 'untrusted remote field'
+        remote_receipt.write_text(json.dumps(tampered))
+        self.editor_git(editor, 'add', '--', state['handoff_receipt'])
+        self.editor_git(editor, 'commit', '-m', 'fixture retired receipt downgrade')
+        self.editor_git(editor, 'push', 'origin', 'HEAD:master')
         self.command(*self.tmux, 'kill-pane', '-t', self.pane)
         result = self.invoke('--resume', str(path))
         self.assertEqual(result.returncode, 2, result.stderr)
         self.assertEqual(self.git('show', 'origin/master:' + state['handoff_receipt']), receipt_before)
         audit = [json.loads(line) for line in path.with_suffix('.jsonl').read_text().splitlines()]
         self.assertFalse(audit[-1]['exit_confirmed'])
+
+    def test_current_retired_resume_lost_pane_preserves_historical_receipt(self):
+        self.actor()
+        result = self.invoke()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        path, state = self.state()
+        receipt_before = self.git('show', 'origin/master:' + state['handoff_receipt'])
+        editor = self.remote_editor()
+        remote_receipt = editor / state['handoff_receipt']
+        tampered = json.loads(remote_receipt.read_text())
+        tampered['status'] = 'off-duty'
+        tampered['injected'] = 'untrusted remote field'
+        remote_receipt.write_text(json.dumps(tampered))
+        self.editor_git(editor, 'add', '--', state['handoff_receipt'])
+        self.editor_git(editor, 'commit', '-m', 'fixture current retired receipt downgrade')
+        self.editor_git(editor, 'push', 'origin', 'HEAD:master')
+        self.command(*self.tmux, 'kill-pane', '-t', self.pane)
+
+        resumed = self.invoke('--resume', str(path))
+        self.assertEqual(resumed.returncode, 2, resumed.stderr)
+        self.assertEqual(self.git('show', 'origin/master:' + state['handoff_receipt']), receipt_before)
+        final_state = json.loads(path.read_text())
+        self.assertEqual(final_state['status'], 'retired')
+        self.assertTrue(final_state['exit_requested'])
 
     def test_native_interrupted_server_creation_releases_owned_label(self):
         spec = importlib.util.spec_from_file_location('retire-native-cleanup-test', HERE / 'test-retire-native.py')
@@ -1639,17 +1778,17 @@ class Tests(unittest.TestCase):
     def test_handoff_brief_model_after_exit(self):
         self.actor()
         result = self.invoke('--handoff', 'codex', 'test-model', '--roles', str(self.roles))
-        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.returncode, 2, result.stderr)
+        self.assertIn('shard briefing withheld', result.stderr)
         spawned = json.loads((self.directory / 'spawn.json').read_text())
         self.assertIn('test-model', spawned['args'])
-        self.assertIn('Cold-start audit before action', spawned['brief'])
-        self.assertIn('Common to every hat', spawned['brief'])
-        self.assertIn('Mission authorized', spawned['brief'])
+        self.assertNotIn('--prompt-file', spawned['args'])
         path, state = self.state()
         ledger = [json.loads(line) for line in path.with_suffix('.jsonl').read_text().splitlines()]
         actions = [record['action'] for record in ledger]
         self.assertLess(actions.index('original-exit-confirmed'), actions.index('successor-attempt'))
         self.assertLess(actions.index('successor-attempt'), actions.index('successor-result'))
+        self.assertEqual(state['spawn']['status'], 'unconfirmed')
         self.assertFalse(Path('/proc/' + str(state['identity']['process']['pid'])).exists())
         self.assertEqual(self.invoke('--handoff', 'codex', 'test-model', '--roles', str(self.roles), '--resume', str(path)).returncode, 2)
 
@@ -1743,10 +1882,12 @@ class Tests(unittest.TestCase):
     def test_real_node_entrypoint_and_claude_successor_model(self):
         self.actor('node-core', node=True)
         result = self.invoke('--handoff', 'claude', 'opus', '--roles', str(self.roles))
-        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.returncode, 2, result.stderr)
+        self.assertIn('shard briefing withheld', result.stderr)
         spawned = json.loads((self.directory / 'spawn.json').read_text())
         self.assertIn('claude', spawned['args'])
         self.assertIn('opus', spawned['args'])
+        self.assertNotIn('--prompt-file', spawned['args'])
 
     def test_required_recovery_fields(self):
         self.actor('waiting-bad')
@@ -1909,16 +2050,16 @@ class Tests(unittest.TestCase):
 
     def test_independent_exit_after_handoff_remains_pending(self):
         self.actor()
-        before = "        if not self.state.get('exit'):\n"
-        after = ('        (self.repo.parent / "human-independent-exit").touch()\n'
-                 '        until = time.monotonic() + 3\n'
-                 '        while not self.ended() and time.monotonic() < until:\n'
-                 '            time.sleep(.02)\n' + before)
+        before = "            if not self.state.get('exit'):\n"
+        after = ('            (self.repo.parent / "human-independent-exit").touch()\n'
+                 '            until = time.monotonic() + 3\n'
+                 '            while not self.ended() and time.monotonic() < until:\n'
+                 '                time.sleep(.02)\n' + before)
         entry = self.instrument(before, after)
         with patch.dict(os.environ, {'RETIRE_TEST_SCRIPT': str(entry)}):
             result = self.invoke('--handoff', 'codex', 'test-model', '--roles', str(self.roles))
         self.assertEqual(result.returncode, 2, result.stderr)
-        self.assertIn('ended before exit request', result.stderr)
+        self.assertIn('ended before requested exit', result.stderr)
         self.assertEqual(self.observed()['pastes'], 1)
         self.assertFalse((self.directory / 'exit-order.json').exists())
         self.assertFalse((self.directory / 'spawn.json').exists())
@@ -1928,21 +2069,21 @@ class Tests(unittest.TestCase):
         self.actor()
         inner = 'exec -a codex ' + shlex.join([sys.executable, str(Path(__file__).resolve()), '--terminal', str(self.directory), 'done'])
         outer = fixture_command(self.directory, inner)
-        before = "        if not self.state.get('exit'):\n"
-        after = ('        signal = self.repo.parent / "human-independent-exit"\n'
-                 '        signal.touch()\n'
-                 '        until = time.monotonic() + 3\n'
-                 '        while not self.ended() and time.monotonic() < until:\n'
-                 '            time.sleep(.02)\n'
-                 '        signal.unlink()\n'
-                 '        stats = self.repo.parent / "terminal.json"\n'
-                 '        stats.unlink(missing_ok=True)\n'
-                 '        checked(self.tmux + ["respawn-pane", "-k", "-t", self.args.pane, ' + repr(outer) + '])\n'
-                 '        until = time.monotonic() + 3\n'
-                 '        while not stats.exists() and time.monotonic() < until:\n'
-                 '            time.sleep(.02)\n'
-                 '        if not stats.exists():\n'
-                 '            raise Stop("fixture replacement did not become ready")\n' + before)
+        before = "            if not self.state.get('exit'):\n"
+        after = ('            signal = self.repo.parent / "human-independent-exit"\n'
+                 '            signal.touch()\n'
+                 '            until = time.monotonic() + 3\n'
+                 '            while not self.ended() and time.monotonic() < until:\n'
+                 '                time.sleep(.02)\n'
+                 '            signal.unlink()\n'
+                 '            stats = self.repo.parent / "terminal.json"\n'
+                 '            stats.unlink(missing_ok=True)\n'
+                 '            checked(self.tmux + ["respawn-pane", "-k", "-t", self.args.pane, ' + repr(outer) + '])\n'
+                 '            until = time.monotonic() + 3\n'
+                 '            while not stats.exists() and time.monotonic() < until:\n'
+                 '                time.sleep(.02)\n'
+                 '            if not stats.exists():\n'
+                 '                raise Stop("fixture replacement did not become ready")\n' + before)
         entry = self.instrument(before, after)
         with patch.dict(os.environ, {'RETIRE_TEST_SCRIPT': str(entry)}):
             result = self.invoke('--handoff', 'codex', 'test-model', '--roles', str(self.roles))
@@ -2088,7 +2229,8 @@ class Tests(unittest.TestCase):
         os.kill(core['pid'], signal.SIGTERM)  # exact test-owned lingering core
         time.sleep(.05)
         result = self.invoke('--handoff', 'codex', 'test-model', '--roles', str(self.roles), '--resume', str(path))
-        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.returncode, 2, result.stderr)
+        self.assertIn('shard briefing withheld', result.stderr)
         self.assertTrue((self.directory / 'spawn.json').exists())
 
     def test_resume_uses_pinned_socket(self):
@@ -2204,9 +2346,9 @@ class Tests(unittest.TestCase):
 
     def test_exit_deferral_reports_retry_without_waiting(self):
         self.actor()
-        before = "        if not self.state.get('exit'):\n"
-        after = ('        (self.repo.parent / "human-typed-draft").touch()\n'
-                 '        time.sleep(.15)\n' + before)
+        before = "            if not self.state.get('exit'):\n"
+        after = ('            (self.repo.parent / "human-typed-draft").touch()\n'
+                 '            time.sleep(.15)\n' + before)
         entry = self.instrument(before, after)
         with patch.dict(os.environ, {'RETIRE_TEST_SCRIPT': str(entry)}):
             result = self.invoke()
@@ -2229,6 +2371,85 @@ class Tests(unittest.TestCase):
         result = self.invoke('--resume', str(path))
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertTrue(json.loads((self.directory / 'pre-offer-receipt.json').read_text())['verified'])
+
+    def test_receipt_push_failure_keeps_shard_author_off_duty(self):
+        self.actor()
+        before = '        result = run(command)\n'
+        after = ('        if (self.state.get("status") == "off-duty"\n'
+                 '                and any(path.startswith("receipts/") for path in paths)):\n'
+                 '            raise Stop("injected receipt publication failure")\n' + before)
+        entry = self.instrument(before, after)
+        with patch.dict(os.environ, {'RETIRE_TEST_SCRIPT': str(entry)}):
+            result = self.invoke()
+        self.assertEqual(result.returncode, 2, result.stderr)
+        self.assertIn('injected receipt publication failure', result.stderr)
+        path, state = self.state()
+        self.assertEqual(state['status'], 'off-duty')
+        self.assertTrue(state.get('off_duty_started_at'))
+        self.assertTrue(state.get('handoff_receipt'))
+        self.assertTrue(state.get('shard_commit'))
+        self.assertIn(state['shard'], self.git('ls-tree', '-r', '--name-only', 'origin/master').splitlines())
+        remote_receipt = json.loads(self.git('show', 'origin/master:' + state['handoff_receipt']))
+        self.assertEqual(remote_receipt['status'], 'retirement-requested')
+        started_at = state['off_duty_started_at']
+
+        resumed = self.invoke('--resume', str(path))
+        self.assertEqual(resumed.returncode, 0, resumed.stderr)
+        final_state = self.state()[1]
+        self.assertEqual(final_state['off_duty_started_at'], started_at)
+        remote_receipt = json.loads(self.git('show', 'origin/master:' + state['handoff_receipt']))
+        self.assertIn(remote_receipt['status'], ('pending-exit', 'retired'))
+        self.assertEqual(remote_receipt['off_duty_started_at'], started_at)
+
+    def test_missing_receipt_recovery_rejects_wrong_local_author(self):
+        self.actor('keep')
+        before = '        result = run(command)\n'
+        after = ('        if (self.state.get("status") == "off-duty"\n'
+                 '                and any(path.startswith("receipts/") for path in paths)):\n'
+                 '            raise Stop("injected receipt publication failure")\n' + before)
+        entry = self.instrument(before, after)
+        with patch.dict(os.environ, {'RETIRE_TEST_SCRIPT': str(entry)}):
+            result = self.invoke()
+        self.assertEqual(result.returncode, 2, result.stderr)
+        path, state = self.state()
+
+        editor = self.remote_editor()
+        self.editor_git(editor, 'rm', state['handoff_receipt'])
+        self.editor_git(editor, 'commit', '-m', 'fixture remove receipt')
+        self.editor_git(editor, 'push', 'origin', 'HEAD:master')
+        local_receipt = self.staged(state, state['handoff_receipt'])
+        local = json.loads(local_receipt.read_text())
+        local['author'] = 'forged-local-author'
+        local_receipt.write_text(json.dumps(local))
+
+        resumed = self.invoke('--resume', str(path))
+        self.assertEqual(resumed.returncode, 2, resumed.stderr)
+        self.assertIn('local handoff receipt differs', resumed.stderr)
+        self.git('fetch', 'origin', 'master')
+        self.assertEqual(self.git('ls-tree', '-r', '--name-only', 'origin/master', '--', state['handoff_receipt']), '')
+
+    def test_post_push_fetch_failure_keeps_shard_author_off_duty(self):
+        self.actor()
+        marker = self.directory / 'post-push-fetch-failed'
+        before = '    def fetch_master(self):\n'
+        after = ('    def fetch_master(self):\n'
+                 '        if self.state.get("handoff_receipt") and not Path(' + repr(str(marker)) + ').exists():\n'
+                 '            Path(' + repr(str(marker)) + ').touch()\n'
+                 '            raise Stop("injected post-push fetch failure")\n')
+        entry = self.instrument(before, after)
+        with patch.dict(os.environ, {'RETIRE_TEST_SCRIPT': str(entry)}):
+            result = self.invoke()
+        self.assertEqual(result.returncode, 2, result.stderr)
+        self.assertIn('injected post-push fetch failure', result.stderr)
+        path, state = self.state()
+        self.assertEqual(state['status'], 'off-duty')
+        self.assertTrue(state.get('off_duty_started_at'))
+        self.assertIn(state['shard'], self.git('ls-tree', '-r', '--name-only', 'origin/master').splitlines())
+        started_at = state['off_duty_started_at']
+
+        resumed = self.invoke('--resume', str(path))
+        self.assertEqual(resumed.returncode, 0, resumed.stderr)
+        self.assertEqual(self.state()[1]['off_duty_started_at'], started_at)
 
     def test_sender_timeout_is_ambiguous_and_not_replayed(self):
         self.actor()
@@ -2275,21 +2496,95 @@ class Tests(unittest.TestCase):
         self.assertEqual(self.state()[1]['exit']['transport'], 'literal')
 
     def test_handoff_brief_reads_verified_blob(self):
-        self.actor()
-        before = "            brief = directory / (event + '-brief.txt')\n"
-        after = ('            (self.records / self.state["shard"]).write_text("UNVERIFIED LOCAL TEXT")\n' + before)
-        entry = self.instrument(before, after)
-        with patch.dict(os.environ, {'RETIRE_TEST_SCRIPT': str(entry)}):
-            result = self.invoke('--handoff', 'codex', 'model', '--roles', str(self.roles))
-        self.assertEqual(result.returncode, 0, result.stderr)
-        brief = json.loads((self.directory / 'spawn.json').read_text())['brief']
-        self.assertIn('Mission authorized', brief)
-        self.assertNotIn('UNVERIFIED LOCAL TEXT', brief)
+        spec = importlib.util.spec_from_file_location('retire-successor-blob-test', Path(os.environ.get('RETIRE_TEST_SCRIPT', str(HERE / 'retire.sh'))).with_name('retire.py'))
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        instance = object.__new__(module.Retirement)
+        captured = []
+        data = shard_data('event', {'process': {'agent': 'codex'}, 'directory': '/owned'})
+        remote_blob = json.dumps(data).encode()
+        instance.args = SimpleNamespace(handoff=('claude', 'opus'), mission_file=str(self.mission), roles=str(self.roles),
+                                        wait=.1, poll=.01)
+        instance.records = self.directory / 'records'
+        (instance.records / 'waiting').mkdir(parents=True)
+        (instance.records / 'waiting/x.shard').write_text('UNVERIFIED LOCAL TEXT')
+        instance.state = {'identity': {'session': 'lane', 'directory': '/owned',
+                                       'process': {'agent': 'codex', 'model': 'outgoing-model'}},
+                          'shard': 'waiting/x.shard', 'shard_hash': 'blob',
+                          'spawn': {'status': 'launched', 'target': 'lane:successor-event'}}
+        instance.git = lambda *args, **kwargs: remote_blob if kwargs.get('raw') else ''
+        instance.verify_successor_identity = lambda: {'agent': 'claude', 'model': 'opus', 'pane': '%2'}
+        instance.persist = lambda: None
+        instance.audit = lambda *args, **kwargs: None
+        instance.send = lambda phase, payload: captured.append((phase, payload))
+        instance.handoff_successor(self.directory, 'event')
+        self.assertEqual(len(captured), 1)
+        self.assertEqual(captured[0][0], 'successor-brief')
+        self.assertIn('Fresh bounded migration mission', captured[0][1])
+        self.assertIn('fixture-agent', captured[0][1])
+        self.assertNotIn('UNVERIFIED LOCAL TEXT', captured[0][1])
+
+    def test_successor_brief_send_targets_reverified_pane(self):
+        spec = importlib.util.spec_from_file_location('retire-successor-send-test', Path(os.environ.get('RETIRE_TEST_SCRIPT', str(HERE / 'retire.sh'))).with_name('retire.py'))
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        instance = object.__new__(module.Retirement)
+        instance.args = SimpleNamespace(pane='%1')
+        instance.state = {'id': 'a' * 32, 'identity': {'directory': '/owned'},
+                          'spawn': {'pane': '%42'}}
+        instance.path = self.directory / 'event.json'
+        instance.shared = self.directory / 'shared'
+        instance.verify_successor_identity = lambda: {'pane': '%42'}
+        instance.persist = lambda: None
+        instance.audit = lambda *args, **kwargs: None
+        instance.transport_env = lambda: {}
+        result = subprocess.CompletedProcess([], 0, stdout=json.dumps(
+            {'status': 'delivered', 'receipt': 'submitted'}), stderr='')
+        with patch.object(module, 'run', return_value=result) as sender:
+            instance.send('successor-brief', 'bounded brief')
+        sent = sender.call_args.args[0]
+        self.assertEqual(sent[:3], [instance.shared / 'tmux-message.sh', 'send', '%42'])
+        self.assertEqual(instance.state['successor-brief']['status'], 'delivered')
+
+    def test_successor_model_mismatch_withholds_identity(self):
+        spec = importlib.util.spec_from_file_location('retire-successor-identity-test', Path(os.environ.get('RETIRE_TEST_SCRIPT', str(HERE / 'retire.sh'))).with_name('retire.py'))
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        instance = object.__new__(module.Retirement)
+        instance.args = SimpleNamespace(handoff=('claude', 'opus'))
+        instance.tmux = []
+        instance.state = {'identity': {'directory': '/owned'},
+                          'spawn': {'target': 'lane:successor-event'}}
+        instance.actors = lambda _root: [{'agent': 'claude', 'model': 'haiku', 'pid': 17,
+                                         'start': '1', 'boot': 'boot'}]
+        pane = '%42\t100\tlane\tsuccessor-event\t/owned'
+        with patch.object(module, 'checked', return_value=pane):
+            with self.assertRaisesRegex(module.Stop, 'live model selection differs'):
+                instance.verify_successor_identity()
+
+    def test_successor_model_not_yet_observable_is_retryable(self):
+        spec = importlib.util.spec_from_file_location('retire-successor-starting-test', Path(os.environ.get('RETIRE_TEST_SCRIPT', str(HERE / 'retire.sh'))).with_name('retire.py'))
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        instance = object.__new__(module.Retirement)
+        instance.args = SimpleNamespace(handoff=('claude', 'opus'))
+        instance.tmux = []
+        instance.state = {'identity': {'directory': '/owned'},
+                          'spawn': {'target': 'lane:successor-event'}}
+        instance.actors = lambda _root: [{'agent': 'claude', 'model': None, 'pid': 17,
+                                         'start': '1', 'boot': 'boot'}]
+        pane = '%42\t100\tlane\tsuccessor-event\t/owned'
+        with patch.object(module, 'checked', return_value=pane):
+            with self.assertRaisesRegex(module.Stop, 'not yet observable'):
+                instance.verify_successor_identity()
 
     def test_pending_fifo_swap_never_blocks(self):
         self.actor()
-        before = '        descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW'
-        after = '        path.unlink()\n        os.mkfifo(path)\n' + before
+        # Keep this post-check shard-open anchor aligned with both shard mutations.
+        before = "            raise Stop('missing or unsafe unique shard')\n        descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW"
+        after = ("            raise Stop('missing or unsafe unique shard')\n"
+                 "        path.unlink()\n        os.mkfifo(path)\n" +
+                 '        descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW')
         entry = self.instrument(before, after)
         try:
             result = subprocess.run([str(entry), self.pane, '--wait', '.4', '--poll', '.02'], env=self.env,
@@ -2388,9 +2683,9 @@ class Tests(unittest.TestCase):
         self.invoke('--handoff', 'codex', 'model', '--roles', str(self.roles))
         path, state = self.state()
         receipt = self.staged(state, state['handoff_receipt'])
+        local_before = receipt.read_text()
         data = json.loads(receipt.read_text())
-        data['status'] = 'retirement-requested'
-        receipt.write_text(json.dumps(data))
+        data['status'] = 'forged'
         editor = self.remote_editor()
         (editor / state['handoff_receipt']).write_text(json.dumps(data))
         self.editor_git(editor, 'add', '--', state['handoff_receipt'])
@@ -2406,7 +2701,28 @@ class Tests(unittest.TestCase):
             self.assertIn('does not establish handoff', result.stderr)
             self.assertFalse((self.directory / 'spawn.json').exists())
             self.assertEqual(self.git('show', 'origin/master:' + state['handoff_receipt']), tampered)
-            self.assertEqual(receipt.read_text(), json.dumps(data))
+            self.assertEqual(receipt.read_text(), local_before)
+
+    def test_remote_retired_receipt_is_downgraded_without_exit_evidence(self):
+        self.actor('keep')
+        result = self.invoke()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        path, state = self.state()
+        editor = self.remote_editor()
+        receipt = editor / state['handoff_receipt']
+        data = json.loads(receipt.read_text())
+        data['status'] = 'retired'
+        receipt.write_text(json.dumps(data))
+        self.editor_git(editor, 'add', '--', state['handoff_receipt'])
+        self.editor_git(editor, 'commit', '-m', 'fixture forged retired receipt')
+        self.editor_git(editor, 'push', 'origin', 'HEAD:master')
+
+        resumed = self.invoke('--resume', str(path))
+        self.assertEqual(resumed.returncode, 0, resumed.stderr)
+        corrected = json.loads(self.git('show', 'origin/master:' + state['handoff_receipt']))
+        self.assertEqual(corrected['status'], 'off-duty')
+        self.assertEqual(corrected['off_duty_started_at'], state['off_duty_started_at'])
+        self.assertFalse((self.directory / 'exit-order.json').exists())
 
     def test_stale_tracking_ref_cannot_authorize_exit_after_remote_removal(self):
         self.actor('hold')
