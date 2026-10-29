@@ -985,6 +985,46 @@ assert screen.observe(frame, 'outgoing', 6, 1, pathlib.Path(sys.argv[2])) == 'dr
         self.assertEqual((result['status'], result['receipt']), ('delivered', 'submitted'))
         self.assertEqual((t.pastes, t.enters, t.submitted), (1, 1, t.payload))
 
+    def test_codex_unknown_footer_dropped_enter_redraw_is_not_receipt(self):
+        base = codex_fixture_frame('SYNTHETIC-codex-idle-unrecognized-footer')
+        t = Terminal(payload='short payload', dropped=99)
+        def frame():
+            raw = base.raw.replace('\x1b[2mAsk Codex to do anything\x1b[0m', t.draft) if t.draft else base.raw
+            # A full-screen redraw can move the still-unsent composer into
+            # scrollback. It must not become a submitted receipt.
+            archived = raw if t.enters else ''
+            return m.Frame(raw, 2 + m.styles.cell_width(t.draft), base.y,
+                           archived + raw)
+        t.frame = frame
+        with self.assertRaisesRegex(m.DeliveryError, 'receipt-timeout'):
+            deliver(t, max_wait=5, stable_wait=3, submit_delay=1,
+                    receipt_wait=5, retry_wait=1)
+        self.assertEqual(t.accepted_at, None)
+        self.assertEqual(t.pastes, 1)
+
+    def test_codex_unknown_footer_delivers_multiline_and_collapsed_pastes(self):
+        base = codex_fixture_frame('SYNTHETIC-codex-idle-unrecognized-footer')
+        for collapsed in (False, True):
+            with self.subTest(collapsed=collapsed):
+                t = Terminal(payload='first line\nsecond line', collapsed=collapsed)
+                def frame():
+                    visible = (f'[Pasted Content {len(t.payload)} chars]'
+                               if collapsed and t.draft else t.draft)
+                    parts = visible.split('\n')
+                    raw = base.raw.replace(
+                        '\x1b[2mAsk Codex to do anything\x1b[0m',
+                        parts[0] + ''.join('\n  ' + part for part in parts[1:])) if visible else base.raw
+                    submitted = ('› ' + t.payload.replace('\n', '\n  ') + '\n\n'
+                                 if t.accepted_at is not None else '')
+                    return m.Frame(raw, 2 + m.styles.cell_width(parts[-1]),
+                                   base.y + len(parts) - 1, submitted + raw)
+                t.frame = frame
+                result = deliver(t, max_wait=5, stable_wait=3, submit_delay=1)
+                self.assertEqual((result['status'], result['receipt']),
+                                 ('delivered', 'submitted'))
+                self.assertEqual((t.pastes, t.enters, t.accepted_at is not None),
+                                 (1, 1, True))
+
     def test_readiness_distinguishes_unknown_from_never_stable(self):
         frame = codex_fixture_frame('codex-2026-10-18-live-current-748-scrubbed')
         for alternating, expected in ((False, 'unsupported-layout'),

@@ -14,7 +14,9 @@ An idle Codex input should accept guarded `tmux-message` delivery even if the st
 - [x] (2026-10-29) Committed the two scrubbed live-current fixtures and one labeled synthetic footer variant at `6238a09`. The old source failed two focused tests: changed footer returned `unknown`, and recognized/unknown alternation reported `unsupported-layout`.
 - [x] (2026-10-29) Opened draft PR #13 with the red-test commit and sent `MODAL-M2-ACK MODAL-CHECKPOINT` to `%321` with a verified submitted receipt.
 - [x] (2026-10-29) Added guarded changed-footer recognition, exact post-paste ownership, transient-unknown readiness handling, and distinct `unstable-composer` diagnosis. Red tests covered the old behavior, the readiness-only intermediate state, and the interleaved-unknown state. Final local gates: Python 128 pass, tmux alias pass, private live tmux pass, legacy sender pass, config 21 pass, syntax/diff pass.
-- [ ] Push, open draft PR, review to Lead-tier council fixpoint, run final gates, merge normally, close/sync issue, and report `MODAL-CHECKPOINT` to `%321`.
+- [x] (2026-10-29) Pushed implementation at `75b1199` and marked PR #13 ready for Lead-tier council.
+- [x] (2026-10-29) Council round 1 found two Important defects: archived unsent changed-footer composers could count as receipts, and multiline/collapsed pastes could be left unobserved. Added failing end-to-end tests and repaired both; 130 Python sender tests pass.
+- [ ] Review the fix delta to a clean council round, run final gates on the exact SHA, merge normally, close/sync issue, and report `MODAL-DONE` to `%321`.
 
 ## Surprises & Discoveries
 
@@ -22,6 +24,7 @@ An idle Codex input should accept guarded `tmux-message` delivery even if the st
 - `tmux-message.py:composer` requires a footer regex after a Codex prompt. `ready()` initializes `last_reason` to `unsupported-layout` and can time out for unknown samples or moving recognized samples under the same label. Output above the composer is already excluded from `Input.fingerprint`.
 - Harness-control used `--max-wait 5 --stable-wait 3`, so a correctly recognized stable composer had a chance to pass. The saved operation records only the deferred reason, not raw screen samples; the exact incident failure mode cannot be proved retrospectively.
 - Readiness-only recognition was insufficient: the sender could paste into the synthetic changed-footer frame, then could not verify its own text and returned `paste-not-observed` before Enter. The post-paste test was red on that intermediate implementation.
+- Council round 1 found that an archived copy of a still-unsent fallback composer could count as a submitted receipt after a dropped Enter. A second red test exposed `paste-not-observed` for multiline and collapsed fallback pastes. The repair compares archived composer rows to the currently observed status row and recognizes exact owned multiline text or a counted Codex paste marker with the same status row.
 - A 5-second readiness window with 3-second stability requirement fails on the real normal-footer fixture when a single unreadable capture appears every fourth sample; the pre-change loop reset stability on every unknown frame and timed out `unstable-composer`. The operation log did not save screen samples, so this is a plausible mechanism, not proof of the three original incidents.
 
 ## Decision Log
@@ -30,6 +33,7 @@ An idle Codex input should accept guarded `tmux-message` delivery even if the st
 - Decision: keep the cursor and selected-choice guards when recognizing a new footer. Rationale: a quoted prompt or choice screen must not authorize input. Date/Author: 2026-10-29, Codex Lead.
 - Decision: the fallback accepts the measured bold Codex prompt, dim idle placeholder, blank separator, and one indented final status row with arbitrary wording. After paste, it accepts only the exact outgoing single-line text at the end cursor with the same status row observed immediately before paste. Rationale: preserve unknown choice and unrelated draft deferrals while completing one guarded send. Date/Author: 2026-10-29, Codex Lead.
 - Decision: an unreadable readiness sample does not erase a previously seen composer fingerprint; acting still requires two fresh consecutive recognized samples after the gap and an immediate unchanged sample before paste. A changed known draft across the gap remains `human-typing`. Rationale: transient capture races should not consume harness-control's bounded readiness window, while uncertain or changing input stays closed. Date/Author: 2026-10-29, Codex Lead.
+- Decision: preserve fallback delivery for multiline and counted collapsed paste markers rather than preflight-defer those payloads. Rationale: `tmux-message` accepts them generally, and the fallback can verify full visible text or the exact count while requiring the same measured status row and end cursor. Date/Author: 2026-10-29, Codex Lead.
 
 ## Outcomes & Retrospective
 

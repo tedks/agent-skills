@@ -101,24 +101,35 @@ def composer(frame, expected_codex_text=None, expected_codex_footer=None):
                 # still a composer when the single status row changes wording.
                 # Require the measured blank separator and indented final
                 # status row; arbitrary transcript/choice rows stay unknown.
-                suffix = lines[idx + 1:]
                 ghost = (first in {"", "Ask Codex to do anything"}
                          and (not first or styles.dim_span(raw[idx], first))
                          and frame.x == 2)
-                own_paste = (expected_codex_text is not None
-                             and expected_codex_footer is not None
-                             and "\n" not in expected_codex_text
-                             and first == expected_codex_text
-                             and frame.x == 2 + styles.cell_width(first))
-                if (frame.y != idx or not styles.sgr_span(raw[idx], "›", "bold")
-                        or not (ghost or own_paste)
-                        or len(suffix) < 2 or suffix[0].strip()
-                        or not suffix[1].startswith("  ") or not suffix[1].strip()
-                        or any(glyph in suffix[1] for glyph in "›❯")
-                        or (own_paste and suffix[1] != expected_codex_footer)
-                        or any(row.strip() for row in suffix[2:])):
+                status = next((i for i in range(len(lines) - 1, idx, -1)
+                               if lines[i].strip()), -1)
+                if (not styles.sgr_span(raw[idx], "›", "bold")
+                        or status < idx + 2 or lines[status - 1].strip()
+                        or not lines[status].startswith("  ")
+                        or any(glyph in lines[status] for glyph in "›❯")
+                        or any(row.strip() for row in lines[status + 1:])):
                     continue
-                end = idx + 2
+                content = lines[idx + 1:status - 1]
+                pasted = "\n".join([first] + [row[2:] for row in content])
+                marker = re.fullmatch(r"\[Pasted Content ([0-9]+) chars\]", pasted, re.I)
+                counts = ({str(len(expected_codex_text)),
+                           str(len(expected_codex_text.encode("utf-16-le")) // 2)}
+                          if expected_codex_text is not None else set())
+                own_paste = (expected_codex_footer == lines[status]
+                             and expected_codex_text is not None
+                             and (normalized(pasted) == normalized(expected_codex_text)
+                                  or bool(marker and marker.group(1) in counts))
+                             and all(not row or row.startswith("  ") for row in content)
+                             and frame.y == status - 2
+                             and frame.x == 2 + styles.cell_width(
+                                 content[-1][2:] if content else first))
+                if not ((ghost and frame.y == idx and not content)
+                        or own_paste):
+                    continue
+                end = status
             harness = "codex"
         if not idx <= frame.y < end:
             continue
@@ -150,6 +161,9 @@ def records(frame, inp, strict_claude_submitted=False):
     rows = history[:prefix_len + inp.start] if inp.kind not in {"unknown", "modal"} else history[:prefix_len]
     result = Counter()
     lines = [styles.strip_ansi(row) for row in rows]
+    visible_plain = styles.strip_ansi(frame.raw).splitlines()
+    observed_status = (visible_plain[inp.end] if inp.harness == "codex"
+                       and 0 <= inp.end < len(visible_plain) else None)
     queued = False
     for index, line in enumerate(lines):
         if QUEUE.search(line):
@@ -178,7 +192,9 @@ def records(frame, inp, strict_claude_submitted=False):
         # Full-screen redraw can archive an UNSENT input box in scrollback.
         # Its footer/rules still identify it as a composer, not a receipt.
         rule = lambda row: bool(row.strip()) and set(row.strip()) == {"─"}
-        if kind == "submitted" and (FOOTER.match(following) or rule(following) or rule(previous)):
+        if kind == "submitted" and (FOOTER.match(following) or rule(following)
+                                    or rule(previous) or (observed_status is not None
+                                    and following == observed_status)):
             continue
         result[(kind, normalized(text))] += 1
     return result
@@ -470,7 +486,7 @@ class Sender:
                 # changed. Keep the last known fingerprint, but require two
                 # fresh known samples after the gap before acting on it.
                 consecutive_known = 0
-                if seen_composer and last_reason != "human-typing":
+                if seen_composer and last_reason == "unsupported-layout":
                     last_reason = "unstable-composer"
                 self.sleep(min(self.o.poll_interval, max(0, deadline - self.clock())))
                 continue
