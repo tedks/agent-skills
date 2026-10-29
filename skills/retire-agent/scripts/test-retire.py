@@ -2580,6 +2580,7 @@ class Tests(unittest.TestCase):
 
     def test_pending_fifo_swap_never_blocks(self):
         self.actor()
+        # Keep this post-check shard-open anchor aligned with both shard mutations.
         before = "            raise Stop('missing or unsafe unique shard')\n        descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW"
         after = ("            raise Stop('missing or unsafe unique shard')\n"
                  "        path.unlink()\n        os.mkfifo(path)\n" +
