@@ -28,7 +28,7 @@ type: bugfix
 component: spawn-agent
 release:
 reporter: Ted Smith <tedks@riseup.net>
-status: unstarted
+status: in_progress
 disposition:
 creation_time: 2026-10-18T07:32:49-00:00
 references: []
@@ -53,3 +53,7 @@ log_events:
     ~03:33 ET, pending /tmp/tmux-message-qmjv8fcg/message. Three of five sends to
     Codex panes today deferred on this; the sender should report a distinct reason
     for 'composer unknown' versus 'never stable' so the operator can tell them apart."
+- time: 2026-10-29T18:36:30-00:00
+  who: Ted Smith
+  what: started
+  comment: ""
