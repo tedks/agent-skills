@@ -196,8 +196,14 @@ def records(frame, inp, strict_claude_submitted=False, archived_codex_status=Non
         # Full-screen redraw can archive an UNSENT input box in scrollback.
         # Its footer/rules still identify it as a composer, not a receipt.
         rule = lambda row: bool(row.strip()) and set(row.strip()) == {"─"}
+        archived_codex_box = (archived_codex_status is not None
+                              and end < len(lines) and not lines[end].strip()
+                              and styles.sgr_span(rows[index], "›", "bold")
+                              and following.startswith("  ") and following.strip()
+                              and not any(glyph in following for glyph in "›❯"))
         if kind == "submitted" and (FOOTER.match(following) or rule(following)
-                                    or rule(previous) or following in composer_statuses):
+                                    or rule(previous) or following in composer_statuses
+                                    or archived_codex_box):
             continue
         result[(kind, normalized(text))] += 1
     return result

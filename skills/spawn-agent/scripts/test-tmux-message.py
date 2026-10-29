@@ -987,9 +987,11 @@ assert screen.observe(frame, 'outgoing', 6, 1, pathlib.Path(sys.argv[2])) == 'dr
 
     def test_codex_unknown_footer_dropped_enter_redraw_is_not_receipt(self):
         base = codex_fixture_frame('SYNTHETIC-codex-idle-unrecognized-footer')
-        for payload, footer_changes in (('short payload', False),
-                                        ('short payload', True),
-                                        ('first line\nsecond line', False)):
+        for payload, footer_changes in (('short payload', 0),
+                                        ('short payload', 1),
+                                        ('short payload', 2),
+                                        ('first line\nsecond line', 0),
+                                        ('first line\nsecond line', 2)):
             with self.subTest(payload=payload, footer_changes=footer_changes):
                 t = Terminal(payload=payload, dropped=99)
                 def frame():
@@ -1000,13 +1002,16 @@ assert screen.observe(frame, 'outgoing', 6, 1, pathlib.Path(sys.argv[2])) == 'dr
                     # A full-screen redraw can archive the still-unsent
                     # composer; the live footer may also change afterwards.
                     archived = raw if t.enters else ''
+                    if t.enters and footer_changes == 2:
+                        archived = archived.replace('GPT-6.1-Sol | main | active',
+                                                    'GPT-6.1-Sol | main | intermediate')
                     if t.enters and footer_changes:
                         raw = raw.replace('GPT-6.1-Sol | main | active',
                                           'GPT-6.1-Sol | main | updated')
                     return m.Frame(raw, 2 + m.styles.cell_width(parts[-1]),
                                    base.y + len(parts) - 1, archived + raw)
                 t.frame = frame
-                with self.assertRaises(m.DeliveryError):
+                with self.assertRaisesRegex(m.DeliveryError, 'receipt-timeout'):
                     deliver(t, max_wait=5, stable_wait=3, submit_delay=1,
                             receipt_wait=5, retry_wait=1)
                 self.assertEqual(t.accepted_at, None)
