@@ -546,7 +546,8 @@ class Tests(unittest.TestCase):
             fixture = link
             if relative:
                 fixture = Path('codex')
-        command = shlex.join([sys.executable, str(fixture), '--terminal', str(self.directory), mode])
+        command = shlex.join([sys.executable, str(fixture), '--terminal', str(self.directory), mode,
+                              '--model', 'outgoing-model'])
         # argv[0] is the harness identity; outer shell survives process exit.
         inner = 'exec -a ' + ('node' if node else ('claude' if mode.startswith('claude') else 'codex')) + ' ' + command
         outer = fixture_command(self.directory, inner)
@@ -743,7 +744,82 @@ class Tests(unittest.TestCase):
         self.assertIn('different successor model or provider', result.stderr)
         self.assertNotIn('handoff_receipt', self.state()[1])
         self.assertFalse((self.directory / 'exit-order.json').exists())
+
+    def test_rejected_migration_can_be_retargeted_before_publication(self):
+        self.actor()
+        rejected = self.invoke('--handoff', 'codex', 'outgoing-model', '--roles', str(self.roles))
+        self.assertEqual(rejected.returncode, 2, rejected.stderr)
+        path, state = self.state()
+        self.assertNotIn('handoff_receipt', state)
+
+        resumed = self.invoke('--resume', str(path), '--handoff', 'codex', 'new-model', '--roles', str(self.roles))
+        self.assertEqual(resumed.returncode, 2, resumed.stderr)
+        self.assertIn('shard briefing withheld', resumed.stderr)
+        updated = self.state()[1]
+        self.assertEqual(updated['mode'], 'handoff:codex:new-model')
+        self.assertTrue(updated.get('handoff_receipt'))
+        self.assertTrue(updated.get('spawn'))
+
+    def test_rejected_migration_can_return_to_retirement(self):
+        self.actor()
+        rejected = self.invoke('--handoff', 'codex', 'outgoing-model', '--roles', str(self.roles))
+        self.assertEqual(rejected.returncode, 2, rejected.stderr)
+        path, _state = self.state()
+        resumed = self.invoke('--resume', str(path), '--retire')
+        self.assertEqual(resumed.returncode, 0, resumed.stderr)
+        updated = self.state()[1]
+        self.assertEqual(updated['mode'], 'retire')
+        self.assertFalse(updated.get('spawn'))
+
+    def test_migration_compares_live_model_selectors(self):
+        spec = importlib.util.spec_from_file_location('retirement-model-alias-test', Path(os.environ.get('RETIRE_TEST_SCRIPT', str(HERE / 'retire.sh'))).with_name('retire.py'))
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        self.assertFalse(module.migration_differs('claude', 'opus', 'claude', 'opus'))
+        self.assertFalse(module.migration_differs('claude', 'opus', 'claude', 'claude-opus-5-5'))
+        self.assertTrue(module.migration_differs('claude', 'claude-opus-5-5', 'claude', 'claude-opus-4-1'))
+        self.assertTrue(module.migration_differs('codex', 'opus', 'claude', None))
+
+    def test_non_utf8_migration_mission_rejected_before_offer(self):
+        self.actor()
+        self.mission.write_bytes(b'\xff\xfe')
+        result = self.invoke('--handoff', 'claude', 'opus', '--roles', str(self.roles))
+        self.assertEqual(result.returncode, 2)
+        self.assertIn('UTF-8 text', result.stderr)
+        self.assertEqual(self.observed()['pastes'], 0)
+        self.assertFalse((self.repo / '.git' / 'retirements').exists())
         self.assertFalse((self.directory / 'spawn.json').exists())
+
+    def test_oversize_mission_rejected_before_offer(self):
+        self.actor()
+        self.mission.write_bytes(b'x' * (65536 + 1))
+        result = self.invoke('--handoff', 'claude', 'opus', '--roles', str(self.roles))
+        self.assertEqual(result.returncode, 2)
+        self.assertIn('size limit', result.stderr)
+        self.assertEqual(self.observed()['pastes'], 0)
+        self.assertFalse((self.repo / '.git' / 'retirements').exists())
+
+    def test_nonregular_mission_read_is_nonblocking(self):
+        spec = importlib.util.spec_from_file_location('retirement-safe-read-test', Path(os.environ.get('RETIRE_TEST_SCRIPT', str(HERE / 'retire.sh'))).with_name('retire.py'))
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        fifo = self.directory / 'mission-fifo'
+        os.mkfifo(fifo)
+        with self.assertRaisesRegex(module.Stop, 'regular file'):
+            module.read_regular_bytes(fifo, 65536, 'mission file')
+
+    def test_legacy_identity_without_model_remains_resumable(self):
+        spec = importlib.util.spec_from_file_location('retirement-legacy-identity-test', Path(os.environ.get('RETIRE_TEST_SCRIPT', str(HERE / 'retire.sh'))).with_name('retire.py'))
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        instance = object.__new__(module.Retirement)
+        expected = {'process': {'pid': 7, 'agent': 'codex'}, 'pane_pid': '8',
+                    'session': 'lane', 'directory': '/owned'}
+        observed = {'process': {'pid': 7, 'agent': 'codex', 'model': 'gpt-5-codex'},
+                    'pane_pid': '8', 'session': 'lane', 'directory': '/owned'}
+        instance.state = {'identity': expected}
+        instance.identity = lambda: observed
+        instance.verify_identity()
 
     def test_claude_reply_row_with_space_at_wrap(self):
         self.actor('claude-real-reply-row-status-late')
@@ -1338,12 +1414,47 @@ class Tests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         path, state = self.state()
         receipt_before = self.git('show', 'origin/master:' + state['handoff_receipt'])
+        state.pop('exit_requested')  # Simulate a historical state from before the choice field existed.
+        path.write_text(json.dumps(state))
+        editor = self.remote_editor()
+        remote_receipt = editor / state['handoff_receipt']
+        tampered = json.loads(remote_receipt.read_text())
+        tampered['status'] = 'off-duty'
+        tampered['injected'] = 'untrusted remote field'
+        remote_receipt.write_text(json.dumps(tampered))
+        self.editor_git(editor, 'add', '--', state['handoff_receipt'])
+        self.editor_git(editor, 'commit', '-m', 'fixture retired receipt downgrade')
+        self.editor_git(editor, 'push', 'origin', 'HEAD:master')
         self.command(*self.tmux, 'kill-pane', '-t', self.pane)
         result = self.invoke('--resume', str(path))
         self.assertEqual(result.returncode, 2, result.stderr)
         self.assertEqual(self.git('show', 'origin/master:' + state['handoff_receipt']), receipt_before)
         audit = [json.loads(line) for line in path.with_suffix('.jsonl').read_text().splitlines()]
         self.assertFalse(audit[-1]['exit_confirmed'])
+
+    def test_current_retired_resume_lost_pane_preserves_historical_receipt(self):
+        self.actor()
+        result = self.invoke()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        path, state = self.state()
+        receipt_before = self.git('show', 'origin/master:' + state['handoff_receipt'])
+        editor = self.remote_editor()
+        remote_receipt = editor / state['handoff_receipt']
+        tampered = json.loads(remote_receipt.read_text())
+        tampered['status'] = 'off-duty'
+        tampered['injected'] = 'untrusted remote field'
+        remote_receipt.write_text(json.dumps(tampered))
+        self.editor_git(editor, 'add', '--', state['handoff_receipt'])
+        self.editor_git(editor, 'commit', '-m', 'fixture current retired receipt downgrade')
+        self.editor_git(editor, 'push', 'origin', 'HEAD:master')
+        self.command(*self.tmux, 'kill-pane', '-t', self.pane)
+
+        resumed = self.invoke('--resume', str(path))
+        self.assertEqual(resumed.returncode, 2, resumed.stderr)
+        self.assertEqual(self.git('show', 'origin/master:' + state['handoff_receipt']), receipt_before)
+        final_state = json.loads(path.read_text())
+        self.assertEqual(final_state['status'], 'retired')
+        self.assertTrue(final_state['exit_requested'])
 
     def test_native_interrupted_server_creation_releases_owned_label(self):
         spec = importlib.util.spec_from_file_location('retire-native-cleanup-test', HERE / 'test-retire-native.py')
@@ -2261,6 +2372,85 @@ class Tests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertTrue(json.loads((self.directory / 'pre-offer-receipt.json').read_text())['verified'])
 
+    def test_receipt_push_failure_keeps_shard_author_off_duty(self):
+        self.actor()
+        before = '        result = run(command)\n'
+        after = ('        if (self.state.get("status") == "off-duty"\n'
+                 '                and any(path.startswith("receipts/") for path in paths)):\n'
+                 '            raise Stop("injected receipt publication failure")\n' + before)
+        entry = self.instrument(before, after)
+        with patch.dict(os.environ, {'RETIRE_TEST_SCRIPT': str(entry)}):
+            result = self.invoke()
+        self.assertEqual(result.returncode, 2, result.stderr)
+        self.assertIn('injected receipt publication failure', result.stderr)
+        path, state = self.state()
+        self.assertEqual(state['status'], 'off-duty')
+        self.assertTrue(state.get('off_duty_started_at'))
+        self.assertTrue(state.get('handoff_receipt'))
+        self.assertTrue(state.get('shard_commit'))
+        self.assertIn(state['shard'], self.git('ls-tree', '-r', '--name-only', 'origin/master').splitlines())
+        remote_receipt = json.loads(self.git('show', 'origin/master:' + state['handoff_receipt']))
+        self.assertEqual(remote_receipt['status'], 'retirement-requested')
+        started_at = state['off_duty_started_at']
+
+        resumed = self.invoke('--resume', str(path))
+        self.assertEqual(resumed.returncode, 0, resumed.stderr)
+        final_state = self.state()[1]
+        self.assertEqual(final_state['off_duty_started_at'], started_at)
+        remote_receipt = json.loads(self.git('show', 'origin/master:' + state['handoff_receipt']))
+        self.assertIn(remote_receipt['status'], ('pending-exit', 'retired'))
+        self.assertEqual(remote_receipt['off_duty_started_at'], started_at)
+
+    def test_missing_receipt_recovery_rejects_wrong_local_author(self):
+        self.actor('keep')
+        before = '        result = run(command)\n'
+        after = ('        if (self.state.get("status") == "off-duty"\n'
+                 '                and any(path.startswith("receipts/") for path in paths)):\n'
+                 '            raise Stop("injected receipt publication failure")\n' + before)
+        entry = self.instrument(before, after)
+        with patch.dict(os.environ, {'RETIRE_TEST_SCRIPT': str(entry)}):
+            result = self.invoke()
+        self.assertEqual(result.returncode, 2, result.stderr)
+        path, state = self.state()
+
+        editor = self.remote_editor()
+        self.editor_git(editor, 'rm', state['handoff_receipt'])
+        self.editor_git(editor, 'commit', '-m', 'fixture remove receipt')
+        self.editor_git(editor, 'push', 'origin', 'HEAD:master')
+        local_receipt = self.staged(state, state['handoff_receipt'])
+        local = json.loads(local_receipt.read_text())
+        local['author'] = 'forged-local-author'
+        local_receipt.write_text(json.dumps(local))
+
+        resumed = self.invoke('--resume', str(path))
+        self.assertEqual(resumed.returncode, 2, resumed.stderr)
+        self.assertIn('local handoff receipt differs', resumed.stderr)
+        self.git('fetch', 'origin', 'master')
+        self.assertEqual(self.git('ls-tree', '-r', '--name-only', 'origin/master', '--', state['handoff_receipt']), '')
+
+    def test_post_push_fetch_failure_keeps_shard_author_off_duty(self):
+        self.actor()
+        marker = self.directory / 'post-push-fetch-failed'
+        before = '    def fetch_master(self):\n'
+        after = ('    def fetch_master(self):\n'
+                 '        if self.state.get("handoff_receipt") and not Path(' + repr(str(marker)) + ').exists():\n'
+                 '            Path(' + repr(str(marker)) + ').touch()\n'
+                 '            raise Stop("injected post-push fetch failure")\n')
+        entry = self.instrument(before, after)
+        with patch.dict(os.environ, {'RETIRE_TEST_SCRIPT': str(entry)}):
+            result = self.invoke()
+        self.assertEqual(result.returncode, 2, result.stderr)
+        self.assertIn('injected post-push fetch failure', result.stderr)
+        path, state = self.state()
+        self.assertEqual(state['status'], 'off-duty')
+        self.assertTrue(state.get('off_duty_started_at'))
+        self.assertIn(state['shard'], self.git('ls-tree', '-r', '--name-only', 'origin/master').splitlines())
+        started_at = state['off_duty_started_at']
+
+        resumed = self.invoke('--resume', str(path))
+        self.assertEqual(resumed.returncode, 0, resumed.stderr)
+        self.assertEqual(self.state()[1]['off_duty_started_at'], started_at)
+
     def test_sender_timeout_is_ambiguous_and_not_replayed(self):
         self.actor()
         before = '    return subprocess.run([str(x) for x in args], text=True, capture_output=True,\n'
@@ -2315,7 +2505,12 @@ class Tests(unittest.TestCase):
         remote_blob = json.dumps(data).encode()
         instance.args = SimpleNamespace(handoff=('claude', 'opus'), mission_file=str(self.mission), roles=str(self.roles),
                                         wait=.1, poll=.01)
-        instance.state = {'identity': {'session': 'lane', 'directory': '/owned'}, 'shard_hash': 'blob',
+        instance.records = self.directory / 'records'
+        (instance.records / 'waiting').mkdir(parents=True)
+        (instance.records / 'waiting/x.shard').write_text('UNVERIFIED LOCAL TEXT')
+        instance.state = {'identity': {'session': 'lane', 'directory': '/owned',
+                                       'process': {'agent': 'codex', 'model': 'outgoing-model'}},
+                          'shard': 'waiting/x.shard', 'shard_hash': 'blob',
                           'spawn': {'status': 'launched', 'target': 'lane:successor-event'}}
         instance.git = lambda *args, **kwargs: remote_blob if kwargs.get('raw') else ''
         instance.verify_successor_identity = lambda: {'agent': 'claude', 'model': 'opus', 'pane': '%2'}
@@ -2328,6 +2523,28 @@ class Tests(unittest.TestCase):
         self.assertIn('Fresh bounded migration mission', captured[0][1])
         self.assertIn('fixture-agent', captured[0][1])
         self.assertNotIn('UNVERIFIED LOCAL TEXT', captured[0][1])
+
+    def test_successor_brief_send_targets_reverified_pane(self):
+        spec = importlib.util.spec_from_file_location('retire-successor-send-test', Path(os.environ.get('RETIRE_TEST_SCRIPT', str(HERE / 'retire.sh'))).with_name('retire.py'))
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        instance = object.__new__(module.Retirement)
+        instance.args = SimpleNamespace(pane='%1')
+        instance.state = {'id': 'a' * 32, 'identity': {'directory': '/owned'},
+                          'spawn': {'pane': '%42'}}
+        instance.path = self.directory / 'event.json'
+        instance.shared = self.directory / 'shared'
+        instance.verify_successor_identity = lambda: {'pane': '%42'}
+        instance.persist = lambda: None
+        instance.audit = lambda *args, **kwargs: None
+        instance.transport_env = lambda: {}
+        result = subprocess.CompletedProcess([], 0, stdout=json.dumps(
+            {'status': 'delivered', 'receipt': 'submitted'}), stderr='')
+        with patch.object(module, 'run', return_value=result) as sender:
+            instance.send('successor-brief', 'bounded brief')
+        sent = sender.call_args.args[0]
+        self.assertEqual(sent[:3], [instance.shared / 'tmux-message.sh', 'send', '%42'])
+        self.assertEqual(instance.state['successor-brief']['status'], 'delivered')
 
     def test_successor_model_mismatch_withholds_identity(self):
         spec = importlib.util.spec_from_file_location('retire-successor-identity-test', Path(os.environ.get('RETIRE_TEST_SCRIPT', str(HERE / 'retire.sh'))).with_name('retire.py'))
@@ -2342,13 +2559,31 @@ class Tests(unittest.TestCase):
                                          'start': '1', 'boot': 'boot'}]
         pane = '%42\t100\tlane\tsuccessor-event\t/owned'
         with patch.object(module, 'checked', return_value=pane):
-            with self.assertRaisesRegex(module.Stop, 'actual model/provider differs'):
+            with self.assertRaisesRegex(module.Stop, 'live model selection differs'):
+                instance.verify_successor_identity()
+
+    def test_successor_model_not_yet_observable_is_retryable(self):
+        spec = importlib.util.spec_from_file_location('retire-successor-starting-test', Path(os.environ.get('RETIRE_TEST_SCRIPT', str(HERE / 'retire.sh'))).with_name('retire.py'))
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        instance = object.__new__(module.Retirement)
+        instance.args = SimpleNamespace(handoff=('claude', 'opus'))
+        instance.tmux = []
+        instance.state = {'identity': {'directory': '/owned'},
+                          'spawn': {'target': 'lane:successor-event'}}
+        instance.actors = lambda _root: [{'agent': 'claude', 'model': None, 'pid': 17,
+                                         'start': '1', 'boot': 'boot'}]
+        pane = '%42\t100\tlane\tsuccessor-event\t/owned'
+        with patch.object(module, 'checked', return_value=pane):
+            with self.assertRaisesRegex(module.Stop, 'not yet observable'):
                 instance.verify_successor_identity()
 
     def test_pending_fifo_swap_never_blocks(self):
         self.actor()
-        before = '        descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW'
-        after = '        path.unlink()\n        os.mkfifo(path)\n' + before
+        before = "            raise Stop('missing or unsafe unique shard')\n        descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW"
+        after = ("            raise Stop('missing or unsafe unique shard')\n"
+                 "        path.unlink()\n        os.mkfifo(path)\n" +
+                 '        descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW')
         entry = self.instrument(before, after)
         try:
             result = subprocess.run([str(entry), self.pane, '--wait', '.4', '--poll', '.02'], env=self.env,
@@ -2447,9 +2682,9 @@ class Tests(unittest.TestCase):
         self.invoke('--handoff', 'codex', 'model', '--roles', str(self.roles))
         path, state = self.state()
         receipt = self.staged(state, state['handoff_receipt'])
+        local_before = receipt.read_text()
         data = json.loads(receipt.read_text())
-        data['status'] = 'retirement-requested'
-        receipt.write_text(json.dumps(data))
+        data['status'] = 'forged'
         editor = self.remote_editor()
         (editor / state['handoff_receipt']).write_text(json.dumps(data))
         self.editor_git(editor, 'add', '--', state['handoff_receipt'])
@@ -2465,7 +2700,28 @@ class Tests(unittest.TestCase):
             self.assertIn('does not establish handoff', result.stderr)
             self.assertFalse((self.directory / 'spawn.json').exists())
             self.assertEqual(self.git('show', 'origin/master:' + state['handoff_receipt']), tampered)
-            self.assertEqual(receipt.read_text(), json.dumps(data))
+            self.assertEqual(receipt.read_text(), local_before)
+
+    def test_remote_retired_receipt_is_downgraded_without_exit_evidence(self):
+        self.actor('keep')
+        result = self.invoke()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        path, state = self.state()
+        editor = self.remote_editor()
+        receipt = editor / state['handoff_receipt']
+        data = json.loads(receipt.read_text())
+        data['status'] = 'retired'
+        receipt.write_text(json.dumps(data))
+        self.editor_git(editor, 'add', '--', state['handoff_receipt'])
+        self.editor_git(editor, 'commit', '-m', 'fixture forged retired receipt')
+        self.editor_git(editor, 'push', 'origin', 'HEAD:master')
+
+        resumed = self.invoke('--resume', str(path))
+        self.assertEqual(resumed.returncode, 0, resumed.stderr)
+        corrected = json.loads(self.git('show', 'origin/master:' + state['handoff_receipt']))
+        self.assertEqual(corrected['status'], 'off-duty')
+        self.assertEqual(corrected['off_duty_started_at'], state['off_duty_started_at'])
+        self.assertFalse((self.directory / 'exit-order.json').exists())
 
     def test_stale_tracking_ref_cannot_authorize_exit_after_remote_removal(self):
         self.actor('hold')

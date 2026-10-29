@@ -44,10 +44,12 @@ rollout.
   human decision and its owner named in the shard.
 - `scripts/retire.sh %PANE --handoff AGENT MODEL --mission-file FILE`: use only
   for migration across models or providers. The controller launches the
-  successor without the shard, verifies its actual model/provider, then sends
+  successor without the shard, verifies its live harness and selected model
+  argument, then sends
   a fresh bounded mission, the verified shard, and ROLES.md as a separate
   brief. A same-identity or unverifiable successor remains unbriefed and the
-  package stays unassigned.
+  package stays unassigned. If the original chose DONE, it may remain open
+  off duty while the successor owns active work in the shared worktree.
 
 Offer thanks and off-duty time to **every** agent, including Utility. An agent
 may decline; the caller then writes the same operational shard with `author:

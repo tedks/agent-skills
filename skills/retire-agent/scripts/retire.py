@@ -52,6 +52,37 @@ def run(args, **kwargs):
                           timeout=45, **kwargs)
 
 
+def read_regular_bytes(path, limit, label, require_nonempty=False):
+    try:
+        descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    except OSError as error:
+        raise Stop(label + ' is missing or unsafe') from error
+    try:
+        metadata = os.fstat(descriptor)
+        if not stat.S_ISREG(metadata.st_mode):
+            raise Stop(label + ' must be a regular file')
+        if metadata.st_size > limit:
+            raise Stop(label + ' exceeds its size limit')
+        chunks = []
+        remaining = limit + 1
+        while remaining:
+            chunk = os.read(descriptor, min(65536, remaining))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        content = b''.join(chunks)
+        if len(content) > limit:
+            raise Stop(label + ' exceeds its size limit')
+        if require_nonempty and not content.strip():
+            raise Stop(label + ' is empty')
+        return content
+    except OSError as error:
+        raise Stop(label + ' could not be read safely') from error
+    finally:
+        os.close(descriptor)
+
+
 def checked(args, strip=True):
     result = run(args)
     if result.returncode:
@@ -106,11 +137,14 @@ def state_record(text):
     for key in ('offer', 'exit', 'spawn'):
         if key in record and (not isinstance(record[key], dict) or not isinstance(record[key].get('status'), str)):
             raise Stop('malformed retirement attempt: ' + key)
-    for key in ('shard', 'handoff_receipt', 'shard_hash'):
+    for key in ('shard', 'handoff_receipt', 'shard_hash', 'shard_commit'):
         if key in record and not isinstance(record[key], str):
             raise Stop('malformed retirement evidence: ' + key)
     if 'off_duty_started_at' in record and not isinstance(record['off_duty_started_at'], str):
         raise Stop('malformed off-duty receipt time')
+    for key in ('mission_sha256', 'roles_sha256'):
+        if key in record and not re.fullmatch(r'[0-9a-f]{64}', record[key] if isinstance(record[key], str) else ''):
+            raise Stop('malformed migration input digest: ' + key)
     if 'exit_requested' in record and type(record['exit_requested']) is not bool:
         raise Stop('malformed exit choice')
     if 'native_session_id' in record and (not isinstance(record['native_session_id'], str) or
@@ -147,7 +181,23 @@ def selected_model(argv, agent):
 
 
 def migration_differs(successor_agent, successor_model, outgoing_agent, outgoing_model):
-    return successor_agent != outgoing_agent or successor_model != outgoing_model
+    if successor_agent != outgoing_agent:
+        return True
+    if not isinstance(outgoing_model, str):
+        return False
+    requested = re.findall(r'[a-z]+|[0-9]+', successor_model.casefold())
+    outgoing = re.findall(r'[a-z]+|[0-9]+', outgoing_model.casefold())
+    for tokens in (requested, outgoing):
+        if tokens and tokens[0] == 'claude':
+            tokens.pop(0)
+    if requested == outgoing:
+        return False
+    # A bare family selector and its versioned spelling can resolve to the
+    # same model (for example `opus` and `claude-opus-5-5`). Treat those as
+    # equal; two versioned selectors remain distinct.
+    if requested and outgoing and requested[0] == outgoing[0] and (len(requested) == 1 or len(outgoing) == 1):
+        return False
+    return True
 
 
 def proc(pid):
@@ -289,7 +339,17 @@ class Retirement:
         return {'process': actors[0], 'pane_pid': fields[1], 'session': fields[2], 'directory': fields[3]}
 
     def verify_identity(self):
-        if self.identity() != self.state['identity']:
+        observed = self.identity()
+        expected = self.state['identity']
+        def ignore_unrecorded_model(actual, recorded):
+            if isinstance(actual, dict) and isinstance(recorded, dict):
+                return {key: ignore_unrecorded_model(value, recorded.get(key))
+                        for key, value in actual.items()
+                        if not (key == 'model' and key not in recorded)}
+            if isinstance(actual, list) and isinstance(recorded, list) and len(actual) == len(recorded):
+                return [ignore_unrecorded_model(value, recorded[index]) for index, value in enumerate(actual)]
+            return actual
+        if ignore_unrecorded_model(observed, expected) != expected:
             raise Stop('pane/process identity changed')
 
     def verify_successor_identity(self):
@@ -310,8 +370,12 @@ class Retirement:
             raise Stop('successor harness identity is not unique; shard briefing withheld')
         actor = actors[0]
         expected_agent, expected_model = self.args.handoff
-        if actor['agent'] != expected_agent or actor.get('model') != expected_model:
-            raise Stop('successor actual model/provider differs from approved migration; shard briefing withheld')
+        if actor['agent'] != expected_agent:
+            raise Stop('successor live provider differs from approved migration; shard briefing withheld')
+        if actor.get('model') is None:
+            raise Stop('successor model selection is not yet observable; shard briefing withheld')
+        if actor.get('model') != expected_model:
+            raise Stop('successor live model selection differs from approved migration; shard briefing withheld')
         pinned = {'pane': pane_id, 'pid': actor['pid'], 'start': actor['start'], 'boot': actor['boot'],
                   'agent': actor['agent'], 'model': actor.get('model')}
         prior = spawn.get('identity')
@@ -324,6 +388,24 @@ class Retirement:
 
     def handoff_successor(self, directory, event):
         agent, model = self.args.handoff
+        mission_path = Path(self.args.mission_file).expanduser()
+        mission_bytes = read_regular_bytes(mission_path, 65536, 'fresh bounded mission file', require_nonempty=True)
+        roles_path = Path(self.args.roles).expanduser().resolve()
+        roles_bytes = read_regular_bytes(roles_path, 1048576, 'ROLES.md', require_nonempty=True)
+        try:
+            mission_bytes.decode('utf-8')
+            roles_bytes.decode('utf-8')
+        except UnicodeDecodeError as error:
+            raise Stop('migration mission and ROLES.md must be valid UTF-8 text') from error
+        mission_digest = hashlib.sha256(mission_bytes).hexdigest()
+        roles_digest = hashlib.sha256(roles_bytes).hexdigest()
+        if self.state.get('mission_sha256') not in (None, mission_digest):
+            raise Stop('fresh mission changed during handoff; shard briefing withheld')
+        if self.state.get('roles_sha256') not in (None, roles_digest):
+            raise Stop('ROLES.md changed during handoff; shard briefing withheld')
+        self.state['mission_sha256'] = mission_digest
+        self.state['roles_sha256'] = roles_digest
+        self.persist()
         target = self.state['identity']['session'] + ':successor-' + event[:12]
         spawn = self.state.get('spawn')
         if spawn is None:
@@ -355,7 +437,7 @@ class Retirement:
                 identity = self.verify_successor_identity()
                 break
             except Stop as error:
-                if 'actual model/provider differs' in str(error):
+                if 'live provider differs' in str(error) or 'live model selection differs' in str(error):
                     self.state['spawn']['status'] = 'mismatch'
                     self.persist()
                     self.audit('successor-model-mismatch', status='mismatch')
@@ -367,29 +449,15 @@ class Retirement:
                 time.sleep(min(self.args.poll, max(0, deadline - time.monotonic())))
 
         shard = object_record(self.git('show', self.state['shard_hash'], raw=True), 'preserved shard')
-        if not migration_differs(identity['agent'], identity['model'], shard['harness'], shard['model']):
+        outgoing = self.state['identity']['process']
+        if not migration_differs(identity['agent'], identity['model'], outgoing['agent'], outgoing.get('model')):
             self.state['spawn']['status'] = 'mismatch'
             self.persist()
-            raise Stop('successor actual model/provider matches outgoing lane; shard briefing withheld')
-        mission_path = Path(self.args.mission_file).expanduser()
-        if mission_path.is_symlink() or not mission_path.is_file():
-            raise Stop('fresh bounded mission file is missing or unsafe')
-        mission_stat = mission_path.stat()
-        if not stat.S_ISREG(mission_stat.st_mode) or mission_stat.st_size > 65536:
-            raise Stop('fresh bounded mission file must be a regular file no larger than 64 KiB')
-        mission_bytes = mission_path.read_bytes()
-        if not mission_bytes.strip():
-            raise Stop('fresh bounded mission file is empty')
-        mission_digest = hashlib.sha256(mission_bytes).hexdigest()
-        if self.state.get('mission_sha256') not in (None, mission_digest):
-            raise Stop('fresh mission changed during handoff; shard briefing withheld')
-        self.state['mission_sha256'] = mission_digest
-        self.persist()
-        roles_path = Path(self.args.roles).expanduser().resolve()
+            raise Stop('successor live model/provider matches outgoing lane; shard briefing withheld')
         brief = (b'Cold-start audit before action: reconstruct state from this shard and committed artifacts alone; file any protocol defect first.\n'
                  b'\nApproved fresh bounded mission:\n' + mission_bytes + b'\n\nShard:\n'
                  + self.git('show', self.state['shard_hash'], raw=True) + b'\n\nROLES.md:\n'
-                 + roles_path.read_bytes())
+                 + roles_bytes)
         if self.state.get('spawn', {}).get('status') != 'briefed':
             self.state['spawn']['status'] = 'ready'
             self.persist()
@@ -702,8 +770,12 @@ class Retirement:
         for key in ('date', 'session_id', 'harness', 'model', 'working_directory', 'tmux_window', 'role', 'landed_work', 'lessons', 'provenance'):
             if not isinstance(data.get(key), str) or not data[key].strip():
                 raise Stop('shard requires ' + key)
-        if self.args.handoff and not migration_differs(self.args.handoff[0], self.args.handoff[1], data['harness'], data['model']):
-            raise Stop('open-package handoff requires a different successor model or provider')
+        if self.args.handoff:
+            outgoing = self.state['identity']['process']
+            if self.args.handoff[0] == outgoing['agent'] and outgoing.get('model') is None:
+                raise Stop('outgoing model selection is not observable; cannot establish a model migration')
+            if not migration_differs(self.args.handoff[0], self.args.handoff[1], outgoing['agent'], outgoing.get('model')):
+                raise Stop('open-package handoff requires a different successor model or provider')
         if not re.fullmatch(r'\d{4}-\d{2}-\d{2}', data['date']) or not re.fullmatch(r'[\w.-]{1,128}', data['session_id']):
             raise Stop('invalid date/session identity')
         datetime.date.fromisoformat(data['date'])
@@ -750,6 +822,22 @@ class Retirement:
         with locked(self.common / 'retirement.lock'):
             return self.publish_locked(paths, index)
 
+    def start_off_duty(self, commit):
+        if self.state.get('handoff_receipt'):
+            return
+        shard = self.state.get('shard')
+        if not isinstance(shard, str) or not shard.startswith('waiting/'):
+            raise Stop('published shard path is not pinned')
+        if not isinstance(self.state.get('off_duty_started_at'), str):
+            self.state['off_duty_started_at'] = datetime.datetime.now(datetime.timezone.utc).isoformat()
+        if not isinstance(self.state.get('shard_hash'), str):
+            raise Stop('shard hash must be pinned before private publication')
+        self.state['shard_commit'] = commit
+        self.state['handoff_receipt'] = 'receipts/' + self.state['id'] + '.json'
+        self.state['status'] = 'off-duty'
+        self.persist()
+        self.audit('off-duty-started', shard_path=shard)
+
     def publish_locked(self, paths, index=False):
         self.private()
         helper = Path(__file__).resolve().parents[2] / '_shared/offduty-push.sh'
@@ -768,9 +856,17 @@ class Retirement:
             command += ['--session-id', shard['session_id'], '--event-id', self.state['id']]
         command += [*paths, '-m', 'Preserve retirement ' + self.state['id']]
         result = run(command)
-        if result.returncode or not re.fullmatch(r'[0-9a-f]{40,64}', result.stdout.strip()):
-            raise Stop('private publication failed: ' + result.stderr.strip()[-500:])
         commit = result.stdout.strip()
+        if (re.fullmatch(r'[0-9a-f]{40,64}', commit)
+                and self.state.get('shard') in paths and not self.state.get('handoff_receipt')):
+            # offduty-push prints this commit only after the push succeeds (or
+            # the identical shard is already on origin). Persist the lifecycle
+            # boundary before any later fetch or byte verification can fail.
+            self.start_off_duty(commit)
+        if not re.fullmatch(r'[0-9a-f]{40,64}', commit):
+            raise Stop('private publication failed: ' + result.stderr.strip()[-500:])
+        if result.returncode:
+            raise Stop('private publication returned an error after reporting the shard commit: ' + result.stderr.strip()[-500:])
         remote_head = self.fetch_master()
         for path in paths:
             if (self.records / path).read_bytes() != self.git_bytes('cat-file', 'blob', remote_head + ':' + path):
@@ -833,8 +929,14 @@ class Retirement:
         state = state_record(self.path.read_text())
         if not re.fullmatch(r'[0-9a-f]{32}', state['id']) or self.path.stem != state['id']:
             raise Stop('invalid retirement event identity')
-        if state['pane'] != self.args.pane or state['mode'] != self.args.mode:
+        if state['pane'] != self.args.pane:
             raise Stop('resume pane/mode differs')
+        if state['mode'] != self.args.mode:
+            retargetable = (state['mode'].startswith('handoff:')
+                            and (self.args.mode.startswith('handoff:') or self.args.mode == 'retire')
+                            and not state.get('handoff_receipt') and not state.get('spawn'))
+            if not retargetable:
+                raise Stop('resume pane/mode differs')
         if state.get('shard') and not re.fullmatch(r'waiting/[\w.-]+\.md', state['shard']):
             raise Stop('invalid preserved shard path')
         if state.get('handoff_receipt') and state['handoff_receipt'] != 'receipts/' + state['id'] + '.json':
@@ -891,6 +993,10 @@ class Retirement:
         if self.args.resume:
             self.load_resume()  # Another controller may have advanced state before this lock.
         self.event_owned = True
+        if self.state['mode'] != self.args.mode:
+            self.state['mode'] = self.args.mode
+            self.persist()
+            self.audit('migration-target-retargeted', mode=self.args.mode)
         event = self.state['id']
         self.records = directory / (event + '.publication')
         if self.records.is_symlink():
@@ -966,14 +1072,16 @@ class Retirement:
                     raise Stop('canonical shard already exists with different content')
                 atomic_bytes(canonical, content)
                 self.state['shard'] = 'waiting/' + canonical.name
+                self.state['shard_hash'] = self.git('hash-object', '--no-filters', str(canonical))
+                self.persist()  # Keep the event-to-path binding before publication.
                 shard_commit = self.publish_locked([self.state['shard']], index=True)
                 receipt = self.records / 'receipts' / (event + '.json')
                 receipt.parent.mkdir(mode=0o700, exist_ok=True)
-                save(receipt, {'event': event, 'shard': self.state['shard'], 'commit': shard_commit, 'author': data['author'], 'status': 'handoff-verified', 'verified_at': datetime.datetime.now(datetime.timezone.utc).isoformat()})
+                save(receipt, {'event': event, 'shard': self.state['shard'], 'commit': shard_commit,
+                               'author': data['author'], 'status': 'off-duty',
+                               'off_duty_started_at': self.state['off_duty_started_at'],
+                               'verified_at': datetime.datetime.now(datetime.timezone.utc).isoformat()})
                 self.publish_locked(['receipts/' + receipt.name], index=True)
-                self.state['handoff_receipt'] = 'receipts/' + receipt.name
-                self.state['shard_hash'] = self.git('hash-object', '--no-filters', str(canonical))
-                self.persist()
                 self.audit('handoff-receipt', shard_path=self.state['shard'], receipt_path=self.state['handoff_receipt'])
         # Reverify immutable handoff evidence before resumed exit or successor.
         with locked(self.common / 'retirement.lock'):
@@ -987,7 +1095,78 @@ class Retirement:
                 raise Stop('preserved shard changed after receipt') from error
             if remote_shard != self.state['shard_hash']:
                 raise Stop('preserved shard changed after receipt')
-            record = receipt_record(self.git('show', remote_head + ':' + self.state['handoff_receipt']))
+            if not isinstance(self.state.get('off_duty_started_at'), str):
+                self.state['off_duty_started_at'] = datetime.datetime.now(datetime.timezone.utc).isoformat()
+                if self.state.get('status') != 'retired':
+                    self.state['status'] = 'pending-exit' if self.state.get('exit_requested') else 'off-duty'
+                self.persist()
+            receipt_path_name = self.state['handoff_receipt']
+            listed_receipts = self.git('ls-tree', '-r', '--name-only', remote_head,
+                                       '--', receipt_path_name).splitlines()
+            if listed_receipts == []:
+                remote_receipt = None
+            elif listed_receipts == [receipt_path_name]:
+                remote_receipt = self.git('show', remote_head + ':' + receipt_path_name)
+            else:
+                raise Stop('private handoff receipt path is ambiguous; inspect before repair')
+            preserved_data = object_record(self.git('show', self.state['shard_hash'], raw=True), 'preserved shard')
+            if remote_receipt is None:
+                # A shard can be present remotely while the later receipt push
+                # failed. Rebuild that bookkeeping record from pinned local
+                # evidence and retry publication on resume.
+                receipt_path = self.records / self.state['handoff_receipt']
+                if receipt_path.is_symlink() or (receipt_path.exists() and not receipt_path.is_file()):
+                    raise Stop('local handoff receipt is not a regular file')
+                if not receipt_path.exists():
+                    if not re.fullmatch(r'[0-9a-f]{40,64}', self.state.get('shard_commit', '')):
+                        raise Stop('shard commit is not pinned; inspect before rebuilding receipt')
+                    save(receipt_path, {'event': event, 'shard': self.state['shard'],
+                                        'commit': self.state.get('shard_commit'),
+                                        'author': preserved_data['author'], 'status': 'off-duty',
+                                        'off_duty_started_at': self.state.get('off_duty_started_at')})
+                local_record = receipt_record(receipt_path.read_text())
+                if (local_record.get('event') != event
+                        or local_record.get('shard') != self.state['shard']
+                        or local_record.get('commit') != self.state.get('shard_commit')
+                        or local_record.get('author') != preserved_data['author']):
+                    raise Stop('local handoff receipt differs from pinned shard evidence')
+                local_record['status'] = 'pending-exit' if self.state.get('exit_requested') else 'off-duty'
+                local_record['off_duty_started_at'] = self.state.get('off_duty_started_at')
+                local_record.pop('process_exit', None)
+                local_record.pop('exit_notice_session', None)
+                save(receipt_path, local_record)
+                self.publish_locked([self.state['handoff_receipt']], index=True)
+                remote_head = self.fetch_master()
+                remote_receipt = self.git('show', remote_head + ':' + self.state['handoff_receipt'])
+            record = receipt_record(remote_receipt)
+            if record.get('status') == 'retirement-requested':
+                # This is the pre-shard request record left behind when the
+                # shard push succeeded but receipt publication did not.
+                if (record.get('event') != event or any(key in record for key in
+                        ('shard', 'commit', 'author', 'off_duty_started_at'))):
+                    raise Stop('private retirement request receipt changed; inspect before repair')
+                local_receipt = self.records / self.state['handoff_receipt']
+                if local_receipt.is_symlink() or not local_receipt.is_file():
+                    raise Stop('local handoff receipt is missing or unsafe; inspect before repair')
+                if not re.fullmatch(r'[0-9a-f]{40,64}', self.state.get('shard_commit', '')):
+                    raise Stop('shard commit is not pinned; inspect before repairing receipt')
+                local_record = receipt_record(local_receipt.read_text())
+                if (local_record.get('event') != event
+                        or local_record.get('shard') not in (None, self.state['shard'])
+                        or local_record.get('commit') not in (None, self.state['shard_commit'])):
+                    raise Stop('local handoff receipt differs from pinned shard evidence')
+                local_record.update({'event': event, 'shard': self.state['shard'],
+                                     'commit': self.state['shard_commit'],
+                                     'author': preserved_data['author'],
+                                     'status': 'pending-exit' if self.state.get('exit_requested') else 'off-duty',
+                                     'off_duty_started_at': self.state.get('off_duty_started_at')})
+                local_record.pop('process_exit', None)
+                local_record.pop('exit_notice_session', None)
+                save(local_receipt, local_record)
+                self.publish_locked([self.state['handoff_receipt']], index=True)
+                remote_head = self.fetch_master()
+                remote_receipt = self.git('show', remote_head + ':' + self.state['handoff_receipt'])
+                record = receipt_record(remote_receipt)
             if record.get('event') != event or record.get('shard') != self.state['shard'] or not re.fullmatch(r'[0-9a-f]{40,64}', record.get('commit', '')):
                 raise Stop('private handoff receipt changed or missing')
             if record.get('status') not in ('handoff-verified', 'off-duty', 'pending-exit', 'retired'):
@@ -998,28 +1177,61 @@ class Retirement:
             if evidence.stdout.strip() != self.state['shard_hash']:
                 raise Stop('private receipt commit contains different shard bytes')
             self.evidence_verified = True  # Current execution, never cached state authority.
-        if record.get('status') != 'retired':
-            off_duty_at = self.state.get('off_duty_started_at')
-            off_duty_new = not isinstance(off_duty_at, str)
-            if not isinstance(off_duty_at, str):
-                off_duty_at = datetime.datetime.now(datetime.timezone.utc).isoformat()
-                self.state['off_duty_started_at'] = off_duty_at
-            self.state['status'] = 'off-duty'
-            self.persist()
-            receipt = self.records / self.state['handoff_receipt']
-            record = receipt_record(receipt.read_text())
-            record['status'] = 'off-duty'
-            record['off_duty_started_at'] = off_duty_at
-            save(receipt, record)
-            self.publish([self.state['handoff_receipt']], index=True)
-            if off_duty_new:
-                self.audit('off-duty-started', shard_path=self.state['shard'])
+        local_receipt_path = self.records / self.state['handoff_receipt']
+        if local_receipt_path.is_symlink() or (local_receipt_path.exists() and not local_receipt_path.is_file()):
+            raise Stop('local handoff receipt is not a regular file; inspect before repair')
+        local_record = receipt_record(local_receipt_path.read_text()) if local_receipt_path.exists() else dict(record)
+        if (local_record.get('event') != event or local_record.get('shard') != self.state['shard']
+                or local_record.get('commit') != record.get('commit')
+                or local_record.get('author') not in (None, preserved_data['author'])
+                or record.get('author') not in (None, preserved_data['author'])):
+            raise Stop('local handoff receipt differs from verified remote evidence')
+        local_record['author'] = preserved_data['author']
         preserved = object_record(self.git('show', self.state['shard_hash'], raw=True), 'preserved shard')
         session_id = preserved.get('session_id')
         if not isinstance(session_id, str):
             raise Stop('handoff verified; missing native session identity')
-        if self.state.get('exit') and not self.state.get('exit_requested'):
+        exit_attempt = self.state.get('exit', {})
+        exit_input_verified = ((exit_attempt.get('status') == 'delivered'
+                                and exit_attempt.get('receipt') in ('command', 'submitted', 'queued'))
+                               or (exit_attempt.get('status') == 'ambiguous'
+                                   and exit_attempt.get('input_attempted') is True))
+        exit_input_verified = (exit_input_verified and type(exit_attempt.get('enters')) is int
+                               and exit_attempt['enters'] > 0)
+        baseline = self.state.get('exit_notice', {})
+        historical_retired = (local_record.get('status') == 'retired'
+                              and self.state.get('status') == 'retired'
+                              and (self.state.get('exit_requested') is True or 'exit_requested' not in self.state)
+                              and exit_input_verified
+                              and local_record.get('process_exit') == 'original-process-and-recorded-native-core-ended'
+                              and local_record.get('exit_notice_session') == session_id
+                              and baseline.get('session_id') == session_id
+                              and type(baseline.get('before')) is int and baseline['before'] >= 0)
+        off_duty_at = self.state.get('off_duty_started_at')
+        off_duty_new = not isinstance(off_duty_at, str)
+        if not isinstance(off_duty_at, str):
+            off_duty_at = datetime.datetime.now(datetime.timezone.utc).isoformat()
+            self.state['off_duty_started_at'] = off_duty_at
+        receipt_status = ('retired' if historical_retired else
+                          'pending-exit' if self.state.get('exit_requested') else 'off-duty')
+        if not historical_retired:
+            self.state['status'] = receipt_status
+        self.persist()
+        if record.get('status') != receipt_status or record.get('off_duty_started_at') != off_duty_at:
+            normalized_record = dict(local_record)
+            normalized_record['status'] = receipt_status
+            normalized_record['off_duty_started_at'] = off_duty_at
+            if receipt_status != 'retired':
+                normalized_record.pop('process_exit', None)
+                normalized_record.pop('exit_notice_session', None)
+            save(self.records / self.state['handoff_receipt'], normalized_record)
+            self.publish([self.state['handoff_receipt']], index=True)
+        if off_duty_new:
+            self.audit('off-duty-started', shard_path=self.state['shard'])
+        if self.state.get('exit') and not self.state.get('exit_requested') and not historical_retired:
             raise Stop('legacy exit attempt has no recorded agent request; inspect without resending')
+        if self.state.get('exit') and 'exit_requested' not in self.state and historical_retired:
+            raise Stop('historical retirement receipt preserved; legacy choice cannot be reverified')
         if self.state.get('exit_requested'):
             if not self.state.get('exit'):
                 if self.ended():
@@ -1075,11 +1287,12 @@ class Retirement:
             record = receipt_record(receipt.read_text())
             record['status'] = ('retired' if self.exit_verified else
                                 'pending-exit' if self.state.get('exit_requested') and self.state.get('handoff_receipt') else
-                                'off-duty' if self.state.get('handoff_receipt') else 'pending-handoff')
+                                'off-duty' if self.state.get('handoff_receipt') or self.state.get('status') == 'off-duty' else 'pending-handoff')
             record['offer'] = self.state.get('offer', {}).get('status', 'not-attempted')
             record['exit'] = self.state.get('exit', {}).get('status', 'not-attempted')
             save(receipt, record)
-            self.publish(['receipts/' + receipt.name], index=bool(self.state.get('shard')))
+            if self.state.get('handoff_receipt') or self.state.get('status') != 'off-duty':
+                self.publish(['receipts/' + receipt.name], index=bool(self.state.get('shard')))
 
 
 def main():
@@ -1114,6 +1327,16 @@ def main():
     if args.handoff and (not args.mission_file or Path(args.mission_file).expanduser().is_symlink()
                          or not Path(args.mission_file).expanduser().is_file()):
         parser.error('handoff needs a regular bounded mission file')
+    if args.handoff:
+        mission_path = Path(args.mission_file).expanduser()
+        try:
+            mission_bytes = read_regular_bytes(mission_path, 65536, 'mission file', require_nonempty=True)
+            roles_bytes = read_regular_bytes(Path(args.roles).expanduser().resolve(), 1048576,
+                                             'ROLES.md', require_nonempty=True)
+            mission_bytes.decode('utf-8')
+            roles_bytes.decode('utf-8')
+        except (Stop, UnicodeDecodeError) as error:
+            parser.error('handoff mission and ROLES.md must be readable UTF-8 text: ' + str(error))
     if args.mission_file and not args.handoff:
         parser.error('--mission-file requires --handoff')
     args.mode = 'handoff:' + ':'.join(args.handoff) if args.handoff else ('waiting' if args.waiting else 'retire')
