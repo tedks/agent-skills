@@ -39,6 +39,11 @@ def fixture_frame(name, marker='❯'):
     return m.Frame(raw, 2, y)
 
 
+def codex_fixture_frame(name):
+    x, y = map(int, (CO_SUBMIT_FIXTURES / (name + '.cursor')).read_text().split(':'))
+    return m.Frame((CO_SUBMIT_FIXTURES / (name + '.ansi')).read_text(), x, y)
+
+
 def claude_co_submit_frame(text='', receipt=True):
     rows = (CO_SUBMIT_FIXTURES / 'claude-co-submit-receipt.ansi').read_text().splitlines()
     if not receipt:
@@ -924,6 +929,54 @@ assert screen.observe(frame, 'outgoing', 6, 1, pathlib.Path(sys.argv[2])) == 'dr
                 frame = screen(harness='claude', prefix=footer + '\n')
                 self.assertEqual(m.composer(frame).kind, 'empty')
                 self.assertEqual(m.composer(frame).harness, 'claude')
+
+    def test_codex_idle_live_captures_and_synthetic_footer(self):
+        # These two live captures were made AFTER the reported 38%-context
+        # incidents. They prove real 272x54 layouts, not the incident failure.
+        for name in ('codex-2026-10-18-live-current-748-scrubbed',
+                     'codex-2026-10-18-live-current-749-scrubbed',
+                     'SYNTHETIC-codex-idle-unrecognized-footer'):
+            with self.subTest(name=name):
+                frame = codex_fixture_frame(name)
+                self.assertIn('Ask Codex to do anything', frame.raw)
+                result = m.composer(frame)
+                self.assertEqual((result.kind, result.harness, result.cursor),
+                                 ('empty', 'codex', (2, 0)))
+                t = Terminal()
+                t.frame = lambda: frame
+                o = SimpleNamespace(max_wait=5, stable_wait=3, poll_interval=.25,
+                                    backoff=True)
+                sender = m.Sender(t, o, t.payload, Path('/unused'), t.clock, t.sleep)
+                self.assertEqual(sender.ready()[1].kind, 'empty')
+                self.assertEqual(t.actions, [])
+
+    def test_codex_unknown_footer_fallback_rejects_choice_and_bad_cursor(self):
+        frame = codex_fixture_frame('SYNTHETIC-codex-idle-unrecognized-footer')
+        self.assertEqual(m.composer(m.Frame(frame.raw, 2, frame.y + 2)).kind, 'unknown')
+        self.assertEqual(m.composer(m.Frame(frame.raw, 3, frame.y)).kind, 'unknown')
+        plain = frame.raw.replace('\x1b[2mAsk Codex to do anything', 'Ask Codex to do anything')
+        self.assertNotEqual(m.composer(m.Frame(plain, 2, frame.y)).kind, 'empty')
+        choice = frame.raw.replace('Ask Codex to do anything', '1. Allow')
+        self.assertEqual(m.composer(m.Frame(choice, 2, frame.y)).kind, 'unknown')
+
+    def test_readiness_distinguishes_unknown_from_never_stable(self):
+        frame = codex_fixture_frame('codex-2026-10-18-live-current-748-scrubbed')
+        for alternating, expected in ((False, 'unsupported-layout'),
+                                      (True, 'unstable-composer')):
+            with self.subTest(alternating=alternating):
+                t = Terminal()
+                samples = 0
+                def sample():
+                    nonlocal samples
+                    samples += 1
+                    return frame if alternating and samples % 2 == 0 else m.Frame('', -1, -1)
+                t.frame = sample
+                o = SimpleNamespace(max_wait=1, stable_wait=.75, poll_interval=.25,
+                                    backoff=True)
+                sender = m.Sender(t, o, t.payload, Path('/unused'), t.clock, t.sleep)
+                with self.assertRaisesRegex(m.DeliveryError, expected):
+                    sender.ready()
+                self.assertEqual(t.actions, [])
 
     def test_claude_dialogs_and_footers_by_fixture(self):
         fixtures = (
