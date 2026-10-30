@@ -532,6 +532,7 @@ class Sender:
             # suggestion. The default 8-second window within a 10-second
             # readiness budget cannot fit twice; require two fresh empty
             # samples after the probe instead of restarting that window.
+            # Any intervening nonempty or unreadable sample revokes the credit.
             settled = (now - stable_since >= getattr(self.o, "stable_window", self.o.stable_wait)
                        or (probe_empty_credit and inp.kind == "empty"))
             if twice and settled:

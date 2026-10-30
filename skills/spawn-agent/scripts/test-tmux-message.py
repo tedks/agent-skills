@@ -1000,7 +1000,7 @@ assert screen.observe(frame, 'outgoing', 6, 1, pathlib.Path(sys.argv[2])) == 'dr
                 t.probed = True
             original_keys(*pressed)
         t.frame, t.keys = frame, keys
-        with self.assertRaises(m.DeliveryError):
+        with self.assertRaisesRegex(m.DeliveryError, 'human-typing'):
             deliver(t, stable_wait=8, max_wait=10, backoff=True)
         self.assertEqual((t.pastes, t.enters), (0, 0))
 
