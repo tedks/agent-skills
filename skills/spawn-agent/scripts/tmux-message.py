@@ -488,6 +488,7 @@ class Sender:
         previous = None
         stable_since = self.clock()
         probed = False
+        probe_empty_credit = False
         last_reason = "unsupported-layout"
         seen_composer = False
         consecutive_known = 0
@@ -497,6 +498,8 @@ class Sender:
             fp = inp.fingerprint()
             if now >= deadline:
                 break
+            if probe_empty_credit and inp.kind != "empty":
+                probe_empty_credit = False
             if inp.kind == "modal":
                 raise DeliveryError("modal")
             if inp.kind == "unknown":
@@ -530,7 +533,7 @@ class Sender:
             # readiness budget cannot fit twice; require two fresh empty
             # samples after the probe instead of restarting that window.
             settled = (now - stable_since >= getattr(self.o, "stable_window", self.o.stable_wait)
-                       or (probed and inp.kind == "empty"))
+                       or (probe_empty_credit and inp.kind == "empty"))
             if twice and settled:
                 if inp.kind == "empty":
                     return frame, inp
@@ -553,6 +556,7 @@ class Sender:
                     # suggestion should disappear. Never clear actual text.
                     self.tmux.keys("Space", "BSpace")
                     probed = True
+                    probe_empty_credit = True
                     previous = None
                     stable_since = self.clock()
                 elif inp.kind in {"text", "suggestion"}:
@@ -588,9 +592,9 @@ class Sender:
             raise DeliveryError("input-changed-before-clear")
         if check.kind == "text" and not self.at_end(check):
             home = check
-            # Claude Code's input honors Ctrl-E but ignores the terminal End
-            # key; Codex's composer uses End. Verify the resulting cursor
-            # before appending in either case.
+            # Claude Code 2.1.314 in a scratch tmux pane honored Ctrl-E but
+            # ignored terminal End; Codex uses End. Verify the resulting
+            # cursor before appending. Multiline Claude drafts may defer.
             self.tmux.keys("C-e" if check.harness == "claude" else "End")
             while True:
                 before, check = self.sample()

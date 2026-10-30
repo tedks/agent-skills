@@ -947,11 +947,11 @@ assert screen.observe(frame, 'outgoing', 6, 1, pathlib.Path(sys.argv[2])) == 'dr
         fresh = codex_fixture_frame('claude-cto-321-fresh-live-scrubbed')
         self.assertEqual(m.composer(m.Frame(fresh.raw, 3, fresh.y)).kind, 'text')
         rows = fresh.raw.splitlines()
-        rows.insert(85, '  continuation')
-        self.assertEqual(m.composer(m.Frame('\n'.join(rows) + '\n', 2, 84)).kind, 'text')
+        rows.insert(fresh.y + 1, '  continuation')
+        self.assertEqual(m.composer(m.Frame('\n'.join(rows) + '\n', 2, fresh.y)).kind, 'text')
         rows = fresh.raw.splitlines()
-        rows[84] = '❯\u00a0typed\x1b[2m completion\x1b[0m'
-        self.assertEqual(m.composer(m.Frame('\n'.join(rows) + '\n', 2, 84)).kind, 'text')
+        rows[fresh.y] = '❯\u00a0typed\x1b[2m completion\x1b[0m'
+        self.assertEqual(m.composer(m.Frame('\n'.join(rows) + '\n', 2, fresh.y)).kind, 'text')
         with patch.object(m.styles, 'dim_span', return_value=False):
             self.assertEqual(m.composer(fresh).kind, 'text')
 
@@ -979,6 +979,29 @@ assert screen.observe(frame, 'outgoing', 6, 1, pathlib.Path(sys.argv[2])) == 'dr
         with self.assertRaisesRegex(m.DeliveryError, 'existing-input'):
             deliver(t, stable_wait=0, max_wait=2)
         self.assertEqual(t.actions, ['Space', 'BSpace'])
+        self.assertEqual((t.pastes, t.enters), (0, 0))
+
+    def test_post_probe_human_activity_cancels_short_stability_credit(self):
+        fixture = codex_fixture_frame('claude-cto-321-fresh-live-scrubbed')
+        empty = codex_fixture_frame('claude-cto-321-saved-live-scrubbed')
+        t = Terminal()
+        t.harness = 'claude'
+        t.probed = False
+        post_probe_samples = 0
+        original_keys = t.keys
+        def frame():
+            nonlocal post_probe_samples
+            if not t.probed:
+                return fixture
+            post_probe_samples += 1
+            return screen('human', harness='claude') if post_probe_samples == 2 else empty
+        def keys(*pressed):
+            if pressed == ('Space', 'BSpace'):
+                t.probed = True
+            original_keys(*pressed)
+        t.frame, t.keys = frame, keys
+        with self.assertRaises(m.DeliveryError):
+            deliver(t, stable_wait=8, max_wait=10, backoff=True)
         self.assertEqual((t.pastes, t.enters), (0, 0))
 
     def test_codex_idle_live_captures_and_synthetic_footer(self):
