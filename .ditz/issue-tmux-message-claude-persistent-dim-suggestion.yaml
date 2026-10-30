@@ -1,0 +1,33 @@
+id: tmux-message-claude-persistent-dim-suggestion
+title: Claude dim composer suggestion survives reversible probe on CTO pane
+desc: 'On 2026-10-30, read-only %321 capture showed a dim 32-character non-Try composer
+  suggestion at cursor 2:84. M3 PR #16 recognizes it, but three live sends using the
+  branch sender deferred before paste/Enter. With --max-wait 20, reason was existing-input:
+  the suggestion survived the existing Space/BSpace probe. The default 8s stability
+  window inside 10s max wait also caused unstable-composer until PR #16''s timing
+  fix. No text was pasted into %321.
+
+
+  Product decision for dotfiles CTO: should a verified dim single-line suggestion
+  that survives the probe authorize a guarded paste directly into the composer, followed
+  by exact ownership verification before Enter? Option A: allow that narrow paste;
+  it may leave a mixed unsent input if Claude ever renders a real draft dim, but never
+  co-submits without exact evidence. Option B: keep fail-closed deferral and use the
+  inbox fallback until we can induce and test this UI state in our own scratch Claude
+  session. Recommendation: B. This blocks direct live relays while %321 remains in
+  the dim-suggestion state; it does not block the Ctrl-E cursor-navigation fix for
+  ordinary drafts. Capture and classify the exact key behavior in scratch before any
+  relaxation.'
+type: bugfix
+component: open-questions
+release:
+reporter: Ted Smith <tedks@riseup.net>
+status: unstarted
+disposition:
+creation_time: 2026-10-30T17:06:10-00:00
+references: []
+log_events:
+- time: 2026-10-30T17:06:10-00:00
+  who: Ted Smith
+  what: created
+  comment: ""
