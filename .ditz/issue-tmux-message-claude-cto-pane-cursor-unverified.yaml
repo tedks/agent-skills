@@ -40,3 +40,15 @@ log_events:
   who: Ted Smith
   what: started
   comment: ""
+- time: 2026-10-30T17:39:12-00:00
+  who: Ted Smith
+  what: commented
+  comment: 'PR #16 https://github.com/tedks/agent-skills/pull/16 is ready and mergeable
+    at d765ea61bf052fb6c904bc5360e3a8b608228353. Saved/fresh scrubbed CTO pane fixtures,
+    dim-suggestion probe tests, and a real authenticated scratch Claude Ctrl-E navigation
+    trial are recorded in the PR. Lead Codex/Claude council fixpoint CLEAN; agy unavailable
+    due quota. The CTO pane''s persistent dim suggestion still defers before paste
+    under current policy; open-questions ditz `tmux-message-claude-persistent-dim-suggestion`
+    asks whether to retain fail-closed inbox fallback (recommended) or authorize a
+    guarded direct-paste relaxation. Do not claim the issue fixed for this exact persistent
+    suggestion until that ruling and separate evidence.'
