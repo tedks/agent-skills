@@ -24,3 +24,12 @@ log_events:
   who: Ted Smith
   what: started
   comment: ""
+- time: 2026-10-30T17:36:42-00:00
+  who: Ted Smith
+  what: commented
+  comment: 'PR #17 https://github.com/tedks/agent-skills/pull/17 is ready at 04a14902d04c2d21ec77bedb28bbe5f3e58bf022,
+    stacked on M3 PR #16. Synthetic bare and wrapped composer fixtures, a red-before-fix
+    regression, and a guard-removal mutation test establish fail-closed behavior for
+    visible `[Image #N]` markers. Lead Codex/Claude council fixpoint CLEAN; agy unavailable
+    due quota. Native image rendering remains unverified. Awaiting #16 merge to rebase
+    #17 onto master and rerun exact-head gates before closing this issue.'
