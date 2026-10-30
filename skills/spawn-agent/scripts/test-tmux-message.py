@@ -1018,7 +1018,7 @@ assert screen.observe(frame, 'outgoing', 6, 1, pathlib.Path(sys.argv[2])) == 'dr
                 self.assertEqual(t.accepted_at, None)
                 self.assertEqual(t.pastes, 1)
 
-    def test_codex_unknown_footer_bold_submitted_receipt_with_indented_reply(self):
+    def test_codex_unknown_footer_ambiguous_bold_receipt_fails_closed(self):
         base = codex_fixture_frame('SYNTHETIC-codex-idle-unrecognized-footer')
         submitted = '\x1b[1m›\x1b[0m short payload\n\n  I received your message.\n'
         frame = m.Frame(base.raw, base.x, base.y, submitted + base.raw)
@@ -1026,12 +1026,29 @@ assert screen.observe(frame, 'outgoing', 6, 1, pathlib.Path(sys.argv[2])) == 'dr
         self.assertEqual(inp.kind, 'empty')
         self.assertEqual(m.records(frame, inp,
                                    archived_codex_status='  GPT-6.1-Sol | main | active')
-                         [('submitted', 'shortpayload')], 1)
+                         [('submitted', 'shortpayload')], 0)
+
+    def test_codex_unknown_footer_ambiguous_bold_receipt_times_out(self):
+        base = codex_fixture_frame('SYNTHETIC-codex-idle-unrecognized-footer')
+        t = Terminal(payload='short payload')
+        def frame():
+            raw = (base.raw.replace('\x1b[2mAsk Codex to do anything\x1b[0m',
+                                    t.draft) if t.draft else base.raw)
+            submitted = ('\x1b[1m›\x1b[0m short payload\n\n'
+                         '  I received your message.\n' if t.accepted_at is not None else '')
+            return m.Frame(raw, 2 + m.styles.cell_width(t.draft), base.y,
+                           submitted + raw)
+        t.frame = frame
+        with self.assertRaisesRegex(m.DeliveryError, 'receipt-timeout'):
+            deliver(t, max_wait=5, stable_wait=3, submit_delay=1, receipt_wait=5)
+        self.assertEqual((t.pastes, t.enters, t.accepted_at is not None),
+                         (1, 1, True))
 
     def test_codex_unknown_footer_outside_clear_cannot_turn_archive_into_receipt(self):
         base = codex_fixture_frame('SYNTHETIC-codex-idle-unrecognized-footer')
         for archived_status in ('GPT-6.1-Sol | main | intermediate',
-                                'GPT-6.2-Sol | main | intermediate'):
+                                'GPT-6.2-Sol | main | intermediate',
+                                'GPT-6.2-Sol (main)'):
             with self.subTest(archived_status=archived_status):
                 t = Terminal(payload='short payload', dropped=99)
                 def frame():
