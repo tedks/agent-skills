@@ -140,7 +140,13 @@ def composer(frame, expected_codex_text=None, expected_codex_footer=None):
             if harness == "codex" and styles.dim_span(raw[idx], first):
                 kind = "empty"
                 text = ""
-            elif harness == "claude" and first.startswith('Try '):
+            elif (harness == "claude" and
+                  (first.startswith('Try ') or
+                   (end == idx + 1 and styles.dim_span(raw[idx], first)))):
+                # Claude also paints arbitrary idle suggestions in dim text.
+                # A Home-positioned real draft may look identical, so the
+                # reversible Space/BSpace probe in ready() must verify it
+                # disappears before any paste is authorized.
                 kind = "suggestion"
         return Input(kind, text, idx, end, cursor, harness)
     return Input("unknown")

@@ -930,6 +930,43 @@ assert screen.observe(frame, 'outgoing', 6, 1, pathlib.Path(sys.argv[2])) == 'dr
                 self.assertEqual(m.composer(frame).kind, 'empty')
                 self.assertEqual(m.composer(frame).harness, 'claude')
 
+    def test_claude_cto_live_scrubbed_layouts_and_dim_suggestion(self):
+        saved = codex_fixture_frame('claude-cto-321-saved-live-scrubbed')
+        fresh = codex_fixture_frame('claude-cto-321-fresh-live-scrubbed')
+        self.assertEqual(m.composer(saved).kind, 'empty')
+        self.assertEqual(m.composer(fresh).kind, 'suggestion')
+        self.assertEqual(m.composer(fresh).cursor, (2, 0))
+        self.assertFalse(m.styles.dialog_active(fresh.raw, fresh.y))
+        # The panel was reported with this footer but absent from both
+        # captures. This appended variant is synthetic, not live evidence.
+        panel = codex_fixture_frame('SYNTHETIC-claude-cto-321-agents-panel')
+        self.assertEqual(m.composer(panel).kind, 'empty')
+
+    def test_claude_cto_dim_suggestion_probe_clears_before_paste(self):
+        fixture = codex_fixture_frame('claude-cto-321-fresh-live-scrubbed')
+        t = Terminal()
+        t.harness = 'claude'
+        t.probed = False
+        original_frame, original_keys = t.frame, t.keys
+        t.frame = lambda: original_frame() if t.probed else fixture
+        def keys(*pressed):
+            if pressed == ('Space', 'BSpace'):
+                t.probed = True
+            original_keys(*pressed)
+        t.keys = keys
+        self.assertEqual(deliver(t, stable_wait=1, max_wait=3)['status'], 'delivered')
+        self.assertEqual(t.actions, ['Space', 'BSpace', 'paste', 'Enter'])
+        self.assertEqual(t.submitted, t.payload)
+
+    def test_claude_cto_dim_text_that_survives_probe_is_preserved(self):
+        fixture = codex_fixture_frame('claude-cto-321-fresh-live-scrubbed')
+        t = Terminal()
+        t.frame = lambda: fixture
+        with self.assertRaisesRegex(m.DeliveryError, 'existing-input'):
+            deliver(t, stable_wait=0, max_wait=2)
+        self.assertEqual(t.actions, ['Space', 'BSpace'])
+        self.assertEqual((t.pastes, t.enters), (0, 0))
+
     def test_codex_idle_live_captures_and_synthetic_footer(self):
         # These two live captures were made AFTER the reported 38%-context
         # incidents. They prove real 272x54 layouts, not the incident failure.
