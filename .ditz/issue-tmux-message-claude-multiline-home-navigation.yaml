@@ -1,0 +1,22 @@
+id: tmux-message-claude-multiline-home-navigation
+title: Claude multiline draft at Home may defer after Ctrl-E navigation
+desc: 'PR #16 changes Claude cursor navigation from terminal End (ignored in Claude
+  Code 2.1.314 scratch pane) to Ctrl-E, which was observed working for a single-line
+  draft. On a multiline draft at Home, Ctrl-E may move only to the end of the current
+  line. The sender verifies the final cursor and therefore defers with cursor-navigation-unverified;
+  it does not paste. Add a controlled scratch fixture and a bounded safe navigation
+  strategy if this layout is observed. This is nonblocking for PR #16 because it fails
+  closed and improves the ordinary single-line case.'
+type: bugfix
+component: spawn-agent
+release:
+reporter: Ted Smith <tedks@riseup.net>
+status: unstarted
+disposition:
+creation_time: 2026-10-30T17:09:51-00:00
+references: []
+log_events:
+- time: 2026-10-30T17:09:51-00:00
+  who: Ted Smith
+  what: created
+  comment: ""
