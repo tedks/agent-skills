@@ -144,9 +144,9 @@ def composer(frame, expected_codex_text=None, expected_codex_footer=None):
                   (first.startswith('Try ') or
                    (end == idx + 1 and styles.dim_span(raw[idx], first)))):
                 # Claude also paints arbitrary idle suggestions in dim text.
-                # A Home-positioned real draft may look identical, so the
-                # reversible Space/BSpace probe in ready() must verify it
-                # disappears before any paste is authorized.
+                # Dim style is a heuristic: the reversible Space/BSpace
+                # probe in ready() must verify that the text disappears
+                # before any paste is authorized.
                 kind = "suggestion"
         return Input(kind, text, idx, end, cursor, harness)
     return Input("unknown")
@@ -525,7 +525,13 @@ class Sender:
                 stable_since = now
             twice = consecutive_known >= 2 and previous is not None and fp == previous
             previous = fp
-            if twice and now - stable_since >= getattr(self.o, "stable_window", self.o.stable_wait):
+            # The full stability window was already observed before probing a
+            # suggestion. The default 8-second window within a 10-second
+            # readiness budget cannot fit twice; require two fresh empty
+            # samples after the probe instead of restarting that window.
+            settled = (now - stable_since >= getattr(self.o, "stable_window", self.o.stable_wait)
+                       or (probed and inp.kind == "empty"))
+            if twice and settled:
                 if inp.kind == "empty":
                     return frame, inp
                 if (inp.kind == "text" and (not self.typed or styles.command_draft(inp.text))
@@ -582,7 +588,10 @@ class Sender:
             raise DeliveryError("input-changed-before-clear")
         if check.kind == "text" and not self.at_end(check):
             home = check
-            self.tmux.keys("End")
+            # Claude Code's input honors Ctrl-E but ignores the terminal End
+            # key; Codex's composer uses End. Verify the resulting cursor
+            # before appending in either case.
+            self.tmux.keys("C-e" if check.harness == "claude" else "End")
             while True:
                 before, check = self.sample()
                 remaining = self.readiness_deadline - self.clock()

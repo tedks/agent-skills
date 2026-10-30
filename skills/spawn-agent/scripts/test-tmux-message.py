@@ -121,7 +121,7 @@ class Terminal:
 
     def keys(self, *keys):
         self.actions.extend(keys)
-        if keys == ('End',) and self.end_moves:
+        if keys == (('C-e' if self.harness == 'claude' else 'End'),) and self.end_moves:
             self.end_requested_at = self.now
             if not self.end_paint_delay:
                 self.home = False
@@ -182,7 +182,7 @@ class DeliveryTests(unittest.TestCase):
                         t = Terminal(draft=command)
                         t.harness, t.home = harness, home
                         result = deliver(t)
-                        self.assertEqual(t.actions, (['End'] if home else []) + ['C-u', 'paste', 'Enter'])
+                        self.assertEqual(t.actions, (['C-e' if harness == 'claude' else 'End'] if home else []) + ['C-u', 'paste', 'Enter'])
                         self.assertEqual(t.submitted, t.payload)
                         self.assertEqual(result['cleared_command_draft_length'], len(command))
                         self.assertTrue(result['clear_attempted'])
@@ -613,7 +613,7 @@ class DeliveryTests(unittest.TestCase):
                 except m.DeliveryError as error:
                     self.fail('Home draft deferred: ' + error.reason)
                 self.assertEqual(result['status'], 'delivered')
-                self.assertEqual(t.actions, ['End', 'paste', 'Enter'])
+                self.assertEqual(t.actions, ['C-e' if harness == 'claude' else 'End', 'paste', 'Enter'])
                 self.assertEqual(t.submitted, 'stale TICK\nhello')
 
     def test_home_end_delayed_repaint_waits_without_more_keys(self):
@@ -626,7 +626,7 @@ class DeliveryTests(unittest.TestCase):
                 except m.DeliveryError as error:
                     self.fail('unchanged Home repaint deferred: ' + error.reason)
                 self.assertEqual(result['status'], 'delivered')
-                self.assertEqual(t.actions, ['End', 'paste', 'Enter'])
+                self.assertEqual(t.actions, ['C-e' if harness == 'claude' else 'End', 'paste', 'Enter'])
                 self.assertGreaterEqual(t.paste_at, t.end_requested_at + .5)
                 self.assertEqual(t.submitted, 'stale TICK\nhello')
 
@@ -640,7 +640,7 @@ class DeliveryTests(unittest.TestCase):
                 except m.DeliveryError as error:
                     self.fail('unknown repaint deferred before budget: ' + error.reason)
                 self.assertEqual(result['status'], 'delivered')
-                self.assertEqual(t.actions, ['End', 'paste', 'Enter'])
+                self.assertEqual(t.actions, ['C-e' if harness == 'claude' else 'End', 'paste', 'Enter'])
                 self.assertEqual(t.submitted, 'stale TICK\nhello')
 
     def test_home_end_persistent_unknown_times_out_without_input(self):
@@ -692,12 +692,12 @@ class DeliveryTests(unittest.TestCase):
                     original = t.keys
                     def keys(*keys):
                         original(*keys)
-                        if change and keys == ('End',):
+                        if change and keys == (('C-e' if harness == 'claude' else 'End'),):
                             t.draft = 'human changed text'
                     t.keys = keys
                     with self.assertRaisesRegex(m.DeliveryError, 'cursor-navigation-unverified'):
                         deliver(t)
-                    self.assertEqual(t.actions, ['End'])
+                    self.assertEqual(t.actions, ['C-e' if harness == 'claude' else 'End'])
                     self.assertEqual((t.pastes, t.enters), (0, 0))
 
     def test_stable_draft_requires_cursor_at_end(self):
@@ -941,6 +941,19 @@ assert screen.observe(frame, 'outgoing', 6, 1, pathlib.Path(sys.argv[2])) == 'dr
         # captures. This appended variant is synthetic, not live evidence.
         panel = codex_fixture_frame('SYNTHETIC-claude-cto-321-agents-panel')
         self.assertEqual(m.composer(panel).kind, 'empty')
+        self.assertEqual((len(panel.raw.splitlines()), panel.y), (88, 82))
+
+    def test_claude_dim_suggestion_requires_start_single_row_and_full_style(self):
+        fresh = codex_fixture_frame('claude-cto-321-fresh-live-scrubbed')
+        self.assertEqual(m.composer(m.Frame(fresh.raw, 3, fresh.y)).kind, 'text')
+        rows = fresh.raw.splitlines()
+        rows.insert(85, '  continuation')
+        self.assertEqual(m.composer(m.Frame('\n'.join(rows) + '\n', 2, 84)).kind, 'text')
+        rows = fresh.raw.splitlines()
+        rows[84] = '❯\u00a0typed\x1b[2m completion\x1b[0m'
+        self.assertEqual(m.composer(m.Frame('\n'.join(rows) + '\n', 2, 84)).kind, 'text')
+        with patch.object(m.styles, 'dim_span', return_value=False):
+            self.assertEqual(m.composer(fresh).kind, 'text')
 
     def test_claude_cto_dim_suggestion_probe_clears_before_paste(self):
         fixture = codex_fixture_frame('claude-cto-321-fresh-live-scrubbed')
@@ -948,13 +961,14 @@ assert screen.observe(frame, 'outgoing', 6, 1, pathlib.Path(sys.argv[2])) == 'dr
         t.harness = 'claude'
         t.probed = False
         original_frame, original_keys = t.frame, t.keys
-        t.frame = lambda: original_frame() if t.probed else fixture
+        empty = codex_fixture_frame('claude-cto-321-saved-live-scrubbed')
+        t.frame = lambda: (original_frame() if t.pastes else empty) if t.probed else fixture
         def keys(*pressed):
             if pressed == ('Space', 'BSpace'):
                 t.probed = True
             original_keys(*pressed)
         t.keys = keys
-        self.assertEqual(deliver(t, stable_wait=1, max_wait=3)['status'], 'delivered')
+        self.assertEqual(deliver(t, stable_wait=8, max_wait=10)['status'], 'delivered')
         self.assertEqual(t.actions, ['Space', 'BSpace', 'paste', 'Enter'])
         self.assertEqual(t.submitted, t.payload)
 
