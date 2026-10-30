@@ -1,0 +1,22 @@
+id: tmux-message-claude-probe-repaint-race
+title: Measure Claude suggestion probe repaint races before relaxing fail-closed behavior
+desc: 'PR #16 cancels its short post-probe stability credit on any nonempty or unreadable
+  sample. A transient unknown capture or a frame between Space and BSpace can therefore
+  cause a safe deferral even if the suggestion ultimately clears. Council classified
+  this as a nonblocking nit because it fails closed. If real evidence shows frequent
+  deferrals, add controlled scratch captures and consider a narrow repaint allowance
+  while retaining two fresh known-empty samples and protection against human text
+  appearing after the probe. Do not relax on assumption alone.'
+type: bugfix
+component: spawn-agent
+release:
+reporter: Ted Smith <tedks@riseup.net>
+status: unstarted
+disposition:
+creation_time: 2026-10-30T17:11:32-00:00
+references: []
+log_events:
+- time: 2026-10-30T17:11:32-00:00
+  who: Ted Smith
+  what: created
+  comment: ""
