@@ -1,0 +1,38 @@
+id: tmux-message-claude-cto-pane-cursor-unverified
+title: 'tmux-message: sends to the dotfiles CTO pane (%321, Claude Fable, 1M context)
+  defer with cursor-navigation-unverified; six lanes could not report on 2026-10-29/30'
+desc: "Evidence: on 2026-10-29 and 10-30 every guarded send from six Codex lanes (wg-rotate,
+  housekeeping, webcam, retire-wording, usage-pull, tmux-message-modal) to pane %321
+  deferred before paste with reason cursor-navigation-unverified; the lanes' ACKs
+  earlier the same day had delivered. Their DONE, NEEDS-RULING and RETIRE-READY markers
+  therefore never arrived and the CTO found them by reading screens. Pending payloads
+  are under /tmp/tmux-message-*/message from those sessions.\n\nPane facts at 2026-10-30
+  ~16:40 ET (read-only capture saved at ~/.local/state/org-briefs/20261030/cto-pane-321-footer-2026-10-30.ansi,
+  transcript rows to be scrubbed when turned into a fixture): pane 88 rows, cursor
+  2:84; composer frame is the standard two rules with \"\u276F\" plus NBSP; status
+  rows below it are \"tedks@framework0:~/Projects/dotfiles/master master Fable 5.1(Remaining:
+  48%)\" and \"\u23F5\u23F5 bypass permissions on (shift+tab to cycle) \xB7 \u2190
+  1 agent \xB7 1 feedback draft\"; above the composer a \"\u23BF  Tip: Run /ultrareview
+  ...\" row and blank rows. Earlier the same day the pane also showed an agents panel
+  under the status line (\"\u25CF main\" and \"\u25EF <teammate>  <description...>\"
+  rows) while a subagent ran. Claude Code 2.1.302, Fable 5.1 with a 1M context, \"Remaining:
+  N%\" status form.\n\nAsk: make a Claude pane in this shape ready for paste (two-look
+  stability, paste, Enter, NEW receipt) and add fixtures for (a) the Fable 1M status
+  line, (b) the \"\u2190 N agent(s) \xB7 N feedback draft(s)\" status row, (c) the
+  agents panel rows below the status line, (d) the Tip row above the composer. Find
+  why the cursor check fails here (cursor_y relative to the frame with extra rows
+  below? the 1M status wording? the agents panel shifting rows?). This blocks CTO
+  communication and is more urgent than image placeholders."
+type: bugfix
+component: spawn-agent
+release:
+reporter: Ted Smith <tedks@riseup.net>
+status: unstarted
+disposition:
+creation_time: 2026-10-30T16:41:22-00:00
+references: []
+log_events:
+- time: 2026-10-30T16:41:22-00:00
+  who: Ted Smith
+  what: created
+  comment: ""
