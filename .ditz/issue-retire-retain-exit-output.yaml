@@ -35,3 +35,17 @@ log_events:
   who: Ted Smith
   what: created
   comment: ""
+- time: 2026-10-30T00:39:59-00:00
+  who: Ted Smith
+  what: commented
+  comment: Reproduced in another explicitly authorized completed-lane retirement batch.
+    Two dedicated Codex panes auto-closed after their private handoffs were published
+    and guarded exit input was sent; original actors ended, but the required fresh
+    native resume notices were lost. Their receipts remain pending-exit. Enabling
+    remain-on-exit for the still-live, exact owned windows allowed subsequent sessions
+    to retain both independent exit receipts. This should be a pre-exit/pre-offer
+    guard in shared tooling; starting observers and only then enabling retention is
+    too late. No notice synthesis, exit replay or target-agent kill was used. Existing
+    private event records retain attribution/evidence; no product code or review gate
+    changed. Repair remains queued; this comment does not authorize weakening verification
+    or globally changing tmux settings.
