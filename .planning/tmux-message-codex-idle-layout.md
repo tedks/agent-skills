@@ -22,7 +22,8 @@ An idle Codex input should accept guarded `tmux-message` delivery even if the st
 - [x] (2026-10-29) The narrowed guard reopened false delivery when an outside clear made the live composer empty after a dropped Enter. A red test proved this; the guard now distinguishes the structured status row from an indented prose reply regardless of live input kind. A second red subtest changed the archived model name to prove that status comparison cannot rely on a fixed prefix.
 - [x] (2026-10-30) CTO R3 ruled fail closed: the ambiguous bold/blank/indented Codex row is not a receipt. Updated the fallback archive guard to exclude it regardless of footer wording. New unit and end-to-end tests failed before the change and now verify `receipt-timeout`, including a genuine but ambiguous bold submission. The submitted-row capture follow-up is already its own agent-skills issue.
 - [ ] PR #13 remains unmerged. The `MODAL-NEEDS-RULING` relay to `%321` deferred twice before paste; R3 was received here. MODAL-M3 has not started.
-- [ ] Apply the ruling, review the fix delta to a clean council round, run final gates on the exact SHA, merge normally, close/sync issue, and report `MODAL-DONE` to `%321`.
+- [x] (2026-10-30) Lead-tier Codex native and Claude Opus convergence seats returned CLEAN on `0c105da..67e6c69`. Google agy was unavailable at quota. The focused sender suite, config checks, alias gate, and private live tmux gate pass at `67e6c69`.
+- [ ] Run the legacy sender gate to completion, post the council/gate record on PR #13, report `MODAL-DONE` to `%321` or inbox fallback, and wait for CTO merge before starting MODAL-M3.
 
 ## Surprises & Discoveries
 
