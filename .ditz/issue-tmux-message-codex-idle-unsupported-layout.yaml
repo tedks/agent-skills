@@ -28,8 +28,8 @@ type: bugfix
 component: spawn-agent
 release:
 reporter: Ted Smith <tedks@riseup.net>
-status: in_progress
-disposition:
+status: closed
+disposition: fixed
 creation_time: 2026-10-18T07:32:49-00:00
 references: []
 log_events:
@@ -69,3 +69,8 @@ log_events:
     recommending fail closed. Relay to %321 deferred twice before paste, so the direct
     ruling request is pending. No M3 implementation started. Follow-ups tmux-message-codex-changed-footer-wrapped-paste
     and tmux-message-codex-bold-receipt-structure are filed.'
+- time: 2026-10-30T16:42:35-00:00
+  who: Ted Smith
+  what: 'closed: fixed'
+  comment: 'PR #13 merged at d2117cd16e2b1fab23a0c033aa064054a5138f58; R3 fail-closed
+    ruling implemented, final gates and council clean'
