@@ -98,6 +98,23 @@ class ToolsTests(unittest.IsolatedAsyncioTestCase):
             run.assert_called_once_with(
                 ['/bin/token-usage', 'posture', '--no-scan', '--json'], capture_output=True,
                 text=True, encoding='utf-8', errors='strict', timeout=5, check=False)
+        expired = {**posture,
+                   'scores': {'openai': None, 'anthropic': 0.8},
+                   'used_percent': {'openai': None, 'anthropic': 40},
+                   'staleness': {**posture['staleness'], 'stale': True,
+                                 'expired': {'openai': 7200}}}
+        with patch('shutil.which', return_value='/bin/token-usage'), \
+                patch.object(server.subprocess, 'run', return_value=subprocess.CompletedProcess(
+                    args=['token-usage'], returncode=0, stdout=json.dumps(expired), stderr='')):
+            self.assertEqual(server._read_usage_posture(), expired)
+        expired_five_hour = {**posture,
+                             'scores': {'openai': 1.2, 'anthropic': None},
+                             'staleness': {**posture['staleness'], 'stale': True,
+                                           'expired': {'anthropic.five_hour': 3600}}}
+        with patch('shutil.which', return_value='/bin/token-usage'), \
+                patch.object(server.subprocess, 'run', return_value=subprocess.CompletedProcess(
+                    args=['token-usage'], returncode=0, stdout=json.dumps(expired_five_hour), stderr='')):
+            self.assertEqual(server._read_usage_posture(), expired_five_hour)
         for stdout in ('not json', '[]', '{"reason":"missing provider"}',
                        '{"provider":"Mars"}', '{"provider":"openai"}'):
             with patch('shutil.which', return_value='/bin/token-usage'), \
@@ -124,6 +141,10 @@ class ToolsTests(unittest.IsolatedAsyncioTestCase):
             {**posture, 'scores': {'openai': 'bad', 'anthropic': 0.8}},
             {**posture, 'scores': {'openai': 10 ** 400, 'anthropic': 0.8}},
             {**posture, 'scores': {'openai': float('nan'), 'anthropic': 0.8}},
+            {**posture, 'scores': {'openai': None, 'anthropic': 0.8}},
+            {**posture, 'used_percent': {'openai': None, 'anthropic': 40}},
+            {**posture, 'staleness': {**posture['staleness'], 'expired': {'unknown': 10}}},
+            {**posture, 'staleness': {**posture['staleness'], 'expired': {'openai': -1}}},
             {**posture, 'used_percent': {'openai': float('inf'), 'anthropic': 40}},
             {**posture, 'staleness': None},
             {**posture, 'staleness': {**posture['staleness'], 'path': '/private'}},
