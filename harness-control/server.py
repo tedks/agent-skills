@@ -417,7 +417,11 @@ def _read_usage_posture() -> dict:
             or any(name not in ('openai', 'anthropic.seven_day', 'anthropic.five_hour')
                    or isinstance(age, bool) or not isinstance(age, int) or age < 0
                    for name, age in expired.items())
-            or (expired and not staleness['stale'])):
+            or (expired and not staleness['stale'])
+            or ('openai' in expired and (not posture['stale']['openai'] or posture['gated']['openai']))
+            or ('anthropic.seven_day' in expired and not posture['stale']['anthropic'])
+            or ('anthropic.seven_day' in expired and 'anthropic.five_hour' in expired
+                and posture['gated']['anthropic'])):
         return {'state': 'unavailable', 'reason': 'token_usage_posture_malformed'}
     null_scores = {'openai': 'openai' in expired,
                    'anthropic': 'anthropic.seven_day' in expired or 'anthropic.five_hour' in expired}
