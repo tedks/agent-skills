@@ -1,0 +1,25 @@
+id: tmux-message-claude-clipped-image-placeholder
+title: Detect opaque Claude image placeholder when composer content is clipped outside
+  visible pane
+desc: 'M4 PR #17 guards a visible `[Image #N]` marker inside the measured Claude composer
+  and defers before input. The fixture is synthetic. Lead review noted that a long
+  draft may scroll the marker outside the visible composer; a screen-only detector
+  cannot see that image and could co-submit. Investigate real Claude image rendering
+  and clipped/scrolling composer behavior in an owned scratch session. Add a real
+  scrubbed fixture if induced, and determine whether clipped composer evidence can
+  be detected and safely deferred without breaking normal long drafts. Keep the existing
+  visible-marker guard and fail-closed policy. This is a follow-up evidence gap, not
+  a claim that a clipped case was observed in production.'
+type: bugfix
+component: spawn-agent
+release:
+reporter: Ted Smith <tedks@riseup.net>
+status: unstarted
+disposition:
+creation_time: 2026-11-02T16:54:17-00:00
+references: []
+log_events:
+- time: 2026-11-02T16:54:17-00:00
+  who: Ted Smith
+  what: created
+  comment: ""
