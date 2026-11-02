@@ -33,3 +33,12 @@ log_events:
     visible `[Image #N]` markers. Lead Codex/Claude council fixpoint CLEAN; agy unavailable
     due quota. Native image rendering remains unverified. Awaiting #16 merge to rebase
     #17 onto master and rerun exact-head gates before closing this issue.'
+- time: 2026-11-02T16:56:00-00:00
+  who: Ted Smith
+  what: commented
+  comment: 'M3 PR #16 merged normally as 387f86f9ea181aae1ca9d82a3d27a39f20133777.
+    M4 PR #17 is rebased onto master, ready and mergeable at 7a4cee9bb39a575fd4c87dfd651ecbbb2797cccf.
+    Final-head sender Python 144, alias shell, private live tmux, config 21, py_compile
+    and diff gates passed; Codex/Claude Lead council fixpoint CLEAN. agy seat unavailable
+    due quota. Final record: https://github.com/tedks/agent-skills/pull/17#issuecomment-6583002492.
+    Awaiting CTO merge before closing this issue.'
